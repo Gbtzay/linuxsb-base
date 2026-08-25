@@ -141,6 +141,91 @@ test('续读：只有 topic-post-list 时也能跳转（不依赖 ul.post-list�
   assert.deepEqual(unread, ['18'])
 })
 
+test('续读：NEW 挂在 UID 或创作者后面，不占右上角', async () => {
+  const html =
+    '<!DOCTYPE html><html><body><ul class="post-list">' +
+    '<li class="post-item post-entry" id="post-10" data-floor="10">' +
+    '<div class="post-head"><a class="post-title post-author" href="/user/2">无章</a>' +
+    '<span class="post-user-group user-uid-badge" title="用户 UID">UID 2</span></div>' +
+    '<span data-performance-time="1"></span><div class="post-content">x</div></li>' +
+    '<li class="post-item post-entry" id="post-11" data-floor="11">' +
+    '<div class="post-head"><a class="post-title post-author" href="/user/3">有章</a>' +
+    '<span class="post-user-group user-uid-badge" title="用户 UID">UID 3</span>' +
+    '<span class="post-user-group">创作者</span></div>' +
+    '<span data-performance-time="1"></span><div class="post-content">x</div></li>' +
+    '</ul><form class="ajax-reply-form"><input name="_csrf" value="c"></form>' +
+    '<a href="/user/1">我的主页</a></body></html>'
+  const dom = new JSDOM(html, { url: 'https://linux.sb/topic/1', runScripts: 'outside-only' })
+  const w = dom.window
+  w.unsafeWindow = w
+  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
+  w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
+  w.localStorage.setItem(
+    'lsb_base:resume-reading:positions',
+    JSON.stringify({ 1: { f: 3, p: 1, ts: Date.now(), title: 'x' } }),
+  )
+  w.eval(baseCode)
+  w.eval(PLUG('resume-reading.user.js'))
+  await new Promise((r) => setTimeout(r, 40))
+
+  const noCreator = w.document.querySelector('[data-floor="10"]')
+  const withCreator = w.document.querySelector('[data-floor="11"]')
+  const new10 = noCreator.querySelector('.lsb-new')
+  const new11 = withCreator.querySelector('.lsb-new')
+  assert.ok(new10, '无创作者的楼应有 NEW 节点')
+  assert.ok(new11, '有创作者的楼应有 NEW 节点')
+  assert.equal(new10.textContent, 'NEW')
+  assert.match(new10.previousElementSibling?.textContent || '', /UID 2/, '无创作者时 NEW 紧跟 UID')
+  assert.match(new11.previousElementSibling?.textContent || '', /创作者/, '有创作者时 NEW 紧跟创作者标识')
+  const css = w.document.getElementById('lsb-style-resume-reading')?.textContent || ''
+  assert.ok(!/lsb-unread::after/.test(css), '不再用右上角伪元素，避免挡住只看 TA')
+})
+
+test('续读：已读楼层的 NEW 约 5 秒后消失，未读入视野的还在', async () => {
+  const html =
+    '<!DOCTYPE html><html><body><ul class="post-list">' +
+    [10, 20]
+      .map(
+        (f) =>
+          `<li class="post-item post-entry" id="post-${f}" data-floor="${f}">` +
+          `<div class="post-head"><a class="post-title post-author" href="/user/${f}">U${f}</a>` +
+          `<span class="post-user-group user-uid-badge">UID ${f}</span></div>` +
+          '<span data-performance-time="1"></span><div class="post-content">x</div></li>',
+      )
+      .join('') +
+    '</ul><form class="ajax-reply-form"><input name="_csrf" value="c"></form>' +
+    '<a href="/user/1">我的主页</a></body></html>'
+  const dom = new JSDOM(html, { url: 'https://linux.sb/topic/1', runScripts: 'outside-only' })
+  const w = dom.window
+  w.unsafeWindow = w
+  w.innerHeight = 800
+  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
+  w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
+  w.localStorage.setItem(
+    'lsb_base:resume-reading:positions',
+    JSON.stringify({ 1: { f: 3, p: 1, ts: Date.now(), title: 'x' } }),
+  )
+  w.eval(baseCode)
+  w.eval(PLUG('resume-reading.user.js'))
+  await new Promise((r) => setTimeout(r, 40))
+  assert.ok(w.document.querySelector('[data-floor="10"] .lsb-new'))
+  assert.ok(w.document.querySelector('[data-floor="20"] .lsb-new'))
+
+  w.document.querySelector('[data-floor="10"]').getBoundingClientRect = () => ({
+    top: 20, bottom: 60, height: 40, width: 200, left: 0, right: 200, x: 0, y: 20,
+  })
+  w.document.querySelector('[data-floor="20"]').getBoundingClientRect = () => ({
+    top: 900, bottom: 940, height: 40, width: 200, left: 0, right: 200, x: 0, y: 900,
+  })
+  w.dispatchEvent(new w.Event('scroll'))
+  await new Promise((r) => setTimeout(r, 700))
+  assert.ok(w.document.querySelector('[data-floor="10"] .lsb-new'), '刚读到时 NEW 还在，等 5 秒')
+  await new Promise((r) => setTimeout(r, 5100))
+  assert.equal(w.document.querySelector('[data-floor="10"] .lsb-new'), null, '已读约 5 秒后 NEW 消失')
+  assert.equal(w.document.querySelector('[data-floor="10"]').classList.contains('lsb-unread'), false)
+  assert.ok(w.document.querySelector('[data-floor="20"] .lsb-new'), '还没进入视野的楼 NEW 仍在')
+})
+
 test('续读：软翻页后保存的页码跟随 api.page', async () => {
   const { w, tick } = makeSite()
   w.localStorage.setItem('lsb_base:__core:urlPoll', JSON.stringify(20))

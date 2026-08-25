@@ -11,7 +11,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const SUITE_VERSION = '1.0.44'
+const SUITE_VERSION = '1.0.45'
 
 import { ORDER, SUITE_EXCLUDE } from './suite/order.js'
 

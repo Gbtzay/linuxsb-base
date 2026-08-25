@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·断点续读
 // @namespace    https://linux.sb/
-// @version      1.0.1
+// @version      1.0.2
 // @description  记住每个帖子读到的楼层；再次进入时提示「继续阅读」，并把没读过的楼层标为 NEW。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'resume-reading',
     name: '断点续读',
-    version: '1.0.1',
+    version: '1.0.2',
     description: '记住每帖读到哪层，回来一键续读，未读楼层标 NEW',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -63,6 +63,9 @@
     /* ── 阅读位置追踪 ── */
     let curFloor = 0
     let dirty = false
+    const hideTimers = new Set()
+    const hiding = new WeakSet()
+    const NEW_HIDE_MS = 5000
     const flush = () => {
       if (!dirty) return
       dirty = false
@@ -73,8 +76,9 @@
     function lastVisibleFloor() {
       let max = 0
       for (const li of document.querySelectorAll('li.post-entry')) {
-        const top = li.getBoundingClientRect?.().top ?? 0
-        if (top <= window.innerHeight * 0.72) {
+        const rect = li.getBoundingClientRect?.() || { top: 0, height: 0, width: 0 }
+        if (!rect.height && !rect.width) continue
+        if (rect.top <= window.innerHeight * 0.72) {
           const f = Number(li.getAttribute('data-floor') || 0)
           if (f > max) max = f
         } else {
@@ -90,11 +94,92 @@
         dirty = true
         flushLater()
       }
+      if (valid && f > 0) scheduleHideUpTo(f)
     }, 600)
 
     const onVisibility = () => {
       if (document.hidden) flush()
     }
+
+    /* ── 未读标记 ── */
+    const saved = load()
+    const valid = saved && saved.f >= (cfg.minAsk || 3)
+
+    api.ui.style(`
+      .lsb-new{display:inline-block;margin-left:6px;font-size:10px;font-weight:700;color:#fff;
+        background:var(--brand,#5eaaa0);border-radius:4px;padding:1px 5px;vertical-align:middle;line-height:1.3}
+      li.post-entry.lsb-flash{background:var(--warning-soft,#fff3d6)!important;transition:background 1.4s ease}
+      .lsb-resume-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:99997;
+        display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:999px;
+        background:var(--panel,#fff);border:1px solid var(--line,#ddd);color:var(--text,#222);
+        font-size:13px;box-shadow:0 6px 20px var(--shadow-medium,rgba(0,0,0,.2))}
+      .lsb-resume-bar .lsb-btn{white-space:nowrap}
+    `)
+
+    function newAnchor(li) {
+      const groups = [...li.querySelectorAll('.post-user-group')]
+      const creator = groups.find((g) => {
+        const t = (g.textContent || '').trim()
+        return t && /创作者/.test(t) && !/^UID\b/i.test(t)
+      })
+      if (creator) return creator
+      const uid = groups.find(
+        (g) => g.classList.contains('user-uid-badge') || /^UID\b/i.test((g.textContent || '').trim()),
+      )
+      if (uid) return uid
+      return li.querySelector('a.post-title.post-author')
+    }
+
+    function setUnread(li, unread) {
+      li.classList.toggle('lsb-unread', unread)
+      let badge = li.querySelector('.lsb-new')
+      if (!unread) {
+        badge?.remove()
+        return
+      }
+      if (!badge) {
+        badge = document.createElement('span')
+        badge.className = 'lsb-new'
+        badge.textContent = 'NEW'
+      }
+      const anchor = newAnchor(li)
+      if (anchor) {
+        if (badge.previousElementSibling !== anchor) anchor.after(badge)
+      } else if (!li.contains(badge)) {
+        li.appendChild(badge)
+      }
+    }
+
+    function scheduleHideUpTo(readFloor) {
+      for (const li of document.querySelectorAll('li.post-entry.lsb-unread')) {
+        const f = Number(li.getAttribute('data-floor') || 0)
+        if (!(f > 0) || f > readFloor || hiding.has(li)) continue
+        hiding.add(li)
+        const t = setTimeout(() => {
+          hideTimers.delete(t)
+          setUnread(li, false)
+        }, NEW_HIDE_MS)
+        hideTimers.add(t)
+      }
+    }
+
+    function markUnread(fromFloor) {
+      let n = 0
+      for (const li of document.querySelectorAll(api.sel.topicPosts)) {
+        const f = Number(li.getAttribute('data-floor') || 0)
+        const unread = f > fromFloor
+        setUnread(li, unread)
+        if (unread) n++
+      }
+      return n
+    }
+    // 之后 AJAX 新增的楼层也按已读线标记
+    api.dom.each('li.post-entry', (li) => {
+      if (!valid) return
+      const f = Number(li.getAttribute('data-floor') || 0)
+      setUnread(li, f > saved.f)
+    })
+    let unreadCount = valid ? markUnread(saved.f) : 0
     window.addEventListener('scroll', onScroll, { passive: true })
     window.addEventListener('pagehide', flush)
     document.addEventListener('visibilitychange', onVisibility)
@@ -104,43 +189,11 @@
       window.removeEventListener('scroll', onScroll)
       window.removeEventListener('pagehide', flush)
       document.removeEventListener('visibilitychange', onVisibility)
+      for (const t of hideTimers) clearTimeout(t)
+      hideTimers.clear()
       flush()
     })
-
-    /* ── 未读标记 ── */
-    const saved = load()
-    const valid = saved && saved.f >= (cfg.minAsk || 3)
-
-    api.ui.style(`
-      ul.post-list li.post-entry{position:relative}
-      li.post-entry.lsb-unread::after{content:'NEW';position:absolute;top:10px;right:10px;
-        font-size:10px;font-weight:700;color:#fff;background:var(--brand,#5eaaa0);
-        border-radius:4px;padding:1px 5px;opacity:.85}
-      li.post-entry.lsb-flash{background:var(--warning-soft,#fff3d6)!important;transition:background 1.4s ease}
-      .lsb-resume-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:99997;
-        display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:999px;
-        background:var(--panel,#fff);border:1px solid var(--line,#ddd);color:var(--text,#222);
-        font-size:13px;box-shadow:0 6px 20px var(--shadow-medium,rgba(0,0,0,.2))}
-      .lsb-resume-bar .lsb-btn{white-space:nowrap}
-    `)
-
-    function markUnread(fromFloor) {
-      let n = 0
-      for (const li of document.querySelectorAll(api.sel.topicPosts)) {
-        const f = Number(li.getAttribute('data-floor') || 0)
-        const unread = f > fromFloor
-        li.classList.toggle('lsb-unread', unread)
-        if (unread) n++
-      }
-      return n
-    }
-    // 之后 AJAX 新增的楼层也按已读线标记
-    api.dom.each('li.post-entry', (li) => {
-      if (!valid) return
-      const f = Number(li.getAttribute('data-floor') || 0)
-      li.classList.toggle('lsb-unread', f > saved.f)
-    })
-    let unreadCount = valid ? markUnread(saved.f) : 0
+    onScroll()
 
     /* ── 续读提示条 ── */
     function jump(floor) {
