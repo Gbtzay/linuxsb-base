@@ -2,8 +2,8 @@
 // @name         LINUX.SB 氧（Beta）
 // @name:en      LINUX.SB Oxygen (Beta)
 // @namespace    https://linux.sb/
-// @version      1.0.45
-// @description  【Beta】linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 16 个模块。必须先安装「LINUX.SB 氢（Beta）」。
+// @version      1.0.48
+// @description  【Beta】linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 17 个模块。必须先安装「LINUX.SB 氢（Beta）」。
 // @description:en  [Beta] Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen (Beta).
 // @author       xB70sR71
 // @license      MIT
@@ -17,8 +17,9 @@
 // ── 包含模块 ──
 // · LSB·楼层统计（示例插件：服务提供方） v1.0.1
 // · LSB·高频发言标记（示例插件：服务消费方） v1.0.1
-// · LSB·断点续读 v1.0.2
+// · LSB·断点续读 v1.0.3
 // · LSB·已读置灰 v1.0.3
+// · LSB·首页回位 v1.0.0
 // · LSB·用户画像悬浮卡 v1.0.1
 // · LSB·主楼预览 v1.1.3
 // · LSB·未读哨兵 v1.0.2
@@ -29,7 +30,7 @@
 // · LSB·配置迁移 v1.0.0
 // · LSB·个人存档 v1.0.0
 // · LSB·年度报告 v1.0.1
-// · LSB·界面精修 v1.1.28
+// · LSB·界面精修 v1.1.29
 // · LSB·实时流 v1.2.5
 //
 
@@ -282,14 +283,14 @@
 
 
 ;
-/* ══════════════ LSB·断点续读 v1.0.2 (resume-reading) ══════════════ */
+/* ══════════════ LSB·断点续读 v1.0.3 (resume-reading) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'resume-reading',
     name: '断点续读',
-    version: '1.0.2',
+    version: '1.0.3',
     description: '记住每帖读到哪层，回来一键续读，未读楼层标 NEW',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -389,13 +390,20 @@
       .lsb-resume-bar .lsb-btn{white-space:nowrap}
     `)
 
+    function findGroup(groups, re) {
+      return groups.find((g) => {
+        const t = (g.textContent || '').trim()
+        return t && re.test(t) && !/^UID\b/i.test(t)
+      })
+    }
+
     function newAnchor(li) {
       const groups = [...li.querySelectorAll('.post-user-group')]
-      const creator = groups.find((g) => {
-        const t = (g.textContent || '').trim()
-        return t && /创作者/.test(t) && !/^UID\b/i.test(t)
-      })
-      if (creator) return creator
+      const role =
+        findGroup(groups, /AI机器人/) ||
+        findGroup(groups, /社区主理人/) ||
+        findGroup(groups, /创作者/)
+      if (role) return role
       const uid = groups.find(
         (g) => g.classList.contains('user-uid-badge') || /^UID\b/i.test((g.textContent || '').trim()),
       )
@@ -768,6 +776,221 @@
   const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
   if (w.LSB && w.LSB.register) w.LSB.register(manifest, setup)
   else ;(w.LSB_PLUGINS = w.LSB_PLUGINS || []).push({ manifest, setup })
+})()
+
+
+;
+/* ══════════════ LSB·首页回位 v1.0.0 (home-return) ══════════════ */
+(function () {
+  'use strict'
+
+  const KEY = 'lsb_base:home-return:target'
+  const MAX_PAGES = 20
+
+  const manifest = {
+    id: 'home-return',
+    name: '首页回位',
+    version: '1.0.0',
+    description: '回首页时滚到上次点进的那条帖',
+    author: 'you',
+    requires: { base: '^0.1.0' },
+    permissions: ['read', 'storage', 'ui', 'events'],
+    config: {
+      enabled: { type: 'switch', label: '回首页时回到上次点进的帖', default: true },
+    },
+  }
+
+  function setup(api) {
+    let cfg = api.config()
+    api.on('config:changed:home-return', () => {
+      cfg = api.config()
+    })
+
+    let scheduled = 0
+    let inflight = null
+    const watches = new Set()
+
+    function topicIdFrom(href) {
+      const m = String(href || '').match(/\/topic\/(\d+)/)
+      return m ? Number(m[1]) : 0
+    }
+
+    function onHome() {
+      try {
+        return api.parse.detectPage(location).type === 'home'
+      } catch {
+        return api.page.type === 'home'
+      }
+    }
+
+    function read() {
+      try {
+        const rec = JSON.parse(sessionStorage.getItem(KEY) || 'null')
+        if (!rec || !Number.isFinite(rec.tid) || rec.tid <= 0) return null
+        return rec
+      } catch {
+        return null
+      }
+    }
+
+    function write(tid, offset) {
+      try {
+        sessionStorage.setItem(KEY, JSON.stringify({ tid, offset, ts: Date.now() }))
+      } catch {
+        /* 隐私模式可能写不了 */
+      }
+    }
+
+    function findItem(tid) {
+      for (const li of document.querySelectorAll(api.sel.listItems)) {
+        if (topicIdFrom(li.querySelector('a.post-title')?.getAttribute('href')) === tid) return li
+      }
+      return null
+    }
+
+    function applyScroll(li, offset) {
+      const top = li.getBoundingClientRect().top + (window.scrollY || window.pageYOffset || 0)
+      const y = Math.max(0, top - (Number.isFinite(offset) ? offset : 0))
+      try {
+        window.scrollTo(0, y)
+      } catch {
+        /* jsdom 视口 */
+      }
+    }
+
+    function pagePath(p) {
+      const url = new URL(location.href)
+      url.searchParams.set('p', String(p))
+      return `${url.pathname}${url.search}`
+    }
+
+    async function loadNext(page) {
+      const doc = await api.net.doc(pagePath(page))
+      const ul = document.querySelector(api.sel.listUl)
+      if (!ul) return 0
+      const seen = new Set(
+        [...ul.querySelectorAll(api.sel.listItems)].map((li) =>
+          topicIdFrom(li.querySelector('a.post-title')?.getAttribute('href')),
+        ),
+      )
+      let added = 0
+      for (const li of doc.querySelectorAll(api.sel.listItems)) {
+        const id = topicIdFrom(li.querySelector('a.post-title')?.getAttribute('href'))
+        if (!id || seen.has(id)) continue
+        seen.add(id)
+        ul.appendChild(document.importNode(li, true))
+        added += 1
+      }
+      return added
+    }
+
+    async function restore() {
+      if (!cfg.enabled) return false
+      if (!onHome()) return false
+      const rec = read()
+      if (!rec) return false
+      let el = findItem(rec.tid)
+      if (!el) {
+        let page = Number(api.page.page) || 1
+        for (let i = 0; i < MAX_PAGES; i++) {
+          page += 1
+          let added = 0
+          try {
+            added = await loadNext(page)
+          } catch {
+            break
+          }
+          el = findItem(rec.tid)
+          if (el) break
+          if (!added) break
+        }
+      }
+      if (!el) return false
+      applyScroll(el, rec.offset)
+      return true
+    }
+
+    function scheduleRestore() {
+      if (!cfg.enabled || !onHome()) return
+      window.clearTimeout(scheduled)
+      scheduled = window.setTimeout(() => {
+        scheduled = 0
+        if (inflight) return
+        inflight = restore().finally(() => {
+          inflight = null
+        })
+      }, 50)
+    }
+
+    function watchHomeArrival() {
+      const from = location.href
+      let n = 0
+      const iv = window.setInterval(() => {
+        n += 1
+        if (onHome() && location.href !== from) {
+          window.clearInterval(iv)
+          watches.delete(iv)
+          scheduleRestore()
+        } else if (n >= 40) {
+          window.clearInterval(iv)
+          watches.delete(iv)
+        }
+      }, 20)
+      watches.add(iv)
+    }
+
+    function onClick(e) {
+      if (e.button !== 0) return
+      const a = e.target?.closest?.('a[href]')
+      if (!a) return
+      if (a.target && a.target !== '_self') return
+      try {
+        const dest = api.parse.detectPage(new URL(a.href, location.href))
+        if (cfg.enabled && dest.type === 'home' && !onHome()) watchHomeArrival()
+      } catch {
+        /* 坏 href 忽略 */
+      }
+      if (!cfg.enabled || !onHome()) return
+      const title = a.closest('a.post-title')
+      if (!title) return
+      const li = title.closest('li.post-item')
+      if (!li || !li.parentElement?.matches?.('ul.post-list')) return
+      const tid = topicIdFrom(title.getAttribute('href'))
+      if (!tid) return
+      write(tid, li.getBoundingClientRect().top)
+    }
+
+    function onPageShow() {
+      scheduleRestore()
+    }
+
+    document.addEventListener('click', onClick, true)
+    window.addEventListener('pageshow', onPageShow)
+    window.addEventListener('popstate', onPageShow)
+    api.on('route:changed', scheduleRestore)
+    api.onDispose(() => {
+      document.removeEventListener('click', onClick, true)
+      window.removeEventListener('pageshow', onPageShow)
+      window.removeEventListener('popstate', onPageShow)
+      if (scheduled) window.clearTimeout(scheduled)
+      scheduled = 0
+      for (const iv of watches) window.clearInterval(iv)
+      watches.clear()
+    })
+
+    api.handle('home-return:debug', () => ({
+      peek: read,
+      find: (tid) => !!findItem(Number(tid)),
+      restore,
+    }))
+
+    scheduleRestore()
+    return {}
+  }
+
+  const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
+  if (w.LSB && w.LSB.register) w.LSB.register(manifest, setup)
+  else (w.LSB_PLUGINS = w.LSB_PLUGINS || []).push({ manifest, setup })
 })()
 
 
@@ -3687,14 +3910,14 @@
 
 
 ;
-/* ══════════════ LSB·界面精修 v1.1.28 (skin) ══════════════ */
+/* ══════════════ LSB·界面精修 v1.1.29 (skin) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.28',
+    version: '1.1.29',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -3869,14 +4092,15 @@
           margin:0 8px 6px;font-size:11px;font-weight:600;color:var(--text-muted,#888);
           letter-spacing:.04em;
         }
-        .lsb-shell-nav a{
+        .lsb-shell-nav .lsb-shell-link{
           display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:var(--lsb-radius-sm);
           color:var(--text,#222);text-decoration:none;font-size:13px;font-weight:500;
+          width:100%;border:0;background:transparent;cursor:pointer;text-align:left;font-family:inherit;box-sizing:border-box;
         }
-        .lsb-shell-nav a .lsb-shell-link-label{
+        .lsb-shell-nav .lsb-shell-link-label{
           min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
         }
-        .lsb-shell-nav a .lsb-shell-count{
+        .lsb-shell-nav .lsb-shell-count{
           flex:0 0 auto;font-size:11px;font-weight:500;color:var(--text-muted,#888);
           font-variant-numeric:tabular-nums;
         }
@@ -3887,7 +4111,7 @@
           width:100%;height:32px;border:0;border-radius:var(--lsb-radius-sm);cursor:pointer;
           background:transparent;color:var(--text,#222);font-size:13px;font-weight:600;
         }
-        .lsb-shell-settings:active,.lsb-shell-nav a:active{transform:scale(.98)}
+        .lsb-shell-settings:active,.lsb-shell-nav .lsb-shell-link:active{transform:scale(.98)}
         #lsb-shell-timeline{
           position:fixed;top:calc(var(--lsb-shell-header) + 20px);right:14px;bottom:28px;
           width:var(--lsb-shell-timeline);z-index:7998;
@@ -3977,7 +4201,7 @@
           html.lsb-skin-shell-on #lsb-shell-timeline{display:none!important}
         }
         @media(hover:hover) and (pointer:fine){
-          .lsb-shell-nav a:hover{background:color-mix(in srgb,var(--bg,#fff) 40%,transparent)}
+          .lsb-shell-nav .lsb-shell-link:hover{background:color-mix(in srgb,var(--bg,#fff) 40%,transparent)}
           .lsb-shell-extras a:hover{color:var(--brand,#5eaaa0)}
           .lsb-shell-settings:hover{background:var(--brand-soft,#e8f4f2)}
         }
@@ -4124,14 +4348,19 @@
       return out
     }
 
-    function collectCheckin() {
-      const a = [...document.querySelectorAll('a[href*="/daily_checkin"]')].find(
-        (el) => !el.closest('#lsb-shell'),
+    function collectTools() {
+      const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
+      const active = new Set(
+        (w.LSB?.info?.().plugins || []).filter((p) => p.state === 'active').map((p) => p.id),
       )
-      return {
-        href: a?.getAttribute('href') || api.routes.checkin,
-        label: (a?.textContent || '').trim() || '每日签到',
-      }
+      return [
+        { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
+        { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
+        { plugin: 'points-ledger', panel: 'points-ledger', label: '积分趋势' },
+        { plugin: 'annual-report', panel: 'annual-report', label: '年度报告' },
+      ]
+        .filter((t) => active.has(t.plugin))
+        .map(({ panel, label }) => ({ panel, label }))
     }
 
     function locationText() {
@@ -4550,6 +4779,9 @@
     function renderLinks(links) {
       return links
         .map((link) => {
+          if (link.panel) {
+            return `<button type="button" class="lsb-shell-link" data-lsb-panel="${esc(link.panel)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
+          }
           const active = isActiveHref(link.href) ? ' is-active' : ''
           const count = Number.isFinite(link.count)
             ? `<span class="lsb-shell-count">${esc(String(link.count))}</span>`
@@ -4727,7 +4959,7 @@
             <div class="lsb-shell-me" data-lsb-shell-me></div>
             <div data-lsb-shell-section="home"></div>
             <div data-lsb-shell-section="boards"></div>
-            <div data-lsb-shell-section="checkin"></div>
+            <div data-lsb-shell-section="tools"></div>
           </div>
           <div class="lsb-shell-rail-foot">
             <button type="button" class="lsb-shell-settings" data-lsb-shell-settings>设置</button>
@@ -4735,6 +4967,12 @@
         </aside>
         <aside id="lsb-shell-aside" aria-label="站点信息"></aside>`
       el.querySelector('[data-lsb-shell-settings]').addEventListener('click', () => api.ui.openPanel('skin'))
+      el.querySelector('#lsb-shell-rail').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-lsb-panel]')
+        if (!btn) return
+        e.preventDefault()
+        api.ui.openPanel(btn.getAttribute('data-lsb-panel'))
+      })
       document.body.append(el)
       return el
     }
@@ -4755,8 +4993,7 @@
         { href: '/', label: '全部主题' },
       ])
       setSection(el.querySelector('[data-lsb-shell-section="boards"]'), '版块', collectBoards())
-      const checkin = collectCheckin()
-      setSection(el.querySelector('[data-lsb-shell-section="checkin"]'), '', [checkin])
+      setSection(el.querySelector('[data-lsb-shell-section="tools"]'), '工具', collectTools())
       const timeline = ensureTimeline(el)
       if (timeline) {
         bindWindow()
@@ -5287,6 +5524,8 @@
       syncGmMenu()
     })
     api.on('route:changed', scheduleRefresh)
+    api.on('plugin:activated', scheduleRefresh)
+    api.on('plugin:disabled', scheduleRefresh)
     api.on('topic:posts-added', scheduleTimeline)
     api.dom.each('[data-themes-mode-toggle]', () => {
       if (!cfg.shell) return
@@ -5999,14 +6238,14 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.45',
+    version: '1.0.48',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'ui', 'events'],
   }
 
-  const MEMBERS = ["floor-stats","hot-floor-badge","resume-reading","read-mark","hover-profile","topic-preview","unread-sentinel","forum-watch","checkin-calendar","points-ledger","ai-summary","data-migration","my-archive","annual-report","skin","live-feed"]
+  const MEMBERS = ["floor-stats","hot-floor-badge","resume-reading","read-mark","home-return","hover-profile","topic-preview","unread-sentinel","forum-watch","checkin-calendar","points-ledger","ai-summary","data-migration","my-archive","annual-report","skin","live-feed"]
 
   /** 基座错误日志的四类条目（module-error=主动上报，其余为自动捕获） */
   const ERROR_KINDS = ['module-error', 'plugin-error', 'uncaught', 'rejection']

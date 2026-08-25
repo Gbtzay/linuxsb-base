@@ -181,6 +181,42 @@ test('续读：NEW 挂在 UID 或创作者后面，不占右上角', async () =>
   assert.ok(!/lsb-unread::after/.test(css), '不再用右上角伪元素，避免挡住只看 TA')
 })
 
+test('续读：NEW 挂在 AI机器人或社区主理人后面', async () => {
+  const html =
+    '<!DOCTYPE html><html><body><ul class="post-list">' +
+    '<li class="post-item post-entry" id="post-10" data-floor="10">' +
+    '<div class="post-head"><a class="post-title post-author" href="/user/2">机人</a>' +
+    '<span class="post-user-group user-uid-badge" title="用户 UID">UID 2</span>' +
+    '<span class="post-user-group">AI机器人</span></div>' +
+    '<span data-performance-time="1"></span><div class="post-content">x</div></li>' +
+    '<li class="post-item post-entry" id="post-11" data-floor="11">' +
+    '<div class="post-head"><a class="post-title post-author" href="/user/1">站长</a>' +
+    '<span class="post-user-group user-uid-badge" title="用户 UID">UID 1</span>' +
+    '<span class="post-user-group">社区主理人</span>' +
+    '<span class="post-user-group">创作者</span></div>' +
+    '<span data-performance-time="1"></span><div class="post-content">x</div></li>' +
+    '</ul><form class="ajax-reply-form"><input name="_csrf" value="c"></form>' +
+    '<a href="/user/1">我的主页</a></body></html>'
+  const dom = new JSDOM(html, { url: 'https://linux.sb/topic/1', runScripts: 'outside-only' })
+  const w = dom.window
+  w.unsafeWindow = w
+  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
+  w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
+  w.localStorage.setItem(
+    'lsb_base:resume-reading:positions',
+    JSON.stringify({ 1: { f: 3, p: 1, ts: Date.now(), title: 'x' } }),
+  )
+  w.eval(baseCode)
+  w.eval(PLUG('resume-reading.user.js'))
+  await new Promise((r) => setTimeout(r, 40))
+
+  const new10 = w.document.querySelector('[data-floor="10"] .lsb-new')
+  const new11 = w.document.querySelector('[data-floor="11"] .lsb-new')
+  assert.ok(new10 && new11, '两楼都应有 NEW')
+  assert.match(new10.previousElementSibling?.textContent || '', /AI机器人/, '有 AI 机器人标识时 NEW 紧跟其后')
+  assert.match(new11.previousElementSibling?.textContent || '', /社区主理人/, '有社区主理人时 NEW 紧跟其后，而不是创作者')
+})
+
 test('续读：已读楼层的 NEW 约 5 秒后消失，未读入视野的还在', async () => {
   const html =
     '<!DOCTYPE html><html><body><ul class="post-list">' +

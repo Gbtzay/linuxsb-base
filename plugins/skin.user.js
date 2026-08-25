@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·界面精修
 // @namespace    https://linux.sb/
-// @version      1.1.28
+// @version      1.1.29
 // @description  氢壳（左栏+顶栏+帖内时间轴）与排版层：正文行高、列表密度、代码块、OP 高亮、限宽阅读。只动结构与排版，不碰配色。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.28',
+    version: '1.1.29',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -191,14 +191,15 @@
           margin:0 8px 6px;font-size:11px;font-weight:600;color:var(--text-muted,#888);
           letter-spacing:.04em;
         }
-        .lsb-shell-nav a{
+        .lsb-shell-nav .lsb-shell-link{
           display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:var(--lsb-radius-sm);
           color:var(--text,#222);text-decoration:none;font-size:13px;font-weight:500;
+          width:100%;border:0;background:transparent;cursor:pointer;text-align:left;font-family:inherit;box-sizing:border-box;
         }
-        .lsb-shell-nav a .lsb-shell-link-label{
+        .lsb-shell-nav .lsb-shell-link-label{
           min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
         }
-        .lsb-shell-nav a .lsb-shell-count{
+        .lsb-shell-nav .lsb-shell-count{
           flex:0 0 auto;font-size:11px;font-weight:500;color:var(--text-muted,#888);
           font-variant-numeric:tabular-nums;
         }
@@ -209,7 +210,7 @@
           width:100%;height:32px;border:0;border-radius:var(--lsb-radius-sm);cursor:pointer;
           background:transparent;color:var(--text,#222);font-size:13px;font-weight:600;
         }
-        .lsb-shell-settings:active,.lsb-shell-nav a:active{transform:scale(.98)}
+        .lsb-shell-settings:active,.lsb-shell-nav .lsb-shell-link:active{transform:scale(.98)}
         #lsb-shell-timeline{
           position:fixed;top:calc(var(--lsb-shell-header) + 20px);right:14px;bottom:28px;
           width:var(--lsb-shell-timeline);z-index:7998;
@@ -299,7 +300,7 @@
           html.lsb-skin-shell-on #lsb-shell-timeline{display:none!important}
         }
         @media(hover:hover) and (pointer:fine){
-          .lsb-shell-nav a:hover{background:color-mix(in srgb,var(--bg,#fff) 40%,transparent)}
+          .lsb-shell-nav .lsb-shell-link:hover{background:color-mix(in srgb,var(--bg,#fff) 40%,transparent)}
           .lsb-shell-extras a:hover{color:var(--brand,#5eaaa0)}
           .lsb-shell-settings:hover{background:var(--brand-soft,#e8f4f2)}
         }
@@ -446,14 +447,19 @@
       return out
     }
 
-    function collectCheckin() {
-      const a = [...document.querySelectorAll('a[href*="/daily_checkin"]')].find(
-        (el) => !el.closest('#lsb-shell'),
+    function collectTools() {
+      const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
+      const active = new Set(
+        (w.LSB?.info?.().plugins || []).filter((p) => p.state === 'active').map((p) => p.id),
       )
-      return {
-        href: a?.getAttribute('href') || api.routes.checkin,
-        label: (a?.textContent || '').trim() || '每日签到',
-      }
+      return [
+        { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
+        { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
+        { plugin: 'points-ledger', panel: 'points-ledger', label: '积分趋势' },
+        { plugin: 'annual-report', panel: 'annual-report', label: '年度报告' },
+      ]
+        .filter((t) => active.has(t.plugin))
+        .map(({ panel, label }) => ({ panel, label }))
     }
 
     function locationText() {
@@ -872,6 +878,9 @@
     function renderLinks(links) {
       return links
         .map((link) => {
+          if (link.panel) {
+            return `<button type="button" class="lsb-shell-link" data-lsb-panel="${esc(link.panel)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
+          }
           const active = isActiveHref(link.href) ? ' is-active' : ''
           const count = Number.isFinite(link.count)
             ? `<span class="lsb-shell-count">${esc(String(link.count))}</span>`
@@ -1049,7 +1058,7 @@
             <div class="lsb-shell-me" data-lsb-shell-me></div>
             <div data-lsb-shell-section="home"></div>
             <div data-lsb-shell-section="boards"></div>
-            <div data-lsb-shell-section="checkin"></div>
+            <div data-lsb-shell-section="tools"></div>
           </div>
           <div class="lsb-shell-rail-foot">
             <button type="button" class="lsb-shell-settings" data-lsb-shell-settings>设置</button>
@@ -1057,6 +1066,12 @@
         </aside>
         <aside id="lsb-shell-aside" aria-label="站点信息"></aside>`
       el.querySelector('[data-lsb-shell-settings]').addEventListener('click', () => api.ui.openPanel('skin'))
+      el.querySelector('#lsb-shell-rail').addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-lsb-panel]')
+        if (!btn) return
+        e.preventDefault()
+        api.ui.openPanel(btn.getAttribute('data-lsb-panel'))
+      })
       document.body.append(el)
       return el
     }
@@ -1077,8 +1092,7 @@
         { href: '/', label: '全部主题' },
       ])
       setSection(el.querySelector('[data-lsb-shell-section="boards"]'), '版块', collectBoards())
-      const checkin = collectCheckin()
-      setSection(el.querySelector('[data-lsb-shell-section="checkin"]'), '', [checkin])
+      setSection(el.querySelector('[data-lsb-shell-section="tools"]'), '工具', collectTools())
       const timeline = ensureTimeline(el)
       if (timeline) {
         bindWindow()
@@ -1609,6 +1623,8 @@
       syncGmMenu()
     })
     api.on('route:changed', scheduleRefresh)
+    api.on('plugin:activated', scheduleRefresh)
+    api.on('plugin:disabled', scheduleRefresh)
     api.on('topic:posts-added', scheduleTimeline)
     api.dom.each('[data-themes-mode-toggle]', () => {
       if (!cfg.shell) return

@@ -148,7 +148,7 @@ test('界面精修：停用后去掉 html 状态类', async () => {
   )
 })
 
-test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块与签到，无时间轴', async () => {
+test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块，无时间轴', async () => {
   const { w } = makeHome()
   await loadBase(w, PLUG('skin.user.js'))
 
@@ -170,8 +170,8 @@ test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块与签到，无�
   assert.ok(form.querySelector('input[name="q"], input[type="search"]'))
   assert.equal(w.document.querySelectorAll('form.search-form').length, 1, '搜索是迁入不是克隆')
 
-  const checkin = root.querySelector('a[href*="daily_checkin"]')
-  assert.ok(checkin, '签到入口')
+  const checkin = root.querySelector('#lsb-shell-rail a[href*="daily_checkin"]')
+  assert.equal(checkin, null, '左栏不再挂每日签到，避免和右栏快捷功能重复')
   assert.equal(root.querySelector('#lsb-shell-timeline'), null, '首页无时间轴')
 
   const me = root.querySelector('.sidebar-card.user-card, .lsb-shell-me .user-card')
@@ -186,6 +186,38 @@ test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块与签到，无�
   const dbg = await w.LSB.bus.request('skin:debug')
   assert.equal(dbg.shell.mounted, true)
   assert.ok(dbg.shell.boards >= 6)
+})
+
+test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 年度报告', async () => {
+  const { w } = makeHome()
+  w.fetch = async (url) => ({
+    status: 200,
+    ok: true,
+    url: String(url),
+    text: async () => '<html><body></body></html>',
+  })
+  await loadBase(
+    w,
+    PLUG('ai-summary.user.js'),
+    PLUG('checkin-calendar.user.js'),
+    PLUG('points-ledger.user.js'),
+    PLUG('annual-report.user.js'),
+    PLUG('skin.user.js'),
+  )
+  const tools = shell(w).querySelector('[data-lsb-shell-section="tools"]')
+  const labels = [...tools.querySelectorAll('[data-lsb-panel]')].map((b) => b.textContent.trim())
+  assert.deepEqual(labels, ['AI 历史', '签到日历', '积分趋势', '年度报告'])
+  assert.equal(shell(w).querySelector('#lsb-shell-rail a[href*="daily_checkin"]'), null, '站点每日签到仍留给右栏快捷功能')
+
+  const cal = tools.querySelector('[data-lsb-panel="checkin-calendar"]')
+  cal.click()
+  const active = [...w.document.querySelectorAll('.lsb-tab')].find((t) => t.classList.contains('is-active'))
+  assert.equal(active?.textContent, '签到日历')
+  assert.ok(w.document.querySelector('.lsb-panel-settings'))
+
+  tools.querySelector('[data-lsb-panel="ai-summary-history"]').click()
+  const hist = [...w.document.querySelectorAll('.lsb-tab')].find((t) => t.classList.contains('is-active'))
+  assert.equal(hist?.textContent, 'AI 历史')
 })
 
 test('氢壳：左栏版块显示原站主题数', async () => {

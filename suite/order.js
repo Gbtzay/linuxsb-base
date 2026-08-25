@@ -4,6 +4,7 @@ export const ORDER = [
   'hot-floor-badge',
   'resume-reading',
   'read-mark',
+  'home-return',
   'hover-profile',
   'topic-preview',
   'unread-sentinel',
