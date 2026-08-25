@@ -1,0 +1,14 @@
+{
+  "name": "linuxsb-base",
+  "version": "0.1.17",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs && node build-suite.mjs",
+    "test": "node --test --test-force-exit --test-concurrency=4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.5",
+    "jsdom": "26.1.0"
+  }
+}
