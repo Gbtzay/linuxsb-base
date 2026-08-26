@@ -20,12 +20,21 @@ function card(name, rarity, price, id, qty = 1) {
   )
 }
 
-function marketPage(cardsHtml) {
+function marketPage(cardsHtml, extra = '') {
   return (
     `<div class="gacha-center-page"><section class="gacha-market-section">` +
     `<div class="gacha-market-head"><h2>在售交易</h2></div>` +
-    `<div class="gacha-market-grid">${cardsHtml}</div></section></div>`
+    `<div class="gacha-market-grid">${cardsHtml}</div>${extra}</section></div>`
   )
+}
+
+function pager(max, query = '') {
+  const q = query ? `${query}&` : ''
+  const links = Array.from({ length: max }, (_, i) => {
+    const p = i + 1
+    return `<a href="/gacha_market?${q}p=${p}">${p}</a>`
+  }).join('')
+  return `<nav class="pagination">${links}</nav>`
 }
 
 function makeDom(html, url, preload = {}) {
@@ -208,4 +217,47 @@ test('称号行情：氧面板不折叠', async () => {
 test('称号行情：默认巡检 1 分钟', async () => {
   const { dbg } = await boot()
   assert.equal(dbg.intervalMin(), 1)
+})
+
+test('称号行情：分页第二页的挂单也要记进高低价，不能只采每筛选项的第一页', async () => {
+  const page1 = marketPage(card('打酱油的', 'N', 6, '1'), pager(2))
+  const page2 = marketPage(card('全站偶像', 'SSR', 260, '99') + card('隐藏大佬', 'SSR', 888, '100'), pager(2))
+  const htmlFor = (href) => {
+    const u = new URL(String(href), 'https://linux.sb')
+    const p = Number(u.searchParams.get('p') || '1')
+    return `<html><body>${p >= 2 ? page2 : page1}</body></html>`
+  }
+  const { dbg, tick, calls } = await boot('https://linux.sb/', {}, htmlFor)
+  dbg.reset()
+  await dbg.snap()
+  await tick(40)
+  const titles = dbg.series()[0]?.titles || {}
+  assert.equal(titles['打酱油的@N']?.lo, 6, '第一页地板价')
+  assert.equal(titles['全站偶像@SSR']?.lo, 260, '第二页的称号不能丢')
+  assert.equal(titles['隐藏大佬@SSR']?.hi, 888, '第二页的最高价才是全场真高')
+  assert.ok(
+    calls.some((c) => /[?&]p=2\b/.test(c.href)),
+    '必须翻到分页第 2 页',
+  )
+  assert.equal(
+    calls.filter((c) => /gacha_market/.test(c.href) && c.method === 'GET').length >= 2,
+    true,
+    '至少拉两页',
+  )
+})
+
+test('称号行情：交易页「在售列表」也能插入（站点现用文案）', async () => {
+  const page = homeHtml.replace(
+    '</body>',
+    `<section class="gacha-market-section"><h2>在售列表</h2></section></body>`,
+  )
+  const { w } = makeDom(page, 'https://linux.sb/gacha_market')
+  stubFetch(w, '<html><body></body></html>')
+  await loadBase(w, PLUG('title-quotes.user.js'))
+  const embed = w.document.querySelector('.lsb-title-quotes-embed')
+  const sold = [...w.document.querySelectorAll('.gacha-market-section')].find((s) =>
+    /在售列表/.test(s.querySelector('h2')?.textContent || ''),
+  )
+  assert.ok(embed, '现用「在售列表」标题也要插入')
+  assert.equal(embed.nextElementSibling, sold)
 })

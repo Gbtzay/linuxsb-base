@@ -11,7 +11,7 @@
 | | 油猴名 | 版本 |
 |---|---|---|
 | 氢 | LINUX.SB 氢（RC） | **0.1.22** |
-| 氧 | LINUX.SB 氧（RC） | **1.0.59** |
+| 氧 | LINUX.SB 氧（RC） | **1.0.60** |
 
 对不上就刷新 Greasy Fork / GitHub 再装一次。氢和氧都改了显示名，两个都要更新。
 
@@ -24,7 +24,7 @@
 
 作者页：https://greasyfork.org/zh-CN/users/1637325-xb70sr71
 
-GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.59
+GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.60
 
 Greasy Fork 地址里可能还带 `-beta`，以油猴里的脚本名和版本号为准。
 

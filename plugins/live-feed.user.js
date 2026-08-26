@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·实时流
 // @namespace    https://linux.sb/
-// @version      1.2.5
+// @version      1.2.7
 // @description  免刷新获取新帖与新回复：前台短周期、后台长周期的自适应轮询（跨标签选主，只有一个标签发请求）；视口锚点补偿让任意滚动位置都能无感插入；打字期间只暂存不打扰；老帖有新回复原地高亮。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.5',
+    version: '1.2.7',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -122,13 +122,29 @@
       const ul = document.querySelector(api.sel?.topicUl || 'ul.topic-post-list, ul.post-list')
       if (!t || !ul) return false
       const posts = [...document.querySelectorAll('li.post-entry')]
-      const maxPostId = posts.reduce((m, li) => {
+      const seenPosts = new Set()
+      let maxPostId = 0
+      for (const li of posts) {
         const id = Number((li.id || '').match(/^post-(\d+)/)?.[1] || 0)
-        return Math.max(m, id)
-      }, 0)
-      ctx = { tid, ul, maxPostId, pages: t.pages || 1 }
+        if (!id) continue
+        seenPosts.add(id)
+        maxPostId = Math.max(maxPostId, id)
+      }
+      ctx = { tid, ul, maxPostId, pages: t.pages || 1, seenPosts }
       mode = 'topic'
       return true
+    }
+
+    /** 当前讨论串里已经出现过的楼（含站点 AJAX 自己插进来的）。不能用「最大 id」当水位：自己刚发出的回复 id 更新，会把中间还没插入的别人回复从暂存里冲掉。 */
+    function ackLivePost(id) {
+      if (!id || mode !== 'topic') return
+      if (!ctx.seenPosts) ctx.seenPosts = new Set()
+      ctx.seenPosts.add(id)
+    }
+
+    function isKnownPost(id) {
+      if (!id) return true
+      return !!(ctx.seenPosts?.has(id) || document.getElementById('post-' + id))
     }
 
     function init() {
@@ -170,8 +186,14 @@
       .lsb-live-banner.is-topic{margin:10px auto}
       .lsb-live-banner.is-quiet{border-style:solid;opacity:.85;font-weight:500}
       @keyframes lsb-live-pulse{50%{opacity:.25}}
-      li.post-item.lsb-live-bumped{animation:lsb-live-bump 2.4s ease-out}
-      @keyframes lsb-live-bump{0%,22%{background:var(--brand-soft,#eef7f5)}100%{background:transparent}}
+      li.post-item.lsb-live-bumped{animation:lsb-live-bump 2.4s ease-out;opacity:1}
+      li.post-item.lsb-seen.lsb-live-bumped{opacity:1}
+      li.post-item.lsb-seen.lsb-live-bumped .post-title{color:inherit}
+      li.post-item.lsb-seen.lsb-live-bumped img{filter:none}
+      @keyframes lsb-live-bump{
+        0%,28%{background:var(--brand-soft,#eef7f5);box-shadow:inset 4px 0 0 var(--brand,#5eaaa0)}
+        100%{background:transparent;box-shadow:none}
+      }
     `)
 
     function showBanner(text, onClick, { asTopic = false, quiet = false } = {}) {
@@ -474,10 +496,13 @@
       const fresh = new Map() // postId → post（跨页去重）
       const absorb = (t) => {
         for (const p of t.posts) {
-          if (p.postId && p.postId > ctx.maxPostId && !fresh.has(p.postId)) {
-            if (document.getElementById('post-' + p.postId)) ctx.maxPostId = Math.max(ctx.maxPostId, p.postId)
-            else fresh.set(p.postId, p)
+          if (!p.postId || fresh.has(p.postId)) continue
+          if (isKnownPost(p.postId)) {
+            ackLivePost(p.postId)
+            ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+            continue
           }
+          fresh.set(p.postId, p)
         }
       }
 
@@ -519,11 +544,15 @@
       let n = 0
       for (const p of pending) {
         if (p.postId && document.getElementById('post-' + p.postId)) {
-          ctx.maxPostId = Math.max(ctx.maxPostId, p.postId)
+          ackLivePost(p.postId)
+          ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
           continue
         }
         ctx.ul.appendChild(document.importNode(p.el, true))
-        if (p.postId) ctx.maxPostId = Math.max(ctx.maxPostId, p.postId)
+        if (p.postId) {
+          ackLivePost(p.postId)
+          ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+        }
         n += 1
       }
       pending = []
@@ -620,15 +649,14 @@
     })
     api.on('topic:posts-added', (posts) => {
       if (mode !== 'topic') return
-      for (const p of posts) {
-        if (p.postId) ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
-      }
-      pending = pending.filter((p) => p.postId && p.postId > ctx.maxPostId && !document.getElementById('post-' + p.postId))
+      for (const p of posts) ackLivePost(p.postId)
+      pending = pending.filter((p) => p.postId && !ctx.seenPosts.has(p.postId) && !document.getElementById('post-' + p.postId))
+      if (!pending.length) hideBanner()
     })
     api.dom.each('li.post-entry', (li) => {
       if (mode !== 'topic') return
       const id = Number((li.id || '').match(/^post-(\d+)/)?.[1] || 0)
-      if (id) ctx.maxPostId = Math.max(ctx.maxPostId || 0, id)
+      if (id) ackLivePost(id)
     })
 
     /* 无限滚动新增条目计入已见集合，避免误报。只认当前列表，换页插进来的节点不算。 */

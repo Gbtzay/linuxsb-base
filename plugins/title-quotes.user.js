@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·称号行情
 // @namespace    https://linux.sb/
-// @version      1.0.3
+// @version      1.0.4
 // @description  采集称号交易挂单的最低/最高与中位数，绘制全场锚点与各称号趋势。纯读，不提交购买。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -11,7 +11,8 @@
 // ==/UserScript==
 
 /**
- * 数据源：/gacha_market 在售卡片（按等级 × 价格升降各拉一页，躲开 100 条截断）。
+ * 数据源：/gacha_market 在售卡片。站点按页展示（约 24 条/页），必须跟分页把挂单收全；
+ * 只拉每个筛选的第一页会丢掉中间价，巡检高低价就会和交易页对不上。
  * 成交记录双方可见，不用。选择器只写在本文件。
  */
 (function () {
@@ -20,7 +21,7 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.3',
+    version: '1.0.4',
     description: '称号交易挂单高低价与全场锚点趋势',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -31,10 +32,9 @@
     },
   }
 
-  const RARITIES = ['ur', 'ssr', 'sr', 'r', 'n']
-  const SORTS = ['price_asc', 'price_desc']
   const MERGE_MS = 12 * 3600e3
   const FORCE_DEBOUNCE_MS = 5000
+  const MAX_PAGES = 40
   const ROLES = [
     { id: 'hi', label: '最高', color: 'var(--danger,#d55)' },
     { id: 'midHi', label: '中位偏上', color: 'var(--warning,#c90)' },
@@ -86,6 +86,20 @@
       })
     }
     return out
+  }
+  function parsePageCount(src) {
+    let root = src
+    if (typeof src === 'string') {
+      root = new DOMParser().parseFromString(src, 'text/html')
+    } else if (!src || !src.querySelectorAll) {
+      root = document
+    }
+    let max = 1
+    for (const a of root.querySelectorAll('a[href]')) {
+      const m = (a.getAttribute('href') || '').match(/[?&]p=(\d+)/)
+      if (m) max = Math.max(max, Number(m[1]))
+    }
+    return Math.min(MAX_PAGES, Math.max(1, max))
   }
   function mergeListings(lists) {
     const seen = new Set()
@@ -204,7 +218,7 @@
         return
       }
       const sections = [...document.querySelectorAll('.gacha-market-section')]
-      const sold = sections.find((s) => /在售交易/.test(s.querySelector('h2')?.textContent || ''))
+      const sold = sections.find((s) => /在售(交易|列表)/.test(s.querySelector('h2')?.textContent || ''))
       if (!sold) return
       let el = document.querySelector('.lsb-title-quotes-embed')
       if (!el) {
@@ -380,12 +394,13 @@
       inflight = (async () => {
         try {
           const lists = []
-          for (const rarity of RARITIES) {
-            for (const sort of SORTS) {
-              const doc = await api.net.doc(`/gacha_market?rarity=${encodeURIComponent(rarity)}&sort=${sort}`)
-              lists.push(parseCards(doc))
-            }
+          const first = await api.net.doc('/gacha_market?p=1')
+          lists.push(parseCards(first))
+          const pages = parsePageCount(first)
+          for (let p = 2; p <= pages; p++) {
+            lists.push(parseCards(await api.net.doc(`/gacha_market?p=${p}`)))
           }
+          if (isMarket()) lists.push(parseCards(document))
           const listings = mergeListings(lists)
           if (!listings.length) {
             lastErr = null
@@ -478,6 +493,7 @@
 
     api.handle('title-quotes:debug', () => ({
       parseCards,
+      parsePageCount,
       mergeListings,
       foldTitles,
       median,

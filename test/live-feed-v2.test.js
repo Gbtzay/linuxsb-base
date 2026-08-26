@@ -256,6 +256,102 @@ test('打字保护：焦点在回复框时只暂存不插入；失焦后自动�
   assert.equal(dbg.pending(), 0)
 })
 
+test('实时流（帖子）：打字时自己的回复先入栏，横幅点击仍能补上别人的新楼', async () => {
+  let serve = topicHtml
+  const { w, tick, until } = makeSite(topicHtml, '/topic/1', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true, pauseWhileTyping: true },
+  })
+  installVirtualLayout(w)
+  feedStub(w, () => serve)
+  await loadBase(w, PLUG('live-feed'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+
+  const form = w.document.createElement('form')
+  form.className = 'ajax-reply-form'
+  const ta = w.document.createElement('textarea')
+  ta.name = 'body'
+  form.appendChild(ta)
+  w.document.body.appendChild(form)
+  ta.focus()
+  ta.value = '我还在写'
+
+  const floorsBefore = w.document.querySelectorAll('li.post-entry').length
+  serve = topicHtml.replace('</ul>', floorItem(999001, 201) + floorItem(999002, 202) + '</ul>')
+  await dbg.pollOnce()
+  assert.equal(w.document.querySelectorAll('li.post-entry').length, floorsBefore, '打字期间不插楼')
+  assert.equal(dbg.pending(), 2, '别人的两层已暂存')
+  assert.ok(dbg.bannerVisible())
+
+  const added = []
+  w.LSB.bus.on(
+    'topic:posts-added',
+    (posts) => added.push(...posts.map((p) => p.postId)),
+    { owner: 'test-own-reply' },
+  )
+  const ul = w.document.querySelector('ul.topic-post-list, ul.post-list')
+  ul.insertAdjacentHTML('beforeend', floorItem(999003, 203))
+  assert.ok(
+    await until(() => added.includes(999003), 1500),
+    '站点 AJAX 把自己的回复插进讨论串',
+  )
+
+  assert.equal(dbg.pending(), 2, '自己的楼不得把还没插入的别人回复从暂存里冲掉')
+  assert.ok(dbg.bannerVisible(), '横幅仍可点')
+
+  dbg.clickBanner()
+  await tick(20)
+  assert.ok(w.document.getElementById('post-999001'), '点击加载应补上别人的楼')
+  assert.ok(w.document.getElementById('post-999002'))
+  assert.equal(dbg.pending(), 0)
+  assert.equal(dbg.bannerVisible(), false)
+})
+
+test('实时流（帖子）：打字时自己的回复先入栏，写完失焦仍自动补上别人的新楼', async () => {
+  let serve = topicHtml
+  const { w, until } = makeSite(topicHtml, '/topic/1', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true, pauseWhileTyping: true },
+  })
+  installVirtualLayout(w)
+  feedStub(w, () => serve)
+  await loadBase(w, PLUG('live-feed'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+
+  const form = w.document.createElement('form')
+  form.className = 'ajax-reply-form'
+  const ta = w.document.createElement('textarea')
+  ta.name = 'body'
+  form.appendChild(ta)
+  w.document.body.appendChild(form)
+  ta.focus()
+  ta.value = '我还在写'
+
+  serve = topicHtml.replace('</ul>', floorItem(999001, 201) + floorItem(999002, 202) + '</ul>')
+  await dbg.pollOnce()
+  assert.equal(dbg.pending(), 2)
+
+  const added = []
+  w.LSB.bus.on(
+    'topic:posts-added',
+    (posts) => added.push(...posts.map((p) => p.postId)),
+    { owner: 'test-own-reply-flush' },
+  )
+  const ul = w.document.querySelector('ul.topic-post-list, ul.post-list')
+  ul.insertAdjacentHTML('beforeend', floorItem(999003, 203))
+  assert.ok(await until(() => added.includes(999003), 1500))
+  assert.equal(dbg.pending(), 2, '自己的楼不得冲掉暂存')
+
+  ta.value = ''
+  ta.blur()
+  ta.dispatchEvent(new w.FocusEvent('focusout', { bubbles: true }))
+  assert.ok(await until(() => !!w.document.getElementById('post-999001'), 1500), '写完失焦应自动补上')
+  assert.ok(w.document.getElementById('post-999002'))
+  assert.equal(dbg.pending(), 0)
+})
+
 test('打字保护：搜索框有残留文字不算"在编辑"（逛吧会因此永久停摆）', async () => {
   const { w, until } = makeSite(homeHtml, '/', {
     'lsb_base:live-feed:__config': { jitterMs: 0, pauseWhileTyping: true },
@@ -342,6 +438,39 @@ test('新鲜度指纹：老帖回复数变化 → 原地高亮而非当成新帖
   // 再轮询同样内容：指纹相同 → 不再报动静（幂等）
   await dbg.pollOnce()
   assert.equal(dbg.lastBumped(), 0, '指纹未变则不重复提示')
+})
+
+test('置灰行被顶起来：高亮期间拉回不透明，不被 lsb-seen 压成半透明', async () => {
+  const OLD = listItem(4242, '已读老帖', 1700000000, 3)
+  const NEW = listItem(4242, '已读老帖', 1893457777, 7)
+  const base = homeHtml.replace('</ul>', OLD + '</ul>')
+  let serve = base
+  const { w, until } = makeSite(base, '/', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true, highlightBumped: true },
+    'lsb_base:read-mark:marks': { 4242: { ts: Date.now(), w: 1, r: 3 } },
+  })
+  installVirtualLayout(w)
+  feedStub(w, () => serve)
+  await loadBase(w, PLUG('read-mark'), PLUG('live-feed'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+
+  const row = () =>
+    [...w.document.querySelectorAll('li.post-item')].find((li) => li.querySelector('a[href*="/topic/4242"]'))
+  assert.ok(row()?.classList.contains('lsb-seen'), '已读置灰已上色')
+  const dimmed = Number(w.getComputedStyle(row()).opacity)
+  assert.ok(dimmed > 0 && dimmed < 1, `置灰应降低透明度，实际 ${dimmed}`)
+
+  serve = base.replace(OLD, NEW)
+  await dbg.pollOnce()
+  assert.ok(
+    await until(() => row()?.classList.contains('lsb-live-bumped'), 800),
+    '对应行原地高亮',
+  )
+  assert.equal(w.getComputedStyle(row()).opacity, '1', '高亮期间必须盖过置灰，否则闪一下看不见')
+  const css = [...w.document.querySelectorAll('style')].map((s) => s.textContent).join('\n')
+  assert.match(css, /lsb-live-bumped[\s\S]{0,180}box-shadow/, '高亮用左边线，不只改半透明背景')
 })
 
 /* ═══════════ 帖子页翻页追补 ═══════════ */

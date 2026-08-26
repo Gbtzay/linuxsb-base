@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氧（RC）
 // @name:en      LINUX.SB Oxygen (RC)
 // @namespace    https://linux.sb/
-// @version      1.0.59
+// @version      1.0.60
 // @description  【RC】冻新功能，只修阻断。linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 18 个模块。必须先安装「LINUX.SB 氢（RC）」。
 // @description:en  [RC] Feature-frozen. Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen (RC).
 // @author       xB70sR71
@@ -26,13 +26,13 @@
 // · LSB·机会监控 v1.0.1
 // · LSB·签到日历 v1.0.3
 // · LSB·积分趋势 v1.0.2
-// · LSB·称号行情 v1.0.3
+// · LSB·称号行情 v1.0.4
 // · LSB·AI 总结 v1.1.5
 // · LSB·配置迁移 v1.0.0
 // · LSB·个人存档 v1.0.0
 // · LSB·年度报告 v1.0.1
 // · LSB·界面精修 v1.1.37
-// · LSB·实时流 v1.2.5
+// · LSB·实时流 v1.2.7
 //
 
 
@@ -2406,9 +2406,10 @@
 
 
 ;
-/* ══════════════ LSB·称号行情 v1.0.3 (title-quotes) ══════════════ */
+/* ══════════════ LSB·称号行情 v1.0.4 (title-quotes) ══════════════ */
 /**
- * 数据源：/gacha_market 在售卡片（按等级 × 价格升降各拉一页，躲开 100 条截断）。
+ * 数据源：/gacha_market 在售卡片。站点按页展示（约 24 条/页），必须跟分页把挂单收全；
+ * 只拉每个筛选的第一页会丢掉中间价，巡检高低价就会和交易页对不上。
  * 成交记录双方可见，不用。选择器只写在本文件。
  */
 (function () {
@@ -2417,7 +2418,7 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.3',
+    version: '1.0.4',
     description: '称号交易挂单高低价与全场锚点趋势',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -2428,10 +2429,9 @@
     },
   }
 
-  const RARITIES = ['ur', 'ssr', 'sr', 'r', 'n']
-  const SORTS = ['price_asc', 'price_desc']
   const MERGE_MS = 12 * 3600e3
   const FORCE_DEBOUNCE_MS = 5000
+  const MAX_PAGES = 40
   const ROLES = [
     { id: 'hi', label: '最高', color: 'var(--danger,#d55)' },
     { id: 'midHi', label: '中位偏上', color: 'var(--warning,#c90)' },
@@ -2483,6 +2483,20 @@
       })
     }
     return out
+  }
+  function parsePageCount(src) {
+    let root = src
+    if (typeof src === 'string') {
+      root = new DOMParser().parseFromString(src, 'text/html')
+    } else if (!src || !src.querySelectorAll) {
+      root = document
+    }
+    let max = 1
+    for (const a of root.querySelectorAll('a[href]')) {
+      const m = (a.getAttribute('href') || '').match(/[?&]p=(\d+)/)
+      if (m) max = Math.max(max, Number(m[1]))
+    }
+    return Math.min(MAX_PAGES, Math.max(1, max))
   }
   function mergeListings(lists) {
     const seen = new Set()
@@ -2601,7 +2615,7 @@
         return
       }
       const sections = [...document.querySelectorAll('.gacha-market-section')]
-      const sold = sections.find((s) => /在售交易/.test(s.querySelector('h2')?.textContent || ''))
+      const sold = sections.find((s) => /在售(交易|列表)/.test(s.querySelector('h2')?.textContent || ''))
       if (!sold) return
       let el = document.querySelector('.lsb-title-quotes-embed')
       if (!el) {
@@ -2777,12 +2791,13 @@
       inflight = (async () => {
         try {
           const lists = []
-          for (const rarity of RARITIES) {
-            for (const sort of SORTS) {
-              const doc = await api.net.doc(`/gacha_market?rarity=${encodeURIComponent(rarity)}&sort=${sort}`)
-              lists.push(parseCards(doc))
-            }
+          const first = await api.net.doc('/gacha_market?p=1')
+          lists.push(parseCards(first))
+          const pages = parsePageCount(first)
+          for (let p = 2; p <= pages; p++) {
+            lists.push(parseCards(await api.net.doc(`/gacha_market?p=${p}`)))
           }
+          if (isMarket()) lists.push(parseCards(document))
           const listings = mergeListings(lists)
           if (!listings.length) {
             lastErr = null
@@ -2875,6 +2890,7 @@
 
     api.handle('title-quotes:debug', () => ({
       parseCards,
+      parsePageCount,
       mergeListings,
       foldTitles,
       median,
@@ -6075,14 +6091,14 @@
 
 
 ;
-/* ══════════════ LSB·实时流 v1.2.5 (live-feed) ══════════════ */
+/* ══════════════ LSB·实时流 v1.2.7 (live-feed) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.5',
+    version: '1.2.7',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -6188,13 +6204,29 @@
       const ul = document.querySelector(api.sel?.topicUl || 'ul.topic-post-list, ul.post-list')
       if (!t || !ul) return false
       const posts = [...document.querySelectorAll('li.post-entry')]
-      const maxPostId = posts.reduce((m, li) => {
+      const seenPosts = new Set()
+      let maxPostId = 0
+      for (const li of posts) {
         const id = Number((li.id || '').match(/^post-(\d+)/)?.[1] || 0)
-        return Math.max(m, id)
-      }, 0)
-      ctx = { tid, ul, maxPostId, pages: t.pages || 1 }
+        if (!id) continue
+        seenPosts.add(id)
+        maxPostId = Math.max(maxPostId, id)
+      }
+      ctx = { tid, ul, maxPostId, pages: t.pages || 1, seenPosts }
       mode = 'topic'
       return true
+    }
+
+    /** 当前讨论串里已经出现过的楼（含站点 AJAX 自己插进来的）。不能用「最大 id」当水位：自己刚发出的回复 id 更新，会把中间还没插入的别人回复从暂存里冲掉。 */
+    function ackLivePost(id) {
+      if (!id || mode !== 'topic') return
+      if (!ctx.seenPosts) ctx.seenPosts = new Set()
+      ctx.seenPosts.add(id)
+    }
+
+    function isKnownPost(id) {
+      if (!id) return true
+      return !!(ctx.seenPosts?.has(id) || document.getElementById('post-' + id))
     }
 
     function init() {
@@ -6236,8 +6268,14 @@
       .lsb-live-banner.is-topic{margin:10px auto}
       .lsb-live-banner.is-quiet{border-style:solid;opacity:.85;font-weight:500}
       @keyframes lsb-live-pulse{50%{opacity:.25}}
-      li.post-item.lsb-live-bumped{animation:lsb-live-bump 2.4s ease-out}
-      @keyframes lsb-live-bump{0%,22%{background:var(--brand-soft,#eef7f5)}100%{background:transparent}}
+      li.post-item.lsb-live-bumped{animation:lsb-live-bump 2.4s ease-out;opacity:1}
+      li.post-item.lsb-seen.lsb-live-bumped{opacity:1}
+      li.post-item.lsb-seen.lsb-live-bumped .post-title{color:inherit}
+      li.post-item.lsb-seen.lsb-live-bumped img{filter:none}
+      @keyframes lsb-live-bump{
+        0%,28%{background:var(--brand-soft,#eef7f5);box-shadow:inset 4px 0 0 var(--brand,#5eaaa0)}
+        100%{background:transparent;box-shadow:none}
+      }
     `)
 
     function showBanner(text, onClick, { asTopic = false, quiet = false } = {}) {
@@ -6540,10 +6578,13 @@
       const fresh = new Map() // postId → post（跨页去重）
       const absorb = (t) => {
         for (const p of t.posts) {
-          if (p.postId && p.postId > ctx.maxPostId && !fresh.has(p.postId)) {
-            if (document.getElementById('post-' + p.postId)) ctx.maxPostId = Math.max(ctx.maxPostId, p.postId)
-            else fresh.set(p.postId, p)
+          if (!p.postId || fresh.has(p.postId)) continue
+          if (isKnownPost(p.postId)) {
+            ackLivePost(p.postId)
+            ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+            continue
           }
+          fresh.set(p.postId, p)
         }
       }
 
@@ -6585,11 +6626,15 @@
       let n = 0
       for (const p of pending) {
         if (p.postId && document.getElementById('post-' + p.postId)) {
-          ctx.maxPostId = Math.max(ctx.maxPostId, p.postId)
+          ackLivePost(p.postId)
+          ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
           continue
         }
         ctx.ul.appendChild(document.importNode(p.el, true))
-        if (p.postId) ctx.maxPostId = Math.max(ctx.maxPostId, p.postId)
+        if (p.postId) {
+          ackLivePost(p.postId)
+          ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+        }
         n += 1
       }
       pending = []
@@ -6686,15 +6731,14 @@
     })
     api.on('topic:posts-added', (posts) => {
       if (mode !== 'topic') return
-      for (const p of posts) {
-        if (p.postId) ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
-      }
-      pending = pending.filter((p) => p.postId && p.postId > ctx.maxPostId && !document.getElementById('post-' + p.postId))
+      for (const p of posts) ackLivePost(p.postId)
+      pending = pending.filter((p) => p.postId && !ctx.seenPosts.has(p.postId) && !document.getElementById('post-' + p.postId))
+      if (!pending.length) hideBanner()
     })
     api.dom.each('li.post-entry', (li) => {
       if (mode !== 'topic') return
       const id = Number((li.id || '').match(/^post-(\d+)/)?.[1] || 0)
-      if (id) ctx.maxPostId = Math.max(ctx.maxPostId || 0, id)
+      if (id) ackLivePost(id)
     })
 
     /* 无限滚动新增条目计入已见集合，避免误报。只认当前列表，换页插进来的节点不算。 */
@@ -6743,7 +6787,7 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.59',
+    version: '1.0.60',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },

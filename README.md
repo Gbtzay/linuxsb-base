@@ -109,10 +109,10 @@
 | `hover-profile` | **用户画像悬浮卡**：悬停用户链接显示等级/积分/最近主题；TTL 缓存 + 失败负缓存，绝不重复请求 | read/storage/ui/events |
 | `topic-preview` | **主楼预览**：列表标题旁「预览」按钮，点开蒙层浮窗用同源 iframe 嵌原帖并裁掉顶栏/侧栏/页脚；点标题仍整页进帖 | read/ui/events |
 | `unread-sentinel` | **未读哨兵**：低频巡检首页新动态；跨标签心跳选主（只有一个标签发请求）；标题角标 + 桌面通知 + 消息箱面板 | read/storage/ui/events |
-| `live-feed` | **实时流**：免刷新获取新帖/新回复。同流序数判定（发布流看 id、回复流看时间戳）杜绝串台误报；**视口锚点补偿**让任意滚动位置都能无感插入；**写回复期间只暂存不打扰**，失焦/切回前台自动补上；老帖被顶起来时原地高亮而非重复插入；站点 AJAX 已插入的楼层不再复制到列表末尾；帖子页回复顶到新页时当轮追补 | read/storage/ui/events |
+| `live-feed` | **实时流**：免刷新获取新帖/新回复。同流序数判定（发布流看 id、回复流看时间戳）杜绝串台误报；**视口锚点补偿**让任意滚动位置都能无感插入；**写回复期间只暂存不打扰**，失焦/切回前台自动补上；老帖被顶起来时原地高亮而非重复插入（置灰行高亮期间拉回不透明并加左边线）；站点 AJAX 已插入的楼层不再复制到列表末尾（自己刚发出的回复也不会冲掉暂存的别人新楼）；帖子页回复顶到新页时当轮追补 | read/storage/ui/events |
 | `checkin-calendar` | **签到日历**：自动探测每日状态、月视图 + 连击统计 + 一键签今天（原生无补签，历史自安装日起） | read/storage/ui/events/**write** |
 | `points-ledger` | **积分趋势**：余额快照序列 → SVG 折线 + 每日增减清单；对外 RPC `points-ledger:series` | read/storage/ui/events |
-| `title-quotes` | **称号行情**：采集称号交易挂单最低/最高与中位数，全场四锚点 + 各称号趋势；氧面板与 `/gacha_market` 共用 | read/storage/ui/events |
+| `title-quotes` | **称号行情**：采集称号交易挂单最低/最高与中位数（跟交易页分页把挂单收全）；全场四锚点 + 各称号趋势；氧面板与 `/gacha_market` 共用 | read/storage/ui/events |
 | `forum-watch` | **机会监控**：监听指定版块新帖标题命中关键词即提醒；复用哨兵选主机制；「机会箱」面板 | read/storage/ui/events |
 | `local-bridge` | **本地联动**（独立插件，本版氧不收录）：对接本机 workbench(7788)——浏览预热缓存、主楼一键触发 /api/analyze、健康监视与服务端摘要面板；RPC 供其它插件复用 | read/storage/ui/events/**net** |
 | `data-migration` | **配置迁移**：全库数据导出/导入（JSON 文件/剪贴板），覆盖或合并模式；需要基座 ≥0.1.1 的 admin 权限 | read/storage/ui/events/**admin** |
@@ -254,7 +254,7 @@ POST 自动重发会造成重复回复、重复签到这类无法撤销的副作
 
 ```bash
 npm i            # jsdom + esbuild
-npm test         # 172 用例 ≈ 17s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
+npm test         # 282 用例 ≈ 31s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
 npm run build    # src/*.js → dist/linuxsb-base.user.js；plugins/* → dist/linuxsb-suite.user.js
 ```
 

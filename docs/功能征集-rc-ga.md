@@ -1,6 +1,6 @@
 # 【功能征集】氢 / 氧已进 RC，GA 之前还缺什么
 
-氢和氧已经进入 **RC**（氢 0.1.22、氧 1.0.59）：冻新功能，只修阻断。摘掉 RC、进正式版 / GA 是下一阶段。
+氢和氧已经进入 **RC**（氢 0.1.22、氧 1.0.60）：冻新功能，只修阻断。摘掉 RC、进正式版 / GA 是下一阶段。
 
 不是站点官方出品。数据只在你自己浏览器里。RC 不等于不会再修，只是新功能先停。
 
@@ -48,10 +48,10 @@
 
 作者页：https://greasyfork.org/zh-CN/users/1637325-xb70sr71
 
-Tampermonkey 里脚本名是「LINUX.SB 氢（RC）」和「LINUX.SB 氧（RC）」。冻本：氢 **0.1.22**、氧 **1.0.59**。Greasy Fork 若落后，以油猴 / 氢面板里的版本为准。
+Tampermonkey 里脚本名是「LINUX.SB 氢（RC）」和「LINUX.SB 氧（RC）」。冻本：氢 **0.1.22**、氧 **1.0.60**。Greasy Fork 若落后，以油猴 / 氢面板里的版本为准。
 
 源码：https://github.com/Gbtzay/linuxsb-base
-Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.59
+Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.60
 
 装之前建议先在氢面板里用「配置迁移」导出一份备份（第一次装可以忽略）。
 
