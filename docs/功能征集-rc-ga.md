@@ -1,8 +1,8 @@
-# 【功能征集】氢 / 氧准备收口 Beta，问还有什么非做不可
+# 【功能征集】氢 / 氧已进 RC，GA 之前还缺什么
 
-氢和氧还在 **Beta**。这几个月壳、实时流、续读、哨兵、签到、积分趋势、称号行情这些已经能日常用了。接下来想收口：先 RC 冻新功能、修漏，再考虑摘掉 Beta、进 Stable / GA。
+氢和氧已经进入 **RC**（氢 0.1.22、氧 1.0.59）：冻新功能，只修阻断。摘掉 RC、进正式版 / GA 是下一阶段。
 
-不是站点官方出品。数据只在你自己浏览器里。收口不等于不会再改，只是新功能会变少、变稳。
+不是站点官方出品。数据只在你自己浏览器里。RC 不等于不会再修，只是新功能先停。
 
 ## 已经有的
 
@@ -25,30 +25,33 @@
 - 年度报告
 - 配置迁移
 
-氢壳主要是我自己用，不喜欢布局的可以关：油猴图标菜单，或氢面板「界面精修」。关了就回到原版界面，其它功能保留。
+氢壳不喜欢可以关：油猴图标菜单，或氢面板「界面精修」。关了就回到原版界面，其它功能保留。
 
-## 这帖优先收三件事
+## 这帖现在收什么
 
-1. 你天天用 linux.sb 时，脚本还缺哪一步（越具体越好，比如「交易页想看某某」「列表想怎样」）
-2. 现有功能里哪块别扭、多余、或你已经关掉了
-3. 进 RC 前必须修掉的坑（带氢/氧版本、哪一页、怎么复现）
+1. RC 冻本上的坑（带氢/氧版本、哪一页、怎么复现）——优先修
+2. 进 GA 前必须修掉的问题
+3. 现有功能里哪块别扭、多余、或你已经关掉了
 
-许愿不保证做。和站点抢活、要改服务端、或明显会把请求打爆的，这轮不做。
+许愿不保证做。和站点抢活、要改服务端、或明显会把请求打爆的，这轮不做。新功能等 GA 后再说。
+
+已知问题：[`已知问题-rc.md`](已知问题-rc.md)
 
 ## 安装
 
 两个都要装，**先氢后氧**。
 
 1. 浏览器装 [Tampermonkey](https://www.tampermonkey.net/)
-2. 安装氢（Beta）：https://greasyfork.org/zh-CN/scripts/592914-linux-sb-%E6%B0%A2-beta
-3. 安装氧（Beta）：https://greasyfork.org/zh-CN/scripts/592915-linux-sb-%E6%B0%A7-beta
+2. 安装氢（RC）：https://greasyfork.org/zh-CN/scripts/592914-linux-sb-%E6%B0%A2-beta
+3. 安装氧（RC）：https://greasyfork.org/zh-CN/scripts/592915-linux-sb-%E6%B0%A7-beta
 4. 打开 linux.sb，右下角出现 **H**，氢面板「插件」里能看到一串模块，就算装上了
 
 作者页：https://greasyfork.org/zh-CN/users/1637325-xb70sr71
 
-Tampermonkey 里脚本名是「LINUX.SB 氢（Beta）」和「LINUX.SB 氧（Beta）」。当前源码侧是氢 0.1.17、氧 1.0.52。Greasy Fork 若落后，以油猴 / 氢面板里的版本为准。
+Tampermonkey 里脚本名是「LINUX.SB 氢（RC）」和「LINUX.SB 氧（RC）」。冻本：氢 **0.1.22**、氧 **1.0.59**。Greasy Fork 若落后，以油猴 / 氢面板里的版本为准。
 
 源码：https://github.com/Gbtzay/linuxsb-base
+Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.59
 
 装之前建议先在氢面板里用「配置迁移」导出一份备份（第一次装可以忽略）。
 
@@ -62,5 +65,3 @@ Tampermonkey 里脚本名是「LINUX.SB 氢（Beta）」和「LINUX.SB 氧（Bet
 - 能复现的话更好；氢面板「运行日志」可以一并带上
 
 反馈里不要贴 API Key。
-
-愿意帮忙的话，先氢后氧，用几天，把缺的和坑砸在这个帖里。谢谢。

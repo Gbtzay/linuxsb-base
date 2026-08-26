@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         LINUX.SB 氢（Beta）
-// @name:en      LINUX.SB Hydrogen (Beta)
+// @name         LINUX.SB 氢（RC）
+// @name:en      LINUX.SB Hydrogen (RC)
 // @namespace    https://linux.sb/
-// @version      0.1.21
-// @description  【Beta】linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧（Beta）」一起使用。
-// @description:en  [Beta] Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen (Beta) for features.
+// @version      0.1.22
+// @description  【RC】冻新功能，只修阻断。linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧（RC）」一起使用。
+// @description:en  [RC] Feature-frozen. Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen (RC) for features.
 // @author       xB70sR71
 // @license      MIT
 // @match        https://linux.sb/*
@@ -984,7 +984,7 @@
 .lsb-empty{color:var(--text-muted,#888);padding:14px 0}
 `;
   var UI = class {
-    constructor({ title = "LINUX.SB · 氢（Beta）", version = "" } = {}) {
+    constructor({ title = "LINUX.SB · 氢（RC）", version = "" } = {}) {
       this.title = title;
       this.version = version;
       this._tabs = [];
@@ -1084,9 +1084,8 @@
       const btn = document.createElement("button");
       btn.className = "lsb-launcher";
       btn.type = "button";
-      btn.title = `${this.title} 设置`;
+      btn.title = this.title;
       btn.textContent = "H";
-      btn.title = "LINUX.SB · 氢（Beta）";
       btn.onclick = () => this.openPanel();
       document.body.appendChild(btn);
       this._launcher = btn;
@@ -1596,7 +1595,7 @@
   };
 
   // src/core.js
-  var VERSION = "0.1.21";
+  var VERSION = "0.1.22";
   var PERMISSIONS = {
     read: "读取页面结构与站内 GET 请求",
     write: "代表当前用户发起写操作（回复/点赞/收藏等）",
@@ -1646,7 +1645,7 @@
         gmRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null
       });
       this.actions = new Actions(this.net);
-      this.ui = new UI({ title: "LINUX.SB · 氢（Beta）", version: VERSION });
+      this.ui = new UI({ title: "LINUX.SB · 氢（RC）", version: VERSION });
       this.dom = new DomWatcher(this.bus);
       this.site = site_exports;
       this.channel = null;

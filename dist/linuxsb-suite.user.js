@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         LINUX.SB 氧（Beta）
-// @name:en      LINUX.SB Oxygen (Beta)
+// @name         LINUX.SB 氧（RC）
+// @name:en      LINUX.SB Oxygen (RC)
 // @namespace    https://linux.sb/
-// @version      1.0.58
-// @description  【Beta】linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 18 个模块。必须先安装「LINUX.SB 氢（Beta）」。
-// @description:en  [Beta] Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen (Beta).
+// @version      1.0.59
+// @description  【RC】冻新功能，只修阻断。linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 18 个模块。必须先安装「LINUX.SB 氢（RC）」。
+// @description:en  [RC] Feature-frozen. Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen (RC).
 // @author       xB70sR71
 // @license      MIT
 // @match        https://linux.sb/*
@@ -6743,7 +6743,7 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.58',
+    version: '1.0.59',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },

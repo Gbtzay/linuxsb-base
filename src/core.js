@@ -8,7 +8,7 @@ import * as site from './site.js'
 import { Election } from './election.js'
 import { satisfies, deepFreeze, clone, esc, num, text, sleep, throttle } from './util.js'
 
-export const VERSION = '0.1.21'
+export const VERSION = '0.1.22'
 
 /** 权限清单：插件在 manifest.permissions 里声明，未声明即调用会抛错 */
 export const PERMISSIONS = {
@@ -66,7 +66,7 @@ export class Core {
       gmRequest: typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null,
     })
     this.actions = new Actions(this.net)
-    this.ui = new UI({ title: 'LINUX.SB · 氢（Beta）', version: VERSION })
+    this.ui = new UI({ title: 'LINUX.SB · 氢（RC）', version: VERSION })
     this.dom = new DomWatcher(this.bus)
     this.site = site
     this.channel = null

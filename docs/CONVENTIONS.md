@@ -47,6 +47,17 @@
   都会损坏中文内容——**改插件请用编辑器或 Node 写入，不要用 shell 重定向**；
 - `test/suite.test.js` 有对应用例（无 BOM / 无 CRLF / 两个产物均可被 `new Function` 解析）。
 
+## 2.2 RC 冻结（当前）
+
+氢 **0.1.22** / 氧 **1.0.59** 已进入 RC：冻新功能，只修阻断。
+
+- 只收：装不上、页面花了、请求打爆、数据丢了、氢壳 / 回位 / 实时流 / 称号行情明显错。
+- RC 期间不得往 `ORDER` 加新模块，不得改对外产品名隐喻（H₂O 等）。
+- 油猴显示名为「氢（RC）」「氧（RC）」。Greasy Fork 列表 URL 仍可能带 `-beta` slug，以脚本头 `@version` 为准。
+- 必须出包时氢 / 氧补丁号 +1，changelog 只写修复。摘 RC 进 GA 是另一次发版。
+
+已知问题见 [`docs/已知问题-rc.md`](已知问题-rc.md)。
+
 ## 3. 已知约束（勿踩）
 
 - 站点无限滚动下启动快照会过期 → 增量一律走 `dom:list-added` / `topic:posts-added` / `route:changed`；

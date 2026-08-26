@@ -52,7 +52,7 @@ const CSS = `
 `
 
 export class UI {
-  constructor({ title = 'LINUX.SB · 氢（Beta）', version = '' } = {}) {
+  constructor({ title = 'LINUX.SB · 氢（RC）', version = '' } = {}) {
     this.title = title
     this.version = version
     this._tabs = [] // 插件注册的面板分页
@@ -160,9 +160,8 @@ export class UI {
     const btn = document.createElement('button')
     btn.className = 'lsb-launcher'
     btn.type = 'button'
-    btn.title = `${this.title} 设置`
+    btn.title = this.title
     btn.textContent = 'H'
-    btn.title = 'LINUX.SB · 氢（Beta）'
     btn.onclick = () => this.openPanel()
     document.body.appendChild(btn)
     this._launcher = btn
