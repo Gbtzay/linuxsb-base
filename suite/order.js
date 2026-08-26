@@ -11,6 +11,7 @@ export const ORDER = [
   'forum-watch',
   'checkin-calendar',
   'points-ledger',
+  'title-quotes',
   'ai-summary',
   'data-migration',
   'my-archive',

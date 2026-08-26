@@ -8,7 +8,7 @@ import * as site from './site.js'
 import { Election } from './election.js'
 import { satisfies, deepFreeze, clone, esc, num, text, sleep, throttle } from './util.js'
 
-export const VERSION = '0.1.17'
+export const VERSION = '0.1.21'
 
 /** 权限清单：插件在 manifest.permissions 里声明，未声明即调用会抛错 */
 export const PERMISSIONS = {
@@ -141,6 +141,7 @@ export class Core {
   boot() {
     if (this.ready) return this
     this.snapshot = site.snapshot(document, location)
+    this._sealSnapshot()
     this.net.setCsrf(this.snapshot.csrf)
     this.channel = new Channel(this.bus, { store: coreStore })
     this.dom.start(document.body)
@@ -213,7 +214,8 @@ export class Core {
    */
   _refreshSnapshot() {
     try {
-      this.snapshot = site.snapshot(document, location)
+      this.snapshot = site.snapshot(document, location, this.snapshot)
+      this._sealSnapshot()
       this.net.setCsrf(this.snapshot.csrf)
     } catch {
       try {
@@ -222,6 +224,14 @@ export class Core {
         /* location 不可解析时保持旧值 */
       }
     }
+  }
+
+  /** 只冻 me / forums：整份 snapshot 含 DOM 节点，不能冻 */
+  _sealSnapshot() {
+    const s = this.snapshot
+    if (!s) return
+    if (s.me) deepFreeze(s.me)
+    if (s.forums) deepFreeze(s.forums)
   }
 
   /** pages: 限定的插件随路由启停；无 pages 的插件不受影响 */
@@ -483,10 +493,10 @@ export class Core {
         return core.snapshot.page
       },
       get me() {
-        return clone(core.snapshot.me)
+        return core.snapshot.me
       },
       get forums() {
-        return clone(core.snapshot.forums)
+        return core.snapshot.forums
       },
       get snapshot() {
         return core.snapshot

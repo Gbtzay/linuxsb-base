@@ -297,18 +297,23 @@ export function parseLikeTargets(doc = document) {
   }))
 }
 
-/** 页面级快照：插件启动时拿一次就够 */
-export function snapshot(doc = document, loc = location) {
+/**
+ * 页面级快照。page / csrf / me / version 每次重读；
+ * 同页 type+id 时复用 topic / list / user / forums，避免软导航整页重解析楼层。
+ */
+export function snapshot(doc = document, loc = location, prev = null) {
   const page = detectPage(loc)
+  const same =
+    prev?.page?.type === page.type && (prev.page.id ?? null) === (page.id ?? null)
   const snap = {
     page,
     csrf: readCsrf(doc),
     me: readCurrentUser(doc),
-    forums: readForums(doc),
+    forums: same && prev.forums ? prev.forums : readForums(doc),
     version: doc.querySelector('link[href*="index.css?v="]')?.getAttribute('href')?.match(/v=v?([\d.]+)/)?.[1] || null,
   }
-  if (page.type === 'topic') snap.topic = parseTopic(doc)
-  if (page.type === 'user') snap.user = parseUser(doc)
-  if (page.type === 'home' || page.type === 'forum') snap.list = parseList(doc)
+  if (page.type === 'topic') snap.topic = same && prev.topic ? prev.topic : parseTopic(doc)
+  if (page.type === 'user') snap.user = same && prev.user ? prev.user : parseUser(doc)
+  if (page.type === 'home' || page.type === 'forum') snap.list = same && prev.list ? prev.list : parseList(doc)
   return snap
 }

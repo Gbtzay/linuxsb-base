@@ -12,29 +12,71 @@ function gmAvailable() {
 }
 
 class Backend {
+  constructor() {
+    this._mem = new Map()
+    this._lsRef = null
+  }
+
+  /** 测试里每次换 JSDOM 会换 localStorage 实例，缓存必须跟着丢掉 */
+  _syncCacheScope() {
+    if (gmAvailable()) return
+    try {
+      if (this._lsRef !== localStorage) {
+        this._mem.clear()
+        this._lsRef = localStorage
+      }
+    } catch {
+      this._mem.clear()
+      this._lsRef = null
+    }
+  }
+
   get(key, def) {
+    this._syncCacheScope()
     if (gmAvailable()) {
+      if (this._mem.has(key)) {
+        const hit = this._mem.get(key)
+        return hit.value === undefined ? def : hit.value
+      }
       const v = GM_getValue(key, undefined)
-      return v === undefined ? def : v
+      if (v === undefined) return def
+      this._mem.set(key, { value: v })
+      return v
     }
     try {
       const raw = localStorage.getItem(key)
-      return raw === null ? def : JSON.parse(raw)
+      if (raw === null) {
+        this._mem.delete(key)
+        return def
+      }
+      const hit = this._mem.get(key)
+      if (hit && hit.raw === raw) return hit.value
+      const v = JSON.parse(raw)
+      this._mem.set(key, { raw, value: v })
+      return v
     } catch {
       return def
     }
   }
 
   set(key, value) {
-    if (gmAvailable()) return GM_setValue(key, value)
+    this._syncCacheScope()
+    if (gmAvailable()) {
+      this._mem.set(key, { value })
+      return GM_setValue(key, value)
+    }
     try {
-      localStorage.setItem(key, JSON.stringify(value))
+      const raw = JSON.stringify(value)
+      localStorage.setItem(key, raw)
+      this._mem.set(key, { raw, value })
     } catch (e) {
       console.warn('[LSB store] 写入失败', e)
     }
   }
 
   del(key) {
+    this._syncCacheScope()
+    this._mem.delete(key)
     if (gmAvailable() && typeof GM_deleteValue === 'function') return GM_deleteValue(key)
     try {
       localStorage.removeItem(key)

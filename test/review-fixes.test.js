@@ -95,6 +95,17 @@ test('软导航后 snapshot 与 CSRF 跟随当前文档，不再残留旧帖', a
   assert.notEqual(oldCsrf, 'csrf-after-nav')
 })
 
+test('同帖翻页不重解析 snapshot.topic', async () => {
+  localStorage.setItem('lsb_base:__core:urlPoll', JSON.stringify(20))
+  const core = boot()
+  const topicRef = core.snapshot.topic
+  assert.ok(topicRef)
+  window.history.replaceState({}, '', '/topic/1?p=2')
+  await new Promise((r) => setTimeout(r, 150))
+  assert.equal(core.snapshot.page.page, 2)
+  assert.equal(core.snapshot.topic, topicRef, '只刷新 page，不整页 parseTopic')
+})
+
 test('pages 限定插件：离页停用、回页重激活', async () => {
   localStorage.setItem('lsb_base:__core:urlPoll', JSON.stringify(20))
   const core = boot()

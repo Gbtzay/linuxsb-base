@@ -158,6 +158,17 @@ test('权限：声明后可用，且存储按插件隔离', () => {
   assert.deepEqual(a1.store.keys(), ['shared'])
 })
 
+test('热路径：api.me / api.forums 连续读取不重新深拷贝', () => {
+  const core = boot()
+  let api
+  core.register({ id: 'hotread', version: '1.0.0' }, (a) => {
+    api = a
+  })
+  assert.equal(api.me, api.me, '同一快照内 me 是同一引用')
+  assert.equal(api.forums, api.forums, '同一快照内 forums 是同一引用')
+  assert.equal(api.me.uid, 5372)
+})
+
 test('config：默认值合并 + 保存 + 变更事件', () => {
   const core = boot()
   let api

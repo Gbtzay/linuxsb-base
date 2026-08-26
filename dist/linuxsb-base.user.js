@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氢（Beta）
 // @name:en      LINUX.SB Hydrogen (Beta)
 // @namespace    https://linux.sb/
-// @version      0.1.17
+// @version      0.1.21
 // @description  【Beta】linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧（Beta）」一起使用。
 // @description:en  [Beta] Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen (Beta) for features.
 // @author       xB70sR71
@@ -537,18 +537,19 @@
       el: btn
     }));
   }
-  function snapshot(doc = document, loc = location) {
+  function snapshot(doc = document, loc = location, prev = null) {
     const page = detectPage(loc);
+    const same = prev?.page?.type === page.type && (prev.page.id ?? null) === (page.id ?? null);
     const snap = {
       page,
       csrf: readCsrf(doc),
       me: readCurrentUser(doc),
-      forums: readForums(doc),
+      forums: same && prev.forums ? prev.forums : readForums(doc),
       version: doc.querySelector('link[href*="index.css?v="]')?.getAttribute("href")?.match(/v=v?([\d.]+)/)?.[1] || null
     };
-    if (page.type === "topic") snap.topic = parseTopic(doc);
-    if (page.type === "user") snap.user = parseUser(doc);
-    if (page.type === "home" || page.type === "forum") snap.list = parseList(doc);
+    if (page.type === "topic") snap.topic = same && prev.topic ? prev.topic : parseTopic(doc);
+    if (page.type === "user") snap.user = same && prev.user ? prev.user : parseUser(doc);
+    if (page.type === "home" || page.type === "forum") snap.list = same && prev.list ? prev.list : parseList(doc);
     return snap;
   }
 
@@ -789,27 +790,67 @@
     return typeof GM_getValue === "function" && typeof GM_setValue === "function";
   }
   var Backend = class {
+    constructor() {
+      this._mem = /* @__PURE__ */ new Map();
+      this._lsRef = null;
+    }
+    /** 测试里每次换 JSDOM 会换 localStorage 实例，缓存必须跟着丢掉 */
+    _syncCacheScope() {
+      if (gmAvailable()) return;
+      try {
+        if (this._lsRef !== localStorage) {
+          this._mem.clear();
+          this._lsRef = localStorage;
+        }
+      } catch {
+        this._mem.clear();
+        this._lsRef = null;
+      }
+    }
     get(key, def) {
+      this._syncCacheScope();
       if (gmAvailable()) {
+        if (this._mem.has(key)) {
+          const hit = this._mem.get(key);
+          return hit.value === void 0 ? def : hit.value;
+        }
         const v = GM_getValue(key, void 0);
-        return v === void 0 ? def : v;
+        if (v === void 0) return def;
+        this._mem.set(key, { value: v });
+        return v;
       }
       try {
         const raw = localStorage.getItem(key);
-        return raw === null ? def : JSON.parse(raw);
+        if (raw === null) {
+          this._mem.delete(key);
+          return def;
+        }
+        const hit = this._mem.get(key);
+        if (hit && hit.raw === raw) return hit.value;
+        const v = JSON.parse(raw);
+        this._mem.set(key, { raw, value: v });
+        return v;
       } catch {
         return def;
       }
     }
     set(key, value) {
-      if (gmAvailable()) return GM_setValue(key, value);
+      this._syncCacheScope();
+      if (gmAvailable()) {
+        this._mem.set(key, { value });
+        return GM_setValue(key, value);
+      }
       try {
-        localStorage.setItem(key, JSON.stringify(value));
+        const raw = JSON.stringify(value);
+        localStorage.setItem(key, raw);
+        this._mem.set(key, { raw, value });
       } catch (e) {
         console.warn("[LSB store] 写入失败", e);
       }
     }
     del(key) {
+      this._syncCacheScope();
+      this._mem.delete(key);
       if (gmAvailable() && typeof GM_deleteValue === "function") return GM_deleteValue(key);
       try {
         localStorage.removeItem(key);
@@ -1271,7 +1312,11 @@
       this.bus = bus;
       this._observer = null;
       this._rules = [];
+      this._scanCount = 0;
       this._notify = throttle(() => this.bus.emit("dom:changed", null, { source: "core" }), 120);
+    }
+    get scanCount() {
+      return this._scanCount;
     }
     start(root = document.body) {
       if (this._observer || !root) return;
@@ -1286,6 +1331,7 @@
     _onMutations(records) {
       const posts = /* @__PURE__ */ new Set();
       const items = /* @__PURE__ */ new Set();
+      const added = [];
       for (const rec of records) {
         for (const node of rec.addedNodes) {
           if (node.nodeType !== 1) continue;
@@ -1293,12 +1339,37 @@
           else if (node.matches?.("li.post-item")) items.add(node);
           for (const el of node.querySelectorAll?.("li.post-entry") || []) posts.add(el);
           for (const el of node.querySelectorAll?.("li.post-item:not(.post-entry)") || []) items.add(el);
-          this._scan(node);
+          added.push(node);
         }
       }
+      this._scanBatch(added);
       if (posts.size) this.bus.emit("dom:posts-added", [...posts], { raw: true, source: "core" });
       if (items.size) this.bus.emit("dom:list-added", [...items], { raw: true, source: "core" });
       if (records.length) this._notify();
+    }
+    /** 同批兄弟节点只扫父节点一次，避免无限滚动 20 条各扫一遍全部 onEach */
+    _scanBatch(nodes) {
+      if (!nodes.length) return;
+      const byParent = /* @__PURE__ */ new Map();
+      const orphans = [];
+      for (const node of nodes) {
+        const parent = node.parentNode;
+        if (parent && parent.nodeType === 1) {
+          let bucket = byParent.get(parent);
+          if (!bucket) {
+            bucket = [];
+            byParent.set(parent, bucket);
+          }
+          bucket.push(node);
+        } else {
+          orphans.push(node);
+        }
+      }
+      for (const [parent, kids] of byParent) {
+        if (kids.length > 1) this._scan(parent);
+        else this._scan(kids[0]);
+      }
+      for (const node of orphans) this._scan(node);
     }
     /**
      * 对匹配 selector 的元素执行 fn，包含未来新增的。
@@ -1316,6 +1387,7 @@
       this._rules = this._rules.filter((r) => r.owner !== owner);
     }
     _scan(root) {
+      this._scanCount++;
       for (const rule of this._rules) this._applyRule(rule, root);
     }
     _applyRule(rule, root) {
@@ -1524,7 +1596,7 @@
   };
 
   // src/core.js
-  var VERSION = "0.1.17";
+  var VERSION = "0.1.21";
   var PERMISSIONS = {
     read: "读取页面结构与站内 GET 请求",
     write: "代表当前用户发起写操作（回复/点赞/收藏等）",
@@ -1640,6 +1712,7 @@
     boot() {
       if (this.ready) return this;
       this.snapshot = snapshot(document, location);
+      this._sealSnapshot();
       this.net.setCsrf(this.snapshot.csrf);
       this.channel = new Channel(this.bus, { store: coreStore });
       this.dom.start(document.body);
@@ -1707,7 +1780,8 @@
      */
     _refreshSnapshot() {
       try {
-        this.snapshot = snapshot(document, location);
+        this.snapshot = snapshot(document, location, this.snapshot);
+        this._sealSnapshot();
         this.net.setCsrf(this.snapshot.csrf);
       } catch {
         try {
@@ -1715,6 +1789,13 @@
         } catch {
         }
       }
+    }
+    /** 只冻 me / forums：整份 snapshot 含 DOM 节点，不能冻 */
+    _sealSnapshot() {
+      const s = this.snapshot;
+      if (!s) return;
+      if (s.me) deepFreeze(s.me);
+      if (s.forums) deepFreeze(s.forums);
     }
     /** pages: 限定的插件随路由启停；无 pages 的插件不受影响 */
     _syncPagePlugins() {
@@ -1959,10 +2040,10 @@
           return core.snapshot.page;
         },
         get me() {
-          return clone(core.snapshot.me);
+          return core.snapshot.me;
         },
         get forums() {
-          return clone(core.snapshot.forums);
+          return core.snapshot.forums;
         },
         get snapshot() {
           return core.snapshot;
@@ -2393,11 +2474,30 @@
   // src/shell-boot.js
   var SHELL_BOOT_STYLE_ID = "lsb-shell-boot-style";
   var SHELL_BOOT_CLASS = "lsb-shell-boot";
+  var SHELL_BOOT_FRAME_ID = "lsb-shell-boot-frame";
   var BOOT_CSS = `
 html.lsb-shell-boot{
   --lsb-shell-header:48px;
   --lsb-shell-rail:240px;
   --lsb-shell-aside:280px;
+  background:var(--bg,#f4f5f7);
+}
+#lsb-shell-boot-frame{pointer-events:none}
+#lsb-shell-boot-frame > [data-boot]{display:none;position:fixed}
+#lsb-shell-boot-frame > [data-boot="header"]{
+  top:0;left:0;right:0;height:48px;z-index:7990;
+  background:color-mix(in srgb,var(--panel,#fff) 78%,transparent);
+  box-shadow:0 1px 0 color-mix(in srgb,var(--line,#ddd) 55%,transparent);
+}
+#lsb-shell-boot-frame > [data-boot="rail"]{
+  top:0;left:0;bottom:0;width:240px;z-index:7989;
+  background:var(--bg,#f4f5f7);
+  border-right:1px solid var(--line-soft,#e8e8e8);
+}
+#lsb-shell-boot-frame > [data-boot="aside"]{
+  top:48px;right:0;bottom:0;width:280px;z-index:7989;
+  background:var(--bg,#f4f5f7);
+  border-left:1px solid var(--line-soft,#e8e8e8);
 }
 @media (min-width:900px){
   html.lsb-shell-boot{padding-top:48px;padding-left:240px}
@@ -2411,9 +2511,12 @@ html.lsb-shell-boot{
     max-width:none!important;margin-left:0!important;margin-right:0!important;width:auto!important;
   }
   html.lsb-shell-boot .lsb-launcher{display:none!important}
+  html.lsb-shell-boot #lsb-shell-boot-frame > [data-boot="header"],
+  html.lsb-shell-boot #lsb-shell-boot-frame > [data-boot="rail"]{display:block}
 }
 @media (min-width:1100px){
   html.lsb-shell-boot{padding-right:280px}
+  html.lsb-shell-boot #lsb-shell-boot-frame > [data-boot="aside"]{display:block}
 }
 `;
   function shouldShellBoot() {
@@ -2422,8 +2525,18 @@ html.lsb-shell-boot{
     if (cfg && cfg.shell === false) return false;
     return true;
   }
+  function ensureBootFrame(doc) {
+    const root = doc.documentElement;
+    if (!root || doc.getElementById(SHELL_BOOT_FRAME_ID)) return;
+    const frame = doc.createElement("div");
+    frame.id = SHELL_BOOT_FRAME_ID;
+    frame.setAttribute("aria-hidden", "true");
+    frame.innerHTML = '<div data-boot="header"></div><div data-boot="rail"></div><div data-boot="aside"></div>';
+    root.appendChild(frame);
+  }
   function clearShellBoot(doc = document) {
     doc.getElementById(SHELL_BOOT_STYLE_ID)?.remove();
+    doc.getElementById(SHELL_BOOT_FRAME_ID)?.remove();
     doc.documentElement?.classList.remove(SHELL_BOOT_CLASS);
   }
   function applyShellBoot(doc = document) {
@@ -2434,12 +2547,14 @@ html.lsb-shell-boot{
       return;
     }
     root.classList.add(SHELL_BOOT_CLASS);
-    if (doc.getElementById(SHELL_BOOT_STYLE_ID)) return;
-    const el = doc.createElement("style");
-    el.id = SHELL_BOOT_STYLE_ID;
-    el.textContent = BOOT_CSS;
-    const parent = doc.head || root;
-    parent.insertBefore(el, parent.firstChild);
+    if (!doc.getElementById(SHELL_BOOT_STYLE_ID)) {
+      const el = doc.createElement("style");
+      el.id = SHELL_BOOT_STYLE_ID;
+      el.textContent = BOOT_CSS;
+      const parent = doc.head || root;
+      parent.insertBefore(el, parent.firstChild);
+    }
+    ensureBootFrame(doc);
   }
   function watchShellBoot(bus) {
     if (!bus?.on) return;

@@ -168,3 +168,24 @@ test('snapshot 汇总当前页信息', () => {
   assert.equal(snap.topic.title, 'LINUX SB上线 更新的理想型社区')
   assert.ok(snap.csrf)
 })
+
+test('snapshot：同帖翻页复用 topic/forums，不整页重解析楼层', () => {
+  const w = load('topic1.html', 'https://linux.sb/topic/1')
+  const a = snapshot(w.document, new URL('https://linux.sb/topic/1'))
+  const b = snapshot(w.document, new URL('https://linux.sb/topic/1?p=2'), a)
+  assert.equal(b.page.page, 2)
+  assert.equal(b.topic, a.topic, '同帖 id 不换时复用 topic 对象')
+  assert.equal(b.forums, a.forums, '版块清单一并复用')
+  assert.notEqual(b.me, a.me, '身份每次重读（积分可能变）')
+})
+
+test('snapshot：换页类型时丢掉旧 topic，补上 list', () => {
+  const topicWin = load('topic1.html', 'https://linux.sb/topic/1')
+  const prev = snapshot(topicWin.document, new URL('https://linux.sb/topic/1'))
+  const home = load('home.html', 'https://linux.sb/')
+  const next = snapshot(home.document, new URL('https://linux.sb/'), prev)
+  assert.equal(next.page.type, 'home')
+  assert.equal(next.topic, undefined)
+  assert.ok(Array.isArray(next.list))
+  assert.ok(next.list.length > 0)
+})

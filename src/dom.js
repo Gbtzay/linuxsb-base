@@ -13,7 +13,12 @@ export class DomWatcher {
     this.bus = bus
     this._observer = null
     this._rules = [] // { selector, fn, seen:WeakSet }
+    this._scanCount = 0
     this._notify = throttle(() => this.bus.emit('dom:changed', null, { source: 'core' }), 120)
+  }
+
+  get scanCount() {
+    return this._scanCount
   }
 
   start(root = document.body) {
@@ -34,6 +39,7 @@ export class DomWatcher {
     // 下游解析层会对同一楼层重复计数。
     const posts = new Set()
     const items = new Set()
+    const added = []
     for (const rec of records) {
       for (const node of rec.addedNodes) {
         if (node.nodeType !== 1) continue
@@ -41,12 +47,38 @@ export class DomWatcher {
         else if (node.matches?.('li.post-item')) items.add(node)
         for (const el of node.querySelectorAll?.('li.post-entry') || []) posts.add(el)
         for (const el of node.querySelectorAll?.('li.post-item:not(.post-entry)') || []) items.add(el)
-        this._scan(node)
+        added.push(node)
       }
     }
+    this._scanBatch(added)
     if (posts.size) this.bus.emit('dom:posts-added', [...posts], { raw: true, source: 'core' })
     if (items.size) this.bus.emit('dom:list-added', [...items], { raw: true, source: 'core' })
     if (records.length) this._notify()
+  }
+
+  /** 同批兄弟节点只扫父节点一次，避免无限滚动 20 条各扫一遍全部 onEach */
+  _scanBatch(nodes) {
+    if (!nodes.length) return
+    const byParent = new Map()
+    const orphans = []
+    for (const node of nodes) {
+      const parent = node.parentNode
+      if (parent && parent.nodeType === 1) {
+        let bucket = byParent.get(parent)
+        if (!bucket) {
+          bucket = []
+          byParent.set(parent, bucket)
+        }
+        bucket.push(node)
+      } else {
+        orphans.push(node)
+      }
+    }
+    for (const [parent, kids] of byParent) {
+      if (kids.length > 1) this._scan(parent)
+      else this._scan(kids[0])
+    }
+    for (const node of orphans) this._scan(node)
   }
 
   /**
@@ -67,6 +99,7 @@ export class DomWatcher {
   }
 
   _scan(root) {
+    this._scanCount++
     for (const rule of this._rules) this._applyRule(rule, root)
   }
 

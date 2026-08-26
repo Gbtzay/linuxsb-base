@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·界面精修
 // @namespace    https://linux.sb/
-// @version      1.1.29
+// @version      1.1.37
 // @description  氢壳（左栏+顶栏+帖内时间轴）与排版层：正文行高、列表密度、代码块、OP 高亮、限宽阅读。只动结构与排版，不碰配色。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.29',
+    version: '1.1.37',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -111,7 +111,7 @@
           border-right:1px solid var(--line-soft,#e8e8e8);
           font-family:${FONT_SANS};
         }
-        .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:auto;padding:56px 12px 12px}
+        .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:hidden;padding:56px 12px 12px}
         .lsb-shell-me{margin:0 0 14px}
         .lsb-shell-me .sidebar-card.user-card{
           margin:0;padding:10px 10px;border:0;box-shadow:none;
@@ -218,6 +218,7 @@
           font-family:${FONT_SANS};font-size:11px;font-weight:600;color:var(--text-muted,#888);
         }
         #lsb-shell-timeline[hidden]{display:none!important}
+        html.lsb-skin-shell-on .image-lightbox-image{max-width:100%;max-height:100%}
         .lsb-shell-edge{
           border:0;background:transparent;color:var(--text,#222);cursor:pointer;
           font:inherit;font-weight:600;padding:4px;
@@ -292,12 +293,18 @@
           html.lsb-skin-shell-on .lsb-launcher{display:none!important}
           html.lsb-skin-shell-user{padding-right:var(--lsb-shell-aside)}
           html.lsb-skin-shell-user #lsb-shell-aside{display:block}
+          html.lsb-skin-shell-on .image-lightbox-overlay{
+            top:var(--lsb-shell-header);left:var(--lsb-shell-rail);right:0;bottom:0;
+          }
+          html.lsb-skin-shell-topic .image-lightbox-overlay{right:var(--lsb-shell-timeline)}
+          html.lsb-skin-shell-user .image-lightbox-overlay{right:var(--lsb-shell-aside)}
         }
         @media(min-width:1100px){
           html.lsb-skin-shell-on{padding-right:var(--lsb-shell-aside)}
           html.lsb-skin-shell-topic{padding-right:var(--lsb-shell-aside)}
           html.lsb-skin-shell-on #lsb-shell-aside{display:block}
           html.lsb-skin-shell-on #lsb-shell-timeline{display:none!important}
+          html.lsb-skin-shell-on .image-lightbox-overlay{right:var(--lsb-shell-aside)}
         }
         @media(hover:hover) and (pointer:fine){
           .lsb-shell-nav .lsb-shell-link:hover{background:color-mix(in srgb,var(--bg,#fff) 40%,transparent)}
@@ -456,6 +463,7 @@
         { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
         { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
         { plugin: 'points-ledger', panel: 'points-ledger', label: '积分趋势' },
+        { plugin: 'title-quotes', panel: 'title-quotes', label: '称号行情' },
         { plugin: 'annual-report', panel: 'annual-report', label: '年度报告' },
       ]
         .filter((t) => active.has(t.plugin))

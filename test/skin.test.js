@@ -44,6 +44,7 @@ const skinCss = (w) => w.document.getElementById('lsb-skin-style')?.textContent 
 const shell = (w) => w.document.getElementById('lsb-shell')
 const bootStyle = (w) => w.document.getElementById('lsb-shell-boot-style')
 const bootCss = (w) => bootStyle(w)?.textContent || ''
+const bootFrame = (w) => w.document.getElementById('lsb-shell-boot-frame')
 
 test('界面精修：默认配置产出全部规则与状态类', async () => {
   const { w } = makeSite()
@@ -186,9 +187,17 @@ test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块，无时间轴',
   const dbg = await w.LSB.bus.request('skin:debug')
   assert.equal(dbg.shell.mounted, true)
   assert.ok(dbg.shell.boards >= 6)
+
+  const railCss = skinCss(w).replace(/\s+/g, '')
+  assert.match(
+    railCss,
+    /\.lsb-shell-rail-scroll\{[^}]*overflow:hidden/,
+    '左栏不可滚，工具再多时再考虑要不要开滚动',
+  )
+  assert.doesNotMatch(railCss, /\.lsb-shell-rail-scroll\{[^}]*overflow:auto/)
 })
 
-test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 年度报告', async () => {
+test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 称号行情 / 年度报告', async () => {
   const { w } = makeHome()
   w.fetch = async (url) => ({
     status: 200,
@@ -201,12 +210,13 @@ test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 年�
     PLUG('ai-summary.user.js'),
     PLUG('checkin-calendar.user.js'),
     PLUG('points-ledger.user.js'),
+    PLUG('title-quotes.user.js'),
     PLUG('annual-report.user.js'),
     PLUG('skin.user.js'),
   )
   const tools = shell(w).querySelector('[data-lsb-shell-section="tools"]')
   const labels = [...tools.querySelectorAll('[data-lsb-panel]')].map((b) => b.textContent.trim())
-  assert.deepEqual(labels, ['AI 历史', '签到日历', '积分趋势', '年度报告'])
+  assert.deepEqual(labels, ['AI 历史', '签到日历', '积分趋势', '称号行情', '年度报告'])
   assert.equal(shell(w).querySelector('#lsb-shell-rail a[href*="daily_checkin"]'), null, '站点每日签到仍留给右栏快捷功能')
 
   const cal = tools.querySelector('[data-lsb-panel="checkin-calendar"]')
@@ -253,6 +263,63 @@ test('氢壳：顶栏站名盖过左栏，并带站点 logo', async () => {
   const headerZ = Number(compact.match(/#lsb-shell-header\{[^}]*z-index:(\d+)/)?.[1] || 0)
   const railZ = Number(compact.match(/#lsb-shell-rail\{[^}]*z-index:(\d+)/)?.[1] || 0)
   assert.ok(headerZ > railZ, '顶栏必须叠在左栏上面，否则左上角的 logo 和站名会被左栏挡住')
+})
+
+test('氢壳：站点大图灯箱落在左右栏之间，不藏壳', async () => {
+  const { w } = makeSite()
+  await loadBase(w, PLUG('skin.user.js'))
+  const compact = skinCss(w).replace(/\s+/g, '')
+  assert.doesNotMatch(
+    compact,
+    /:has\(\.image-lightbox-overlay:not\(\[hidden\]\)\)[^}]*visibility:hidden/,
+    '灯箱打开时不能把氢壳藏掉',
+  )
+  assert.doesNotMatch(
+    compact,
+    /:has\(\.image-lightbox-overlay:not\(\[hidden\]\)\)[^}]*display:none/,
+    '灯箱打开时不能 display:none 氢壳',
+  )
+  assert.match(
+    compact,
+    /\.image-lightbox-overlay\{[^}]*left:var\(--lsb-shell-rail\)/,
+    '灯箱左缘贴左栏，不要铺到栏底下',
+  )
+  assert.match(
+    compact,
+    /\.image-lightbox-overlay\{[^}]*top:var\(--lsb-shell-header\)/,
+    '灯箱上缘贴顶栏',
+  )
+  assert.match(
+    compact,
+    /\.image-lightbox-overlay\{[^}]*right:var\(--lsb-shell-aside\)/,
+    '宽屏灯箱右缘贴右栏',
+  )
+  assert.match(
+    compact,
+    /\.image-lightbox-image\{[^}]*max-width:100%/,
+    '大图按灯箱栏宽缩放，不能再用 96vw 伸进左右栏',
+  )
+})
+
+test('界面精修：不再提供墙纸与液态玻璃', async () => {
+  const { w } = makeSite({ 'lsb_base:skin:__config': { wallpaperUrl: 'https://example.com/w.jpg' } })
+  await loadBase(w, PLUG('skin.user.js'))
+  const root = w.document.documentElement
+  assert.ok(!root.classList.contains('lsb-skin-wallpaper-on'))
+  assert.ok(!root.classList.contains('lsb-skin-glass-on'))
+  assert.equal(root.style.getPropertyValue('--lsb-wallpaper'), '')
+  const dbg = await w.LSB.bus.request('skin:debug')
+  assert.equal(dbg.active.wallpaperUrl, undefined)
+  const compact = skinCss(w).replace(/\s+/g, '')
+  assert.doesNotMatch(compact, /lsb-skin-wallpaper-on/)
+  assert.doesNotMatch(compact, /lsb-skin-glass-on/)
+  assert.doesNotMatch(compact, /blur\(22px\)/)
+  assert.doesNotMatch(compact, /--lsb-wallpaper/)
+  assert.match(compact, /#lsb-shell-rail\{[^}]*background:var\(--bg/)
+  shell(w).querySelector('[data-lsb-shell-settings]').click()
+  const view = w.document.querySelector('.lsb-view')
+  assert.ok(!view.querySelector('input[type=file]'), '设置页不再选本地墙纸')
+  assert.doesNotMatch(view.textContent, /墙纸|本地图/)
 })
 
 test('氢壳：搜索贴住左栏与主栏交界，不额外缩进', async () => {
@@ -664,6 +731,7 @@ test('壳占位：iframe 内不注入基座与壳占位', async () => {
   fw.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
   fw.eval(baseCode)
   assert.equal(fw.document.getElementById('lsb-shell-boot-style'), null, 'iframe 不占位')
+  assert.equal(fw.document.getElementById('lsb-shell-boot-frame'), null, 'iframe 不画铬色块')
   assert.equal(fw.LSB, undefined, 'iframe 不安装 LSB')
   assert.ok(!fw.document.documentElement.classList.contains('lsb-shell-boot'))
 })
@@ -684,10 +752,34 @@ test('壳占位：仅基座就在首屏注入与壳同尺寸的占位，不等�
   assert.ok(/main\.wrap\{[^}]*max-width:none/.test(css), '主栏取消居中，避免先画 1100 再贴左')
 })
 
+test('壳占位：帖子页首屏就画出顶栏与左右栏色块，不等皮肤 setup', async () => {
+  const { w } = makeSite()
+  w.eval(baseCode)
+  const frame = bootFrame(w)
+  assert.ok(frame, '整页进帖时 document-start 就要有铬色块，不能等皮肤扫楼')
+  assert.equal(frame.getAttribute('aria-hidden'), 'true')
+  assert.ok(frame.querySelector('[data-boot="header"]'), '顶栏色块')
+  assert.ok(frame.querySelector('[data-boot="rail"]'), '左栏色块')
+  assert.ok(frame.querySelector('[data-boot="aside"]'), '右栏色块')
+  const css = bootCss(w).replace(/\s+/g, '')
+  assert.ok(css.includes('#lsb-shell-boot-frame'), '色块样式跟占位 CSS 一起注入')
+  assert.ok(css.includes('pointer-events:none'), '色块不抢点击')
+  assert.match(bootCss(w), /z-index:\s*79\d\d/, '叠在真壳（7999+）下面')
+  assert.match(bootCss(w), /var\(--bg,\s*#f4f5f7\)/, '跟壳同一底色，避免先白后灰')
+})
+
+test('壳占位：配置里残留墙纸 URL 也不铺背景', async () => {
+  const { w } = makeHome({ 'lsb_base:skin:__config': { wallpaperUrl: 'https://example.com/w.jpg' } })
+  w.eval(baseCode)
+  assert.doesNotMatch(bootCss(w), /background-image/)
+  assert.doesNotMatch(bootCss(w), /example\.com/)
+})
+
 test('壳占位：配置关闭壳时不注入占位', async () => {
   const { w } = makeHome({ 'lsb_base:skin:__config': { shell: false } })
   w.eval(baseCode)
   assert.equal(bootStyle(w), null)
+  assert.equal(bootFrame(w), null, '关壳不画铬色块')
   assert.ok(!w.document.documentElement.classList.contains('lsb-shell-boot'))
 })
 
@@ -695,6 +787,7 @@ test('壳占位：皮肤插件已停用时不注入占位', async () => {
   const { w } = makeHome({ 'lsb_base:__core:disabled:skin': true })
   w.eval(baseCode)
   assert.equal(bootStyle(w), null)
+  assert.equal(bootFrame(w), null)
 })
 
 test('壳占位：关壳或停用皮肤后撤掉占位，原版顶栏能回来', async () => {
@@ -710,10 +803,12 @@ test('壳占位：关壳或停用皮肤后撤掉占位，原版顶栏能回来',
   w.LSB.bus.emit('config:changed:skin', { shell: false }, { source: 'core' })
   await tick(20)
   assert.equal(bootStyle(w), null, '关壳撤占位')
+  assert.equal(bootFrame(w), null, '关壳撤铬色块')
   assert.ok(!w.document.documentElement.classList.contains('lsb-shell-boot'))
 
   w.LSB.disable('skin')
   assert.equal(bootStyle(w), null, '停用皮肤仍无占位')
+  assert.equal(bootFrame(w), null, '停用皮肤仍无铬色块')
 })
 
 function stubHtmlFetch(w, htmlFor) {

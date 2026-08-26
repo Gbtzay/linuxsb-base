@@ -112,6 +112,7 @@
 | `live-feed` | **实时流**：免刷新获取新帖/新回复。同流序数判定（发布流看 id、回复流看时间戳）杜绝串台误报；**视口锚点补偿**让任意滚动位置都能无感插入；**写回复期间只暂存不打扰**，失焦/切回前台自动补上；老帖被顶起来时原地高亮而非重复插入；站点 AJAX 已插入的楼层不再复制到列表末尾；帖子页回复顶到新页时当轮追补 | read/storage/ui/events |
 | `checkin-calendar` | **签到日历**：自动探测每日状态、月视图 + 连击统计 + 一键签今天（原生无补签，历史自安装日起） | read/storage/ui/events/**write** |
 | `points-ledger` | **积分趋势**：余额快照序列 → SVG 折线 + 每日增减清单；对外 RPC `points-ledger:series` | read/storage/ui/events |
+| `title-quotes` | **称号行情**：采集称号交易挂单最低/最高与中位数，全场四锚点 + 各称号趋势；氧面板与 `/gacha_market` 共用 | read/storage/ui/events |
 | `forum-watch` | **机会监控**：监听指定版块新帖标题命中关键词即提醒；复用哨兵选主机制；「机会箱」面板 | read/storage/ui/events |
 | `local-bridge` | **本地联动**（独立插件，本版氧不收录）：对接本机 workbench(7788)——浏览预热缓存、主楼一键触发 /api/analyze、健康监视与服务端摘要面板；RPC 供其它插件复用 | read/storage/ui/events/**net** |
 | `data-migration` | **配置迁移**：全库数据导出/导入（JSON 文件/剪贴板），覆盖或合并模式；需要基座 ≥0.1.1 的 admin 权限 | read/storage/ui/events/**admin** |
