@@ -175,27 +175,32 @@
       })
     }
 
-    /** 从个人卡原生红点读数。打开通知页会把未读标掉，所以不能靠 GET 通知页。 */
+    /** 从个人卡原生红点读数。打开通知页会把未读标掉，所以不能靠 GET 通知页。
+     *  哨兵自己补的 / 藏掉的点不算原生：只有它们时返回 null，避免软跳把库存写成 0。 */
     function countNativeNotify(root) {
       const as = cardNotifyAnchors(root)
       if (!as.length) return null
       let max = 0
-      let saw = false
+      let sawNative = false
+      let sawOurs = false
       for (const a of as) {
         const els = [...a.querySelectorAll('.notify-badge, .notification-unread, .mobile-nav-unread')].filter(
-          (el) =>
-            !isKeywordFilterBadge(el) &&
-            !el.hasAttribute('data-lsb-notify') &&
-            !el.hasAttribute('data-lsb-notify-hid'),
+          (el) => !isKeywordFilterBadge(el),
         )
         for (const el of els) {
-          saw = true
+          if (el.hasAttribute('data-lsb-notify') || el.hasAttribute('data-lsb-notify-hid')) {
+            sawOurs = true
+            continue
+          }
+          sawNative = true
           const raw = (el.textContent || '').trim()
           const n = raw === '9+' ? 10 : parseInt(raw, 10)
           if (Number.isFinite(n) && n > max) max = n
         }
       }
-      return saw ? max : 0
+      if (sawNative) return max
+      if (sawOurs) return null
+      return 0
     }
 
     function isOwnNotifyPage(page = api.page) {
@@ -214,6 +219,10 @@
     }
 
     function applyNotifyFrom(root) {
+      if (isOwnNotifyPage()) {
+        applyNotify(0)
+        return
+      }
       if (api.me.guest || api.me.uid == null) {
         applyNotify(0)
         return
@@ -241,6 +250,12 @@
       applyTitle()
     })
     api.tabs.on('notify', ({ count }) => {
+      if (isOwnNotifyPage()) {
+        notifyFresh = true
+        api.store.set('notifyCount', 0)
+        paintNotify(0)
+        return
+      }
       notifyFresh = true
       api.store.set('notifyCount', count)
       paintNotify(count)

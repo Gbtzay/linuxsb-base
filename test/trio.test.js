@@ -491,3 +491,47 @@ test('哨兵：进自己的通知页后红点立刻掉，不把库存再画回�
   assert.equal(cardLink.querySelector('[data-lsb-notify]'), null)
 })
 
+test('哨兵：软跳后不要把补上的红点当成原生 0', async () => {
+  const { w, until } = makeSite('home', 'https://linux.sb/', SENTINEL_PRELOAD)
+  putCardBadge(w.document, 0)
+  w.fetch = homeBadgeStub([], 3)
+  await loadBase(w, PLUG('unread-sentinel.user.js'))
+  const dbg = await w.LSB.bus.request('unread-sentinel:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.tick()
+  const card = cardNotifyLink(w.document)
+  assert.equal(nativeLabel(card), '3', '巡检抄到首页个人卡后应补上红点')
+  assert.ok(card.querySelector('[data-lsb-notify]'), '活页没有原生点时由哨兵补上')
+  w.LSB.bus.emit('route:changed', { href: w.location.href, page: { ...w.LSB.__core.snapshot.page } }, { source: 'core' })
+  assert.equal(nativeLabel(card), '3', '软跳后不能把补上的点当成 0 清掉')
+  assert.equal(dbg.diag().notifyCount, 3)
+})
+
+test('哨兵：人还在自己的通知页时，首页巡检不能把红点画回来', async () => {
+  const { w, until } = makeSite('home', 'https://linux.sb/user/5372?tab=notifications', SENTINEL_PRELOAD)
+  const cardLink = putCardBadge(w.document, 0)
+  const calls = []
+  let releaseHome
+  const homeHold = new Promise((r) => {
+    releaseHome = r
+  })
+  w.fetch = async (url) => {
+    const u = String(url)
+    calls.push(u)
+    await homeHold
+    return { status: 200, ok: true, url: u, text: async () => homeWithBadge(3) }
+  }
+  await loadBase(w, PLUG('unread-sentinel.user.js'))
+  assert.equal(nativeLabel(cardLink), '', '进页时红点应立刻掉')
+  const dbg = await w.LSB.bus.request('unread-sentinel:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  const inflight = dbg.tick()
+  releaseHome()
+  await inflight
+  assert.ok(!calls.some((u) => /tab=notifications/.test(u)), `不应打开通知页：${JSON.stringify(calls)}`)
+  assert.equal(nativeLabel(cardLink), '', '巡检抄到首页个人卡也不能在通知页把点画回来')
+  assert.equal(cardLink.querySelector('[data-lsb-notify]'), null)
+  w.LSB.bus.emit('tab:unread-sentinel:notify', { count: 3 }, { source: 'tab:other' })
+  assert.equal(nativeLabel(cardLink), '', '别的标签传来的数字也不能在通知页画回去')
+})
+
