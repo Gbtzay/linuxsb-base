@@ -7,8 +7,16 @@ import { Channel } from './channel.js'
 import * as site from './site.js'
 import { Election } from './election.js'
 import { satisfies, deepFreeze, clone, esc, num, text, sleep, throttle } from './util.js'
+import {
+  SCRIPTS,
+  gfJsonUrl,
+  parseStoreScript,
+  classifyVersion,
+  localOxygenVersion,
+  installHref,
+} from './check-update.js'
 
-export const VERSION = '0.1.22'
+export const VERSION = '0.1.33'
 
 /** 权限清单：插件在 manifest.permissions 里声明，未声明即调用会抛错 */
 export const PERMISSIONS = {
@@ -626,6 +634,7 @@ export class Core {
         topic: site.parseTopic,
         post: site.parsePost,
         user: site.parseUser,
+        notifications: site.parseNotifications,
         likeTargets: site.parseLikeTargets,
         detectPage: site.detectPage,
         snapshot: site.snapshot,
@@ -817,6 +826,12 @@ export class Core {
         host.appendChild(info)
       },
     })
+    this.ui.registerTab({
+      id: '__core_updates',
+      name: '检查更新',
+      order: 3,
+      render: (host) => this._renderUpdateTab(host),
+    })
   }
 
   /** 运行日志面板：持久化错误 + 实时运行日志，可过滤/搜索/导出 */
@@ -910,6 +925,132 @@ export class Core {
     const wrap = document.createElement('div')
     host.appendChild(wrap)
     render()
+  }
+
+  _renderUpdateTab(host) {
+    const wrap = document.createElement('div')
+    host.appendChild(wrap)
+    let gen = 0
+    let inflight = null
+
+    const scripts = {
+      hydrogen: SCRIPTS.find((s) => s.id === 'hydrogen'),
+      oxygen: SCRIPTS.find((s) => s.id === 'oxygen'),
+    }
+
+    const snapshot = () => {
+      const ox = localOxygenVersion([...this.plugins.values()])
+      return {
+        hydrogen: { local: VERSION, missing: false },
+        oxygen: { local: ox, missing: !ox },
+      }
+    }
+
+    const paint = (states, { busy = false } = {}) => {
+      const loc = snapshot()
+      const badgeClass = (status) => {
+        if (status === 'behind' || status === 'fail' || status === 'invalid') return 'lsb-badge is-err'
+        if (status === 'equal') return 'lsb-badge is-on'
+        return 'lsb-badge'
+      }
+      const badgeText = (st) => {
+        if (!st || !st.status) return ''
+        return {
+          behind: '有更新',
+          equal: '已是最新',
+          ahead: '比商店新',
+          missing: '未安装',
+          invalid: '版本号无效',
+          fail: '查询失败',
+        }[st.status] || ''
+      }
+      const desc = (id, st) => {
+        const local = loc[id].local
+        if (!st || !st.status) return local ? `本地 ${local}` : ''
+        if (st.status === 'missing') return ''
+        if (st.status === 'behind' || st.status === 'ahead') return `本地 ${local} · 商店 ${st.store}`
+        if (st.status === 'equal') return `本地与商店同为 ${local}`
+        if (st.status === 'invalid') return [local, st.store].filter(Boolean).join(' · ')
+        if (st.status === 'fail') return st.connect ? '氢需要允许 greasyfork.org 跨域' : '无法读取 Greasy Fork'
+        return ''
+      }
+      const install = (id, st) => {
+        const script = scripts[id]
+        const show = st && (st.status === 'behind' || st.status === 'missing')
+        if (!show) return ''
+        const href = st.status === 'missing' ? script.installUrl : installHref(st.parsed, script.installUrl)
+        return `<a class="lsb-btn is-primary" data-install href="${esc(href)}" target="_blank" rel="noopener noreferrer">打开安装页</a>`
+      }
+      const row = (id) => {
+        const st = states[id] || (loc[id].missing ? { status: 'missing' } : null)
+        const local = loc[id].local
+        const bt = badgeText(st)
+        const ver = local ? `<span class="lsb-badge">v${esc(local)}</span>` : ''
+        const bd = bt ? `<span class="${badgeClass(st.status)}">${esc(bt)}</span>` : ''
+        const d = desc(id, st)
+        return `<div class="lsb-row" data-script="${id}">
+          <div class="lsb-row-main">
+            <div class="lsb-row-name">${esc(scripts[id].label)} ${ver}${bd}</div>
+            ${d ? `<div class="lsb-row-desc">${esc(d)}</div>` : ''}
+          </div>${install(id, st)}</div>`
+      }
+      wrap.innerHTML =
+        '<div class="lsb-actions" style="border:0;padding:0 0 8px;justify-content:flex-start">' +
+        `<button class="lsb-btn is-primary" type="button" data-check${busy ? ' disabled' : ''}>${busy ? '查询中…' : '对照 Greasy Fork'}</button></div>` +
+        row('hydrogen') +
+        row('oxygen') +
+        '<div class="lsb-row-desc">安装仍由油猴接管；两个都要装，先氢后氧。</div>'
+      const btn = wrap.querySelector('[data-check]')
+      if (btn && !busy) btn.onclick = () => run()
+    }
+
+    const loadOne = async (script) => {
+      try {
+        const json = await this.net.json(gfJsonUrl(script.gfId), { external: true })
+        const parsed = parseStoreScript(json)
+        if (!parsed) return { error: 'read' }
+        return { parsed }
+      } catch (e) {
+        const msg = String((e && e.message) || e)
+        return { error: /域名未放行|跨域请求被拒绝/.test(msg) ? 'connect' : 'read' }
+      }
+    }
+
+    const run = () => {
+      if (inflight) return inflight
+      const my = ++gen
+      inflight = (async () => {
+        paint({ oxygen: snapshot().oxygen.missing ? { status: 'missing' } : null }, { busy: true })
+        const loc = snapshot()
+        const jobs = [loadOne(scripts.hydrogen)]
+        if (!loc.oxygen.missing) jobs.push(loadOne(scripts.oxygen))
+        const settled = await Promise.allSettled(jobs)
+        if (my !== gen || !wrap.isConnected) return
+        const fromLoad = (res, local) => {
+          if (res.status !== 'fulfilled') {
+            return { status: 'fail', connect: false }
+          }
+          const v = res.value
+          if (v.error === 'connect') return { status: 'fail', connect: true }
+          if (v.error) return { status: 'fail', connect: false }
+          const status = classifyVersion(local, v.parsed.version)
+          return { status, store: v.parsed.version, parsed: v.parsed }
+        }
+        const hRes = settled[0]
+        const states = { hydrogen: fromLoad(hRes, loc.hydrogen.local) }
+        if (loc.oxygen.missing) states.oxygen = { status: 'missing' }
+        else states.oxygen = fromLoad(settled[1], loc.oxygen.local)
+        if (states.hydrogen.status === 'fail' || states.oxygen.status === 'fail') {
+          this.log('core', '检查更新查询失败')
+        }
+        paint(states)
+      })().finally(() => {
+        if (inflight && my === gen) inflight = null
+      })
+      return inflight
+    }
+
+    paint({ oxygen: snapshot().oxygen.missing ? { status: 'missing' } : null })
   }
 
   _renderPluginList(host) {

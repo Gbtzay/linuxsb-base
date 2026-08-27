@@ -241,6 +241,11 @@ test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 称�
   await new Promise((r) => setTimeout(r, 0))
   assert.ok(w.document.querySelector('.lsb-title-quotes-float'), '左栏应开浮层')
   assert.equal(w.document.querySelector('.lsb-panel-settings'), null, '不应打开氢设置面板')
+  assert.equal(
+    w.document.querySelector('.lsb-title-quotes-fab'),
+    null,
+    '氢壳开着不要右下行情钮',
+  )
 
   const cal = tools.querySelector('[data-lsb-panel="checkin-calendar"]')
   cal.click()

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·已读置灰
 // @namespace    https://linux.sb/
-// @version      1.0.3
+// @version      1.0.4
 // @description  列表里看过的帖子整行变灰。未读标记沿用站点原样，不再另挂角标。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'read-mark',
     name: '已读置灰',
-    version: '1.0.3',
+    version: '1.0.4',
     description: '看过的帖子在列表中变灰；未读仍用站点自己的标记',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -126,11 +126,13 @@
     }
 
     function paintAll() {
-      for (const li of document.querySelectorAll('ul.post-list > li.post-item')) paint(li)
+      for (const li of document.querySelectorAll(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)')) {
+        paint(li)
+      }
     }
 
     // 现有 + 无限滚动新增的条目各回调一次（幂等）
-    api.dom.each('ul.post-list > li.post-item', paint)
+    api.dom.each(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)', paint)
     // 软导航后 DOM 可能被整段换掉：记账 + 全量重涂
     api.on('route:changed', () => {
       markOpenTopic()

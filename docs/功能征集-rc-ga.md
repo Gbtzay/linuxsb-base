@@ -1,6 +1,6 @@
 # 【功能征集】氢 / 氧已进 RC，GA 之前还缺什么
 
-氢和氧已经进入 **RC**（氢 0.1.22、氧 1.0.60）：冻新功能，只修阻断。摘掉 RC、进正式版 / GA 是下一阶段。
+氢和氧已经进入 **RC**（氢 0.1.33、氧 1.0.96）：冻新功能，只修阻断。摘掉 RC、进正式版 / GA 是下一阶段。
 
 不是站点官方出品。数据只在你自己浏览器里。RC 不等于不会再修，只是新功能先停。
 
@@ -19,11 +19,12 @@
 - 机会监控
 - 签到日历
 - 积分趋势
-- 称号行情
+- 称号行情（含分析大盘与全站浮层）
 - AI 总结
 - 个人存档
 - 年度报告
 - 配置迁移
+- 检查更新
 
 氢壳不喜欢可以关：油猴图标菜单，或氢面板「界面精修」。关了就回到原版界面，其它功能保留。
 
@@ -48,10 +49,10 @@
 
 作者页：https://greasyfork.org/zh-CN/users/1637325-xb70sr71
 
-Tampermonkey 里脚本名是「LINUX.SB 氢（RC）」和「LINUX.SB 氧（RC）」。冻本：氢 **0.1.22**、氧 **1.0.60**。Greasy Fork 若落后，以油猴 / 氢面板里的版本为准。
+Tampermonkey 里脚本名是「LINUX.SB 氢（RC）」和「LINUX.SB 氧（RC）」。冻本：氢 **0.1.33**、氧 **1.0.96**。Greasy Fork 若落后，以油猴 / 氢面板里的版本为准。
 
 源码：https://github.com/Gbtzay/linuxsb-base
-Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.60
+Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.62
 
 装之前建议先在氢面板里用「配置迁移」导出一份备份（第一次装可以忽略）。
 

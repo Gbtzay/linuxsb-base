@@ -106,6 +106,101 @@ test('称号行情：同称号多单价 → lo / hi / mid', async () => {
   assert.equal(dbg.median([1, 2, 3, 4]), 3)
 })
 
+test('称号行情：diffBook 按挂单剩余估笔数和件数', async () => {
+  const { dbg } = await boot()
+  const key = '全站偶像@SSR'
+  const L = (id, qty) => ({ id, name: '全站偶像', rarity: 'SSR', price: 260, qty })
+  const drop = dbg.diffBook(dbg.bookFromListings([L('1', 5)]), [L('1', 3)])
+  assert.equal(drop[key].fills, 1)
+  assert.equal(drop[key].sold, 2)
+  const gone = dbg.diffBook(dbg.bookFromListings([L('1', 4)]), [])
+  assert.equal(gone[key].fills, 1)
+  assert.equal(gone[key].sold, 4)
+  const born = dbg.diffBook({}, [L('9', 8)])
+  assert.equal(born[key], undefined)
+  const two = dbg.diffBook(dbg.bookFromListings([L('a', 2), L('b', 2)]), [L('a', 1), L('b', 1)])
+  assert.equal(two[key].fills, 2)
+  assert.equal(two[key].sold, 2)
+  const chunk = dbg.diffBook(dbg.bookFromListings([L('1', 9)]), [L('1', 4)])
+  assert.equal(chunk[key].fills, 1, '同一挂单少 5 件仍是 1 笔')
+  assert.equal(chunk[key].sold, 5)
+})
+
+test('称号行情：无柜台或隔了 3 小时不把积压差异算进现在', async () => {
+  const { dbg } = await boot()
+  const L = (id, qty) => ({ id, name: 'A', rarity: 'N', price: 10, qty })
+  const now = 1_700_000_000_000
+  assert.equal(Object.keys(dbg.estimateFlow(null, [L('1', 1)], now)).length, 0)
+  const stale = { t: now - 3 * 3600e3 - 1, rows: dbg.bookFromListings([L('1', 5)]) }
+  assert.equal(Object.keys(dbg.estimateFlow(stale, [L('1', 1)], now)).length, 0)
+  const fresh = { t: now - 60e3, rows: dbg.bookFromListings([L('1', 5)]) }
+  assert.equal(dbg.estimateFlow(fresh, [L('1', 1)], now)['A@N'].sold, 4)
+})
+
+test('称号行情：sumFlow 只加总时间窗内快照的估量', async () => {
+  const { dbg } = await boot()
+  const now = new Date()
+  now.setHours(15, 0, 0, 0)
+  const n = now.getTime()
+  const key = 'A@N'
+  const series = [
+    { t: n - 864e5, titles: { [key]: { mid: 1 } }, flow: { [key]: { sold: 9, fills: 9 } } },
+    { t: n - 3600e3, titles: { [key]: { mid: 1, sold: 2, fills: 1 } } },
+    { t: n - 60e3, flow: { [key]: { sold: 3, fills: 2 } } },
+  ]
+  const today = dbg.sumFlow(series, key, { rangeDays: 0, now: n })
+  assert.equal(today.sold, 5)
+  assert.equal(today.fills, 3)
+  const week = dbg.sumFlow(series, key, { rangeDays: 7, now: n })
+  assert.equal(week.sold, 14)
+  assert.equal(week.fills, 12)
+})
+
+test('称号行情：n 不变但有买卖时快照仍要留下估量', async () => {
+  const { dbg } = await boot()
+  dbg.reset()
+  const t0 = 1_700_000_000_000
+  const key = '全站偶像@SSR'
+  const L = (id, qty, price = 260) => ({ id, name: '全站偶像', rarity: 'SSR', price, qty })
+  dbg.ingestListings([L('old', 1)], t0)
+  const added = dbg.ingestListings([L('new', 1)], t0 + 60e3)
+  assert.equal(added, true, 'sig 相同（n 仍为 1）也必须 push')
+  const snaps = dbg.series()
+  assert.ok(snaps.length >= 2)
+  const last = snaps[snaps.length - 1]
+  assert.equal(last.flow[key].fills, 1)
+  assert.equal(last.flow[key].sold, 1)
+})
+
+test('称号行情：称号行与大盘榜展示估量并标明含撤单', async () => {
+  const { w, dbg } = await boot()
+  dbg.reset()
+  const now = Date.now()
+  const key = '隐藏大佬@SSR'
+  const listings = dbg.parseCards(card('隐藏大佬', 'SSR', 666, 'e', 3) + card('吃瓜群众', 'N', 20, 'a'))
+  const titles = dbg.foldTitles(listings)
+  const anchors = dbg.pickAnchors(listings, titles)
+  dbg.pushSnap(
+    { anchors, titles: { ...titles, [key]: { ...titles[key], sold: 5, fills: 2 } }, flow: { [key]: { sold: 5, fills: 2 } } },
+    now - 1800e3,
+  )
+  dbg.pushSnap(
+    {
+      anchors,
+      titles: { ...titles, [key]: { ...titles[key], mid: 800, lo: 800, hi: 800 } },
+    },
+    now - 60e3,
+  )
+  const view = await quotesView(w, dbg)
+  const row = [...view.querySelectorAll('.lsb-title-quotes-row')].find((el) => /隐藏大佬/.test(el.textContent))
+  assert.ok(row)
+  assert.match(row.textContent, /估\s*2\s*笔/)
+  assert.match(row.textContent, /5\s*件/)
+  assert.match(view.textContent, /含下架\/撤单/)
+  view.querySelector('[data-board-view="board"]').click()
+  assert.match(view.textContent, /估\s*2\s*笔/)
+})
+
 test('称号行情：asc+desc 合并、listing_id 去重', async () => {
   const { dbg } = await boot()
   const cheap =
@@ -338,6 +433,47 @@ test('称号行情：periodMs 随 7/30/90 天切换', async () => {
   assert.equal(dbg.periodMs(7), 4 * 3600e3)
   assert.equal(dbg.periodMs(30), 864e5)
   assert.equal(dbg.periodMs(90), 3 * 864e5)
+  assert.equal(dbg.periodMs(0, 1), 60e3)
+  assert.equal(dbg.periodMs(0, 5), 5 * 60e3)
+  assert.equal(dbg.periodMs(0, 15), 15 * 60e3)
+  assert.equal(dbg.periodMs(0, 30), 30 * 60e3)
+  assert.equal(dbg.periodMs(0, 60), 60 * 60e3)
+  assert.equal(dbg.periodMs(0, 7), 30 * 60e3, '非法分钟回落 30')
+  assert.equal(dbg.periodMs(0, 'nope'), 30 * 60e3)
+  assert.equal(dbg.periodMs(7, 1), 4 * 3600e3, '7 天忽略 barMin')
+  assert.equal(dbg.periodMs(30, 5), 864e5)
+  assert.equal(dbg.periodMs(90, 60), 3 * 864e5)
+})
+
+test('称号行情：本日 barMin=5 时两笔相隔 6 分钟收成两根', async () => {
+  const { dbg } = await boot()
+  const now = new Date()
+  now.setHours(15, 10, 0, 0)
+  const n = now.getTime()
+  const key = 'A@N'
+  const q = { [key]: { lo: 1, hi: 3, mid: 2 } }
+  const series = [
+    { t: n - 6 * 60e3, titles: q },
+    { t: n - 60e3, titles: q },
+  ]
+  const bars30 = dbg.foldCandles(series, key, { rangeDays: 0, now: n, barMin: 30 })
+  const bars5 = dbg.foldCandles(series, key, { rangeDays: 0, now: n, barMin: 5 })
+  assert.equal(bars30.length, 1, '默认 30 分仍收成一根')
+  assert.ok(bars5.length >= 2, '5 分档应拆成至少两根')
+  assert.equal(bars5[1].t - bars5[0].t, 5 * 60e3)
+})
+
+test('称号行情：本日悬停时段跟 barMin 走', async () => {
+  const { dbg } = await boot()
+  const t0 = Date.parse('2026-08-27T12:00:00')
+  const tip = dbg.fmtBarTip({ t: t0, o: 1, h: 2, l: 1, c: 2 }, 0, 5)
+  const m = tip.match(/(\d{2}):(\d{2})–(\d{2}):(\d{2})/)
+  assert.ok(m, `应有本日时刻区间，实际：${tip.slice(0, 40)}`)
+  const a = Number(m[1]) * 60 + Number(m[2])
+  const b = Number(m[3]) * 60 + Number(m[4])
+  let diff = b - a
+  if (diff < 0) diff += 24 * 60
+  assert.equal(diff, 5)
 })
 
 test('称号行情：同一小时三笔收成一根挂单 K', async () => {
@@ -550,6 +686,67 @@ test('称号行情：可选本日；K 线悬停给出开高低收', async () => 
   assert.match(tip.textContent, /收/)
 })
 
+test('称号行情：本日 K 才出现柱宽钮；5 分会记住', async () => {
+  const { w, dbg } = await boot()
+  const view = await quotesView(w, dbg)
+  assert.equal(view.querySelector('[data-bar-min]'), null, '默认 7 天不应有柱宽钮')
+  view.querySelector('[data-range="0"]').click()
+  const mins = [...view.querySelectorAll('[data-bar-min]')].map((b) => b.getAttribute('data-bar-min'))
+  assert.deepEqual(mins, ['1', '5', '15', '30', '60'])
+  assert.equal(view.querySelector('[data-bar-min="30"]')?.textContent.trim(), '30分')
+  assert.ok(view.querySelector('[data-bar-min="30"]')?.classList.contains('is-primary'))
+  assert.equal(view.querySelector('[data-bar-min="1"]')?.textContent.trim(), '1分')
+  assert.equal(view.querySelector('[data-bar-min="5"]')?.textContent.trim(), '5分')
+  assert.equal(view.querySelector('[data-bar-min="15"]')?.textContent.trim(), '15分')
+  assert.equal(view.querySelector('[data-bar-min="60"]')?.textContent.trim(), '60分')
+  view.querySelector('[data-bar-min="5"]').click()
+  assert.ok(view.querySelector('[data-bar-min="5"]')?.classList.contains('is-primary'))
+  assert.equal(dbg.barMin(), 5)
+  assert.equal(JSON.parse(w.localStorage.getItem('lsb_base:title-quotes:barMin')), 5)
+
+  view.querySelector('[data-chart="line"]').click()
+  assert.equal(view.querySelector('[data-bar-min]'), null, '折线不按档收点')
+  view.querySelector('[data-chart="candle"]').click()
+  assert.ok(view.querySelector('[data-bar-min="5"]')?.classList.contains('is-primary'), '切回 K 仍是 5 分')
+
+  view.querySelector('[data-range="7"]').click()
+  assert.equal(view.querySelector('[data-bar-min]'), null, '7 天不应有柱宽钮')
+  view.querySelector('[data-range="0"]').click()
+  assert.ok(view.querySelector('[data-bar-min="5"]')?.classList.contains('is-primary'), '回本日仍是 5 分')
+
+  view.querySelector('[data-board-view="board"]').click()
+  assert.ok(view.querySelector('[data-bar-min="5"]'), '大盘本日也有柱宽钮')
+  assert.ok(view.querySelector('[data-bar-min="5"]')?.classList.contains('is-primary'))
+
+  dbg.closeFloat()
+  await dbg.openFloat()
+  const again = w.document.querySelector('.lsb-title-quotes-float-body')
+  again.querySelector('[data-range="0"]').click()
+  assert.ok(again.querySelector('[data-bar-min="5"]')?.classList.contains('is-primary'), '关掉再打开仍是 5 分')
+})
+
+test('称号行情：K 图更高且图框可拖高', async () => {
+  const { w, dbg } = await boot()
+  dbg.reset()
+  const now = Date.now()
+  const listings = dbg.parseCards(card('隐藏大佬', 'SSR', 666, 'e'))
+  const titles = dbg.foldTitles(listings)
+  const anchors = dbg.pickAnchors(listings, titles)
+  dbg.pushSnap({ anchors, titles }, now - 2 * 3600e3)
+  dbg.pushSnap({ anchors, titles: { ...titles, '隐藏大佬@SSR': { ...titles['隐藏大佬@SSR'], mid: 680 } } }, now - 1800e3)
+  const view = await quotesView(w, dbg)
+  const row = [...view.querySelectorAll('.lsb-title-quotes-row')].find((el) => /隐藏大佬/.test(el.textContent))
+  assert.ok(row)
+  row.open = true
+  const svg = row.querySelector('svg.lsb-title-quotes-k')
+  assert.ok(svg)
+  const h = Number((svg.getAttribute('viewBox') || '').trim().split(/\s+/).pop())
+  assert.ok(h >= 360, `图要加高才能看清更多柱，实际 viewBox=${svg.getAttribute('viewBox')}`)
+  const css = [...w.document.querySelectorAll('style')].map((el) => el.textContent).join('\n')
+  assert.match(css, /\.lsb-title-quotes-host\{[^}]*resize:\s*vertical/, '图框右下角可拖高')
+  assert.match(css, /\.lsb-title-quotes-tip\{[^}]*pre-line/, '悬停详情竖排换行')
+})
+
 test('称号行情：档指数平均、总指数等于全场等权', async () => {
   const { dbg } = await boot()
   const titles = {
@@ -634,6 +831,9 @@ test('称号行情：有叠加字段时悬停追加均线布林；没有则不�
   assert.match(plain, /开/)
   assert.doesNotMatch(plain, /均5/)
   const withOv = dbg.fmtBarTip({ ...bar, sma5: 10.5, sma20: 10, bbUpper: 12, bbLower: 8 }, 7)
+  assert.match(plain, /\n开 /)
+  assert.doesNotMatch(plain, /开[^\n]+高/, '开高低收不能挤在同一行')
+  assert.match(withOv, /\n均5 /)
   assert.match(withOv, /均5/)
   assert.match(withOv, /均20/)
   assert.match(withOv, /上轨/)
@@ -824,6 +1024,29 @@ test('称号行情：区间空窗榜文案；短线仅一份则全是新上', as
   assert.match(view.textContent, /吃瓜群众/)
 })
 
+test('称号行情：氢壳开着时不挂右下行情钮；关壳后才出现', async () => {
+  const { w, tick } = makeDom(homeHtml, 'https://linux.sb/')
+  stubFetch(w)
+  await loadBase(w, PLUG('title-quotes.user.js'), PLUG('skin.user.js'))
+  assert.ok(w.document.documentElement.classList.contains('lsb-skin-shell-on'))
+  assert.equal(
+    w.document.querySelector('.lsb-title-quotes-fab'),
+    null,
+    '氢壳左栏已有入口，不要再叠右下钮',
+  )
+  w.eval(`(() => {
+    const cur = JSON.parse(localStorage.getItem('lsb_base:skin:__config') || '{}')
+    cur.shell = false
+    localStorage.setItem('lsb_base:skin:__config', JSON.stringify(cur))
+  })()`)
+  w.LSB.bus.emit('config:changed:skin', { shell: false }, { source: 'core' })
+  await tick(20)
+  assert.ok(
+    w.document.querySelector('.lsb-title-quotes-fab'),
+    '关壳后的原生界面才留行情钮',
+  )
+})
+
 test('称号行情：默认有行情钮；RPC 打开浮层且含行情大盘', async () => {
   const { w, dbg } = await boot()
   const fab = w.document.querySelector('.lsb-title-quotes-fab')
@@ -842,6 +1065,51 @@ test('称号行情：默认有行情钮；RPC 打开浮层且含行情大盘', a
   assert.equal(dbg.watching(), true)
   assert.equal(dbg.intervalMs(), 10000)
   assert.equal(JSON.parse(w.localStorage.getItem('lsb_base:title-quotes:floatOpen')), true)
+})
+
+test('称号行情：浮层滚到底不带动后面的页面', async () => {
+  const { w, dbg } = await boot()
+  await dbg.openFloat()
+  const css = [...w.document.querySelectorAll('style')].map((el) => el.textContent).join('\n')
+  assert.match(
+    css,
+    /\.lsb-title-quotes-float-body\{[^}]*overscroll-behavior:\s*contain/,
+    '内容区截住滚动链',
+  )
+  const head = w.document.querySelector('.lsb-title-quotes-float-head')
+  const evHead = new w.WheelEvent('wheel', { deltaY: 80, bubbles: true, cancelable: true })
+  head.dispatchEvent(evHead)
+  assert.equal(evHead.defaultPrevented, true, '滚在浮层头上也不应带动主页')
+  const body = w.document.querySelector('.lsb-title-quotes-float-body')
+  Object.defineProperty(body, 'scrollHeight', { configurable: true, value: 800 })
+  Object.defineProperty(body, 'clientHeight', { configurable: true, value: 400 })
+  Object.defineProperty(body, 'scrollTop', { configurable: true, value: 0 })
+  const evMid = new w.WheelEvent('wheel', { deltaY: 80, bubbles: true, cancelable: true })
+  body.dispatchEvent(evMid)
+  assert.equal(evMid.defaultPrevented, false, '内容还能往下滚时应自己滚')
+  Object.defineProperty(body, 'scrollTop', { configurable: true, value: 400 })
+  const evEnd = new w.WheelEvent('wheel', { deltaY: 80, bubbles: true, cancelable: true })
+  body.dispatchEvent(evEnd)
+  assert.equal(evEnd.defaultPrevented, true, '划到最底下不应带动外面的页面')
+})
+
+test('称号行情：收起只留标题栏，不被最小高度撑出一块板', async () => {
+  const { w, dbg } = await boot()
+  await dbg.openFloat()
+  const el = w.document.querySelector('.lsb-title-quotes-float')
+  assert.equal(el.style.minHeight, '360px', '展开时仍有最小高度')
+  const css = [...w.document.querySelectorAll('style')].map((s) => s.textContent).join('\n')
+  assert.match(
+    css,
+    /\.lsb-title-quotes-float\.is-collapsed\{[^}]*min-height:\s*0\s*!important/,
+    '收起样式必须压过行内 min-height:360px',
+  )
+  w.document.querySelector('[data-float-collapse]').click()
+  assert.ok(el.classList.contains('is-collapsed'))
+  const body = el.querySelector('.lsb-title-quotes-float-body')
+  assert.equal(w.getComputedStyle(body).display, 'none', '内容区藏掉')
+  const minH = w.getComputedStyle(el).minHeight
+  assert.ok(minH === '0px' || minH === '0', `收起后应是一条标题栏，min-height=${minH}`)
 })
 
 test('称号行情：关闭浮层后间隔回到配置；收起仍算在看', async () => {
@@ -887,7 +1155,7 @@ function setPageHidden(w, hidden) {
 }
 
 test('称号行情：隐藏页不续写在看心跳', async () => {
-  const { w, dbg } = await boot()
+  const { w, dbg, tick } = await boot()
   await dbg.openFloat()
   const t1 = dbg.watchBeat().t
   assert.ok(t1 > 0)
@@ -896,6 +1164,7 @@ test('称号行情：隐藏页不续写在看心跳', async () => {
   const tFrozen = dbg.watchBeat().t
   dbg.writeWatchBeat()
   assert.equal(dbg.watchBeat().t, tFrozen)
+  await tick(5)
   setPageHidden(w, false)
   w.document.dispatchEvent(new w.Event('visibilitychange'))
   assert.ok(dbg.watchBeat().t > tFrozen)

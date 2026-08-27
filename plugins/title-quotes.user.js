@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LSB·称号行情
 // @namespace    https://linux.sb/
-// @version      1.0.11
-// @description  采集称号交易挂单的最低/最高与中位数；全场锚点折线，各称号可切挂单合成K或高低折线；交易页与全站浮层可切分析大盘。打开浮层时巡检加快。纯读，不提交购买。需要 LINUX.SB 基座。
+// @version      1.0.17
+// @description  采集称号交易挂单的最低/最高与中位数；全场锚点折线，各称号可切挂单合成K或高低折线；交易页与全站浮层可切分析大盘。氢壳开着时走左栏，关壳才留右下钮。打开浮层时巡检加快。纯读，不提交购买。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -21,8 +21,8 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.11',
-    description: '称号交易挂单高低价、全场锚点折线；各称号可切挂单合成K或高低折线；全站浮层；打开时巡检加快',
+    version: '1.0.17',
+    description: '称号交易挂单高低价、全场锚点折线；各称号可切挂单合成K或高低折线；全站浮层；氢壳开着走左栏，关壳才留右下钮',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
@@ -135,6 +135,68 @@
     }
     return titles
   }
+
+  const BOOK_STALE_MS = 3 * 3600e3
+
+  function bookFromListings(listings) {
+    const rows = {}
+    for (const x of listings || []) {
+      if (!x || !x.id) continue
+      const qty = Number(x.qty) > 0 ? Number(x.qty) : 1
+      rows[String(x.id)] = { key: titleKey(x.name, x.rarity), qty }
+    }
+    return rows
+  }
+
+  function diffBook(prevRows, listings) {
+    const curr = bookFromListings(listings)
+    const prev = prevRows || {}
+    const out = {}
+    const add = (key, sold, fills) => {
+      if (!key || (!(sold > 0) && !(fills > 0))) return
+      if (!out[key]) out[key] = { sold: 0, fills: 0 }
+      out[key].sold += sold
+      out[key].fills += fills
+    }
+    for (const [id, row] of Object.entries(prev)) {
+      const now = curr[id]
+      if (!now) {
+        add(row.key, Number(row.qty) > 0 ? Number(row.qty) : 0, 1)
+        continue
+      }
+      const before = Number(row.qty) > 0 ? Number(row.qty) : 0
+      const after = Number(now.qty) > 0 ? Number(now.qty) : 0
+      if (after < before) add(now.key || row.key, before - after, 1)
+    }
+    return out
+  }
+
+  function estimateFlow(prevBook, listings, now = Date.now()) {
+    if (!prevBook || !prevBook.rows || !Number.isFinite(prevBook.t)) return {}
+    if (now - prevBook.t > BOOK_STALE_MS) return {}
+    return diffBook(prevBook.rows, listings)
+  }
+
+  function flowTraded(flow) {
+    return Object.values(flow || {}).some((d) => Number(d?.sold) > 0 || Number(d?.fills) > 0)
+  }
+
+  function sumFlow(series, key, { rangeDays = 7, now = Date.now() } = {}) {
+    const cutoff = rangeCutoff(rangeDays, now)
+    let sold = 0
+    let fills = 0
+    for (const s of series || []) {
+      if (!s || s.t < cutoff) continue
+      const d = (s.flow && s.flow[key]) || (s.titles && s.titles[key])
+      if (!d) continue
+      const ds = Number(d.sold)
+      const df = Number(d.fills)
+      if (ds > 0) sold += ds
+      if (df > 0) fills += df
+    }
+    return { sold, fills }
+  }
+
   function pickAnchors(listings, titles) {
     if (!listings || !listings.length) return []
     let hiL = listings[0]
@@ -190,17 +252,21 @@
     return now - days * 864e5
   }
 
-  function periodMs(rangeDays) {
+  function periodMs(rangeDays, barMin) {
     const d = Number(rangeDays)
-    if (d === 0) return 30 * 60e3
+    if (d === 0) {
+      const m = Number(barMin)
+      if (m === 1 || m === 5 || m === 15 || m === 30 || m === 60) return m * 60e3
+      return 30 * 60e3
+    }
     if (!Number.isFinite(d) || d < 0) return 4 * 3600e3
     if (d <= 7) return 4 * 3600e3
     if (d <= 30) return 864e5
     return 3 * 864e5
   }
 
-  function foldCandles(series, key, { rangeDays = 7, now = Date.now() } = {}) {
-    const period = periodMs(rangeDays)
+  function foldCandles(series, key, { rangeDays = 7, now = Date.now(), barMin } = {}) {
+    const period = periodMs(rangeDays, barMin)
     const cutoff = rangeCutoff(rangeDays, now)
     const raw = series || []
     const inRange = raw.filter((s) => s.t >= cutoff)
@@ -434,7 +500,7 @@
     return { latest: view[view.length - 1], base: view[0], emptyWindow: false }
   }
 
-  function fmtBarTip(bar, rangeDays) {
+  function fmtBarTip(bar, rangeDays, barMin) {
     const t = Number(bar.t)
     const o = Number(bar.o)
     const h = Number(bar.h)
@@ -442,18 +508,24 @@
     const c = Number(bar.c)
     const chg = c - o
     const sign = chg > 0 ? '+' : ''
-    const when = `${fmtTime(t, rangeDays)}–${fmtTime(t + periodMs(rangeDays), rangeDays)}`
-    let s = `${when}  开 ${fmtPrice(o)}  高 ${fmtPrice(h)}  低 ${fmtPrice(l)}  收 ${fmtPrice(c)}  ${sign}${fmtPrice(chg)}`
+    const when = `${fmtTime(t, rangeDays)}–${fmtTime(t + periodMs(rangeDays, barMin), rangeDays)}`
+    const lines = [
+      when,
+      `开 ${fmtPrice(o)}`,
+      `高 ${fmtPrice(h)}`,
+      `低 ${fmtPrice(l)}`,
+      `收 ${fmtPrice(c)}  ${sign}${fmtPrice(chg)}`,
+    ]
     const add = (label, raw) => {
       const v = Number(raw)
       if (!Number.isFinite(v)) return
-      s += `  ${label} ${fmtPrice(v)}`
+      lines.push(`${label} ${fmtPrice(v)}`)
     }
     add('均5', bar.sma5)
     add('均20', bar.sma20)
     add('上轨', bar.bbUpper)
     add('下轨', bar.bbLower)
-    return s
+    return lines.join('\n')
   }
 
   function setup(api) {
@@ -490,6 +562,14 @@
     let forceFoldOpen = false
     const getKind = () => (api.store.get('chartKind') === 'line' ? 'line' : 'candle')
     const setKind = (k) => api.store.set('chartKind', k === 'line' ? 'line' : 'candle')
+    const getBarMin = () => {
+      const m = Number(api.store.get('barMin', 30))
+      return m === 1 || m === 5 || m === 15 || m === 30 || m === 60 ? m : 30
+    }
+    const setBarMin = (n) => {
+      const m = Number(n)
+      api.store.set('barMin', m === 1 || m === 5 || m === 15 || m === 30 || m === 60 ? m : 30)
+    }
     let clipSeq = 0
     const get = () => api.store.get('series', []) || []
     const set = (a) => api.store.set('series', a)
@@ -497,19 +577,44 @@
     let beatTimer = null
     let armedMs = null
     let drag = null
+    let plotW = 800
+    let plotH = 380
+    let sizeWatch = null
+    let sizeTimer = 0
+    let plotGen = 0
+
+    function readChartH() {
+      const n = Number(api.store.get('chartH', 380))
+      return Math.min(720, Math.max(240, Number.isFinite(n) && n > 0 ? n : 380))
+    }
+    plotH = readChartH()
 
     function pushSnap(snap, now = Date.now()) {
       const arr = get()
       const last = arr[arr.length - 1]
-      if (last && snapSig(last) === snapSig(snap) && now - last.t < MERGE_MS) {
+      const traded = flowTraded(snap.flow)
+      if (last && snapSig(last) === snapSig(snap) && now - last.t < MERGE_MS && !traded) {
         last.t = Math.max(last.t, now)
         set(arr)
         return false
       }
-      arr.push({ t: now, anchors: snap.anchors, titles: snap.titles })
+      arr.push({ t: now, anchors: snap.anchors, titles: snap.titles, flow: snap.flow || {} })
       const deadline = now - cfg.keepDays * 864e5
       set(arr.filter((x) => x.t >= deadline))
       return true
+    }
+
+    function ingestListings(listings, now = Date.now()) {
+      const prev = api.store.get('book', null)
+      const flow = estimateFlow(prev, listings, now)
+      api.store.set('book', { t: now, rows: bookFromListings(listings) })
+      const titles = foldTitles(listings)
+      for (const k of Object.keys(titles)) {
+        titles[k].sold = flow[k]?.sold ?? 0
+        titles[k].fills = flow[k]?.fills ?? 0
+      }
+      const anchors = pickAnchors(listings, titles)
+      return pushSnap({ anchors, titles, flow }, now)
     }
 
     function isMarket() {
@@ -540,10 +645,10 @@
     }
 
     function plotGeom() {
-      return { W: 640, H: 248, P: { l: 52, r: 14, t: 12, b: 30 } }
+      return { W: plotW, H: plotH, P: { l: 52, r: 14, t: 12, b: 32 } }
     }
 
-    function timeWindow(times, rangeDays, now) {
+    function timeWindow(times, rangeDays, now, barMin) {
       const tMax = now
       const rangeMin = rangeCutoff(rangeDays, now)
       const nums = (times || []).filter((t) => Number.isFinite(t) && t <= tMax)
@@ -551,9 +656,10 @@
       const src = inRange.length ? inRange : rangeDays === 0 ? nums.filter((t) => t >= rangeMin) : nums
       const dataMin = src.length ? Math.min(...src) : rangeMin
       let tMin = Math.max(rangeMin, Math.min(dataMin, tMax))
-      const minSpan = Math.max(periodMs(rangeDays), rangeDays === 0 ? 30 * 60e3 : 3600e3)
+      const period = periodMs(rangeDays, barMin)
+      const minSpan = Math.max(period, rangeDays === 0 ? 30 * 60e3 : 3600e3)
       if (tMax - tMin < minSpan) tMin = Math.max(rangeMin, tMax - minSpan)
-      const pad = Math.max((tMax - tMin) * 0.05, periodMs(rangeDays) * 0.35)
+      const pad = Math.max((tMax - tMin) * 0.05, period * 0.35)
       tMin = Math.max(rangeMin, tMin - pad)
       return { tMin, tMax: tMax + pad * 0.12 }
     }
@@ -610,7 +716,7 @@
     }
 
     function chartSvg(extraClass, W, H, inner) {
-      return `<svg class="lsb-svg${extraClass ? ` ${extraClass}` : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" font-family="ui-sans-serif, system-ui, sans-serif" style="aspect-ratio:${W}/${H}">${inner}</svg>`
+      return `<svg class="lsb-svg${extraClass ? ` ${extraClass}` : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" font-family="ui-sans-serif, system-ui, sans-serif">${inner}</svg>`
     }
 
     function lines(points, keys, rangeDays = 7, now = Date.now()) {
@@ -628,6 +734,7 @@
         points.map((p) => p.t),
         rangeDays,
         now,
+        getBarMin(),
       )
       const X = xScale(tMin, tMax, P, W)
       const clip = `lsb-tq-l-${++clipSeq}`
@@ -685,7 +792,8 @@
     function candles(bars, rangeDays = 7, now = Date.now(), overlayRows = null) {
       if (!bars.length) return ''
       const { W, H, P } = plotGeom()
-      const period = periodMs(rangeDays)
+      const barMin = getBarMin()
+      const period = periodMs(rangeDays, barMin)
       const vals = bars.flatMap((bar) => [bar.o, bar.h, bar.l, bar.c])
       if (overlayRows) {
         for (const row of overlayRows) {
@@ -702,6 +810,7 @@
         bars.map((bar) => bar.t),
         rangeDays,
         now,
+        barMin,
       )
       const X = xScale(tMin, tMax, P, W)
       const innerW = W - P.l - P.r
@@ -790,10 +899,21 @@
             `<button class="lsb-btn${rangeDays === d ? ' is-primary' : ''}" data-range="${d}">${label}</button>`,
         )
         .join('')
+      const barMin = getBarMin()
+      const showBarMin = rangeDays === 0 && (boardView === 'board' || kind !== 'line')
+      const barMinBtns = showBarMin
+        ? [1, 5, 15, 30, 60]
+            .map(
+              (m) =>
+                `<button type="button" class="lsb-btn${barMin === m ? ' is-primary' : ''}" data-bar-min="${m}">${m}分</button>`,
+            )
+            .join('')
+        : ''
       const tools = `<span style="display:flex;gap:6px;align-items:center">${viewBtns}</span>
         <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
           ${chartBtns ? `<span style="display:flex;gap:6px">${chartBtns}</span>` : ''}
           <span style="display:flex;gap:6px">${rangeBtns}</span>
+          ${barMinBtns ? `<span style="display:flex;gap:6px">${barMinBtns}</span>` : ''}
         </span>`
       const isEmbed = host.classList.contains('lsb-title-quotes-embed')
       const isFloat = host.classList.contains('lsb-title-quotes-float-body')
@@ -832,7 +952,7 @@
                 return `<button type="button" class="lsb-title-quotes-chip${on ? ' is-primary' : ''}" data-board-idx="rarity" data-rarity="${esc(r)}">${esc(label)}</button>`
               })
               .join('')
-          const bars = foldIndexCandles(indexPoints(all, boardRarity), { rangeDays })
+          const bars = foldIndexCandles(indexPoints(all, boardRarity), { rangeDays, barMin })
           let chartBlock = '<div class="lsb-empty">这个时间窗还不够画指数</div>'
           if (bars.length) {
             const ov = overlays(bars)
@@ -854,7 +974,8 @@
             `<button type="button" class="lsb-title-quotes-name" data-board-key="${esc(row.key)}">${esc(row.name)}</button>`
           const moverLine = (row) => {
             const dSign = row.delta > 0 ? '+' : ''
-            return `<div class="lsb-title-quotes-mover">${nameBtn(row)}<span>${dSign}${esc(fmtPrice(row.delta))} · ${esc(fmtPct(row.pct))}</span></div>`
+            const fl = sumFlow(all, row.key, { rangeDays })
+            return `<div class="lsb-title-quotes-mover">${nameBtn(row)}<span>${dSign}${esc(fmtPrice(row.delta))} · ${esc(fmtPct(row.pct))} · 估 ${fl.fills}笔 ${fl.sold}件</span></div>`
           }
           const summarySide = (label, items) => {
             if (!items.length) return ''
@@ -944,14 +1065,18 @@
                   `<div class="lsb-row-desc">挂单高低 · 非成交</div>`
               }
             } else {
-              const bars = foldCandles(all, k, { rangeDays })
+              const bars = foldCandles(all, k, { rangeDays, barMin })
               if (bars.length) {
                 body =
                   `<div class="lsb-title-quotes-host">${candles(bars, rangeDays)}</div>` +
                   `<div class="lsb-row-desc">挂单合成 · 非成交</div>`
               }
             }
-            const price = off ? '已下架' : `最低 ${lo} · 最高 ${hi} · 上架 ${cur.n ?? 0} 个`
+            const flow = sumFlow(all, k, { rangeDays })
+            const est = `估 ${flow.fills} 笔 · ${flow.sold} 件`
+            const price = off
+              ? `已下架 · ${est}`
+              : `最低 ${lo} · 最高 ${hi} · 上架 ${cur.n ?? 0} 个 · ${est}`
             return `<details class="lsb-title-quotes-row${off ? ' is-off' : ''}" data-key="${esc(k)}"${openKeys.has(k) ? ' open' : ''}>
             <summary><strong>${esc(meta.name)}</strong>
               <span class="lsb-row-desc">${esc(meta.rarity)} · ${esc(price)}</span></summary>
@@ -964,8 +1089,10 @@
         ${rows ? `<div class="lsb-title-quotes-list">${rows}</div>` : ''}`
       }
 
+      const estNote = `<div class="lsb-row-desc">成交为挂单剩余变化的估计，含下架/撤单，不是真成交</div>`
       const inner = `
         ${head}
+        ${estNote}
         ${bodyHtml}`
       host.classList.add('lsb-title-quotes')
       host.innerHTML = isEmbed
@@ -980,6 +1107,12 @@
       host.querySelectorAll('[data-range]').forEach((b) => {
         b.onclick = () => {
           rangeDays = Number(b.dataset.range)
+          render(host)
+        }
+      })
+      host.querySelectorAll('[data-bar-min]').forEach((b) => {
+        b.onclick = () => {
+          setBarMin(Number(b.getAttribute('data-bar-min')))
           render(host)
         }
       })
@@ -1017,6 +1150,47 @@
         }
       })
       bindCandleTips(host)
+      bindChartSize(host)
+    }
+
+    function bindChartSize(root) {
+      if (sizeWatch) {
+        sizeWatch.disconnect()
+        sizeWatch = null
+      }
+      const wraps = [...root.querySelectorAll('.lsb-title-quotes-host')]
+      const h = readChartH()
+      for (const wrap of wraps) wrap.style.height = `${h}px`
+      const sample = wraps[0]
+      if (sample && sample.clientWidth >= 40) {
+        const nw = Math.round(sample.clientWidth)
+        const nh = Math.round(sample.clientHeight || h)
+        if (Math.abs(nw - plotW) > 8 || Math.abs(nh - plotH) > 8) {
+          plotW = Math.max(320, nw)
+          plotH = Math.min(720, Math.max(240, nh || h))
+          queueMicrotask(() => render(root))
+          return
+        }
+      }
+      if (!sample || typeof ResizeObserver === 'undefined') return
+      const gen = ++plotGen
+      sizeWatch = new ResizeObserver((entries) => {
+        const el = entries[0]?.target
+        if (!el?.isConnected || gen !== plotGen) return
+        window.clearTimeout(sizeTimer)
+        sizeTimer = window.setTimeout(() => {
+          if (gen !== plotGen || !el.isConnected) return
+          const nw = Math.round(el.clientWidth)
+          const nh = Math.round(el.clientHeight)
+          if (nw < 40 || nh < 40) return
+          if (Math.abs(nw - plotW) < 8 && Math.abs(nh - plotH) < 8) return
+          api.store.set('chartH', Math.min(720, Math.max(240, nh)))
+          plotW = Math.max(320, nw)
+          plotH = Math.min(720, Math.max(240, nh))
+          render(root)
+        }, 320)
+      })
+      sizeWatch.observe(sample)
     }
 
     function bindCandleTips(root) {
@@ -1035,7 +1209,7 @@
             hide()
             return
           }
-          tip.textContent = fmtBarTip(g.dataset, rangeDays)
+          tip.textContent = fmtBarTip(g.dataset, rangeDays, getBarMin())
           tip.classList.add('is-on')
           const box = wrap.getBoundingClientRect()
           const tw = tip.offsetWidth || 0
@@ -1043,7 +1217,9 @@
           let x = e.clientX - box.left + 12
           let y = e.clientY - box.top - th - 8
           if (box.width && x + tw > box.width - 4) x = Math.max(4, box.width - tw - 4)
+          if (x < 4) x = 4
           if (y < 4) y = e.clientY - box.top + 16
+          if (box.height && y + th > box.height - 4) y = Math.max(4, box.height - th - 4)
           tip.style.left = `${x}px`
           tip.style.top = `${y}px`
         }
@@ -1075,9 +1251,7 @@
             lastErr = null
             return { empty: true }
           }
-          const titles = foldTitles(listings)
-          const anchors = pickAnchors(listings, titles)
-          pushSnap({ anchors, titles })
+          ingestListings(listings)
           lastErr = null
           lastAt = Date.now()
           toasted = false
@@ -1168,7 +1342,7 @@
       el.style.position = 'fixed'
       el.style.zIndex = '99990'
       el.style.minWidth = '360px'
-      el.style.minHeight = '280px'
+      el.style.minHeight = '360px'
       el.style.maxWidth = '94vw'
       el.style.maxHeight = '90vh'
       if (
@@ -1181,7 +1355,7 @@
         el.style.left = `${r.left}px`
         el.style.top = `${r.top}px`
         el.style.width = `${Math.max(360, r.width)}px`
-        el.style.height = `${Math.max(280, r.height)}px`
+        el.style.height = `${Math.max(360, r.height)}px`
         el.style.right = 'auto'
         el.style.bottom = 'auto'
       } else {
@@ -1189,14 +1363,18 @@
         el.style.top = 'auto'
         el.style.right = '16px'
         el.style.bottom = '130px'
-        el.style.width = '480px'
-        el.style.height = '520px'
+        el.style.width = '560px'
+        el.style.height = '640px'
       }
     }
     function persistRect(el) {
       const box = el.getBoundingClientRect()
       if (!box.width || !box.height) return
-      api.store.set('floatRect', { left: box.left, top: box.top, width: box.width, height: box.height })
+      const prev = api.store.get('floatRect', null) || {}
+      const height = el.classList.contains('is-collapsed') && Number.isFinite(prev.height)
+        ? prev.height
+        : box.height
+      api.store.set('floatRect', { left: box.left, top: box.top, width: box.width, height })
     }
     function clamp(el) {
       const box = el.getBoundingClientRect()
@@ -1217,6 +1395,7 @@
       const el = document.querySelector('.lsb-title-quotes-float')
       if (!el) return
       el.classList.toggle('is-collapsed', !!on)
+      el.style.minHeight = on ? '0px' : '360px'
       api.store.set('floatCollapsed', !!on)
       const btn = el.querySelector('[data-float-collapse]')
       if (btn) btn.textContent = on ? '展开' : '收起'
@@ -1226,6 +1405,13 @@
     }
     function unmountFab() {
       document.querySelectorAll('.lsb-title-quotes-fab').forEach((n) => n.remove())
+    }
+    function shellOn() {
+      return document.documentElement.classList.contains('lsb-skin-shell-on')
+    }
+    function syncFab() {
+      if (shellOn()) unmountFab()
+      else mountFab()
     }
     function bindChrome(el) {
       const head = el.querySelector('.lsb-title-quotes-float-head')
@@ -1245,6 +1431,18 @@
       el.querySelector('[data-float-collapse]').addEventListener('click', () => {
         setCollapsed(!el.classList.contains('is-collapsed'))
       })
+      el.addEventListener('wheel', onFloatWheel, { passive: false })
+    }
+    function onFloatWheel(e) {
+      const dy = e.deltaY
+      const root = e.currentTarget
+      const scroller = e.target?.closest?.('.lsb-title-quotes-float-body')
+      if (scroller && root.contains(scroller)) {
+        const top = scroller.scrollTop
+        const max = scroller.scrollHeight - scroller.clientHeight
+        if ((dy < 0 && top > 0) || (dy > 0 && top < max - 0.5)) return
+      }
+      e.preventDefault()
     }
     function onPointerMove(e) {
       const el = document.querySelector('.lsb-title-quotes-float')
@@ -1258,7 +1456,7 @@
         el.style.left = `${drag.l}px`
         el.style.top = `${drag.t}px`
         el.style.width = `${Math.max(360, drag.w + (e.clientX - drag.x))}px`
-        el.style.height = `${Math.max(280, drag.h + (e.clientY - drag.y))}px`
+        el.style.height = `${Math.max(360, drag.h + (e.clientY - drag.y))}px`
         el.style.right = 'auto'
         el.style.bottom = 'auto'
       }
@@ -1352,16 +1550,27 @@
     api.on('route:changed', () => {
       mountEmbed()
       if (isMarket()) scheduleForceSnap()
+      syncFab()
     })
+    api.on('plugin:activated', syncFab)
+    api.on('plugin:disabled', syncFab)
+    api.on('config:changed:skin', () => {
+      queueMicrotask(syncFab)
+    })
+    const fabWatch = new MutationObserver(syncFab)
+    fabWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
     mountEmbed()
     if (isMarket()) scheduleForceSnap()
-    mountFab()
+    syncFab()
     if (api.store.get('floatOpen')) showFloat({ expand: false })
     api.handle('title-quotes:open', () => openFloat())
 
     api.onDispose(() => {
       if (timer) clearTimeout(timer)
       if (forceTimer) clearTimeout(forceTimer)
+      if (sizeTimer) window.clearTimeout(sizeTimer)
+      if (sizeWatch) sizeWatch.disconnect()
+      sizeWatch = null
       stopBeatTimer()
       timer = null
       forceTimer = null
@@ -1370,6 +1579,7 @@
       window.removeEventListener('resize', onWinResize)
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('visibilitychange', onVis)
+      fabWatch.disconnect()
       unmountEmbed()
       unmountFloat()
       unmountFab()
@@ -1395,10 +1605,10 @@
     })
 
     api.ui.style(
-      '.lsb-title-quotes-host{position:relative;min-width:0;width:100%;overflow:visible;margin:2px 0 4px}' +
-        '.lsb-title-quotes .lsb-svg,.lsb-title-quotes-embed .lsb-svg{display:block;width:100%;height:auto;max-width:100%;color:var(--text,#222)}' +
+        '.lsb-title-quotes-host{position:relative;min-width:0;width:100%;height:380px;min-height:240px;max-height:720px;resize:vertical;overflow:hidden;margin:2px 0 4px}' +
+        '.lsb-title-quotes .lsb-svg,.lsb-title-quotes-embed .lsb-svg,.lsb-title-quotes-host .lsb-svg{display:block;width:100%;height:100%;max-width:none;color:var(--text,#222)}' +
         '.lsb-title-quotes-bar{cursor:crosshair}' +
-        '.lsb-title-quotes-tip{position:absolute;z-index:4;display:none;pointer-events:none;font-size:12px;line-height:1.45;padding:6px 8px;border-radius:6px;background:var(--panel,#fff);color:var(--text,#222);border:1px solid var(--line,#ddd);box-shadow:0 6px 18px var(--shadow-medium,rgba(0,0,0,.18));white-space:nowrap}' +
+        '.lsb-title-quotes-tip{position:absolute;z-index:4;display:none;pointer-events:none;font-size:12px;line-height:1.45;padding:6px 8px;border-radius:6px;background:var(--panel,#fff);color:var(--text,#222);border:1px solid var(--line,#ddd);box-shadow:0 6px 18px var(--shadow-medium,rgba(0,0,0,.18));white-space:pre-line;max-width:min(16em,calc(100% - 8px));overflow-wrap:anywhere;word-break:break-word}' +
         '.lsb-title-quotes-tip.is-on{display:block}' +
         '.lsb-title-quotes-anchors{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:8px 0}' +
         '.lsb-title-quotes-pip{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:0.1em}' +
@@ -1419,13 +1629,13 @@
         '.lsb-title-quotes-name{border:0;background:none;padding:0;color:var(--brand,#5eaaa0);cursor:pointer;font:inherit;text-align:left}' +
         '.lsb-title-quotes-name:hover{text-decoration:underline}' +
         '.lsb-title-quotes-fab{position:fixed;right:62px;bottom:74px;z-index:99998;width:38px;height:38px;border-radius:50%;border:1px solid var(--line,#ddd);background:var(--panel,#fff);color:var(--brand,#5eaaa0);cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px var(--shadow-base,rgba(0,0,0,.15))}' +
-        '.lsb-title-quotes-float{position:fixed;z-index:99990;display:flex;flex-direction:column;background:var(--panel,#fff);color:var(--text,#222);border:1px solid var(--line,#ddd);border-radius:10px;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3));overflow:hidden}' +
+        '.lsb-title-quotes-float{position:fixed;z-index:99990;display:flex;flex-direction:column;background:var(--panel,#fff);color:var(--text,#222);border:1px solid var(--line,#ddd);border-radius:10px;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3));overflow:hidden;overscroll-behavior:contain}' +
         '.lsb-title-quotes-float-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line-soft,#eee);cursor:move;flex:0 0 auto}' +
         '.lsb-title-quotes-float-head strong{font-size:14px;margin-right:auto}' +
         '.lsb-title-quotes-float-head .lsb-panel-close{margin-left:0}' +
-        '.lsb-title-quotes-float-body{flex:1;min-height:0;overflow:auto;padding:8px 12px}' +
+        '.lsb-title-quotes-float-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:8px 12px}' +
         '.lsb-title-quotes-float-resize{position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}' +
-        '.lsb-title-quotes-float.is-collapsed{height:auto !important;min-height:0}' +
+        '.lsb-title-quotes-float.is-collapsed{height:auto !important;min-height:0 !important}' +
         '.lsb-title-quotes-float.is-collapsed .lsb-title-quotes-float-body,.lsb-title-quotes-float.is-collapsed .lsb-title-quotes-float-resize{display:none}',
     )
 
@@ -1436,6 +1646,12 @@
       foldTitles,
       median,
       pickAnchors,
+      bookFromListings,
+      diffBook,
+      estimateFlow,
+      sumFlow,
+      flowTraded,
+      BOOK_STALE_MS,
       periodMs,
       rangeCutoff,
       fmtBarTip,
@@ -1452,8 +1668,12 @@
       bollinger,
       overlays,
       pushSnap,
+      ingestListings,
       series: get,
-      reset: () => set([]),
+      reset: () => {
+        set([])
+        api.store.set('book', null)
+      },
       snap: () => cycle(true),
       intervalMs: pollMs,
       watching,
@@ -1461,6 +1681,7 @@
       setWatchBeat: (v) => api.store.set('watchBeat', v),
       openFloat,
       closeFloat,
+      barMin: getBarMin,
       writeWatchBeat,
       tabId: () => tabId,
       armed: () => !!timer,
