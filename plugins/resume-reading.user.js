@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·断点续读
 // @namespace    https://linux.sb/
-// @version      1.0.3
+// @version      1.0.5
 // @description  记住每个帖子读到的楼层；再次进入时提示「继续阅读」，并把没读过的楼层标为 NEW。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'resume-reading',
     name: '断点续读',
-    version: '1.0.3',
+    version: '1.0.5',
     description: '记住每帖读到哪层，回来一键续读，未读楼层标 NEW',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -116,21 +116,8 @@
       .lsb-resume-bar .lsb-btn{white-space:nowrap}
     `)
 
-    function findGroup(groups, re) {
-      return groups.find((g) => {
-        const t = (g.textContent || '').trim()
-        return t && re.test(t) && !/^UID\b/i.test(t)
-      })
-    }
-
     function newAnchor(li) {
-      const groups = [...li.querySelectorAll('.post-user-group')]
-      const role =
-        findGroup(groups, /AI机器人/) ||
-        findGroup(groups, /社区主理人/) ||
-        findGroup(groups, /创作者/)
-      if (role) return role
-      const uid = groups.find(
+      const uid = [...li.querySelectorAll('.post-user-group')].find(
         (g) => g.classList.contains('user-uid-badge') || /^UID\b/i.test((g.textContent || '').trim()),
       )
       if (uid) return uid
@@ -203,8 +190,20 @@
     onScroll()
 
     /* ── 续读提示条 ── */
+    function floorEl(floor) {
+      const n = Number(floor)
+      if (!Number.isFinite(n) || n <= 0) {
+        return (
+          document.querySelector('li.post-entry:not([data-floor])')
+          || document.querySelector(`${api.sel.postEntry}:first-child`)
+          || document.querySelector(api.sel.postEntry)
+        )
+      }
+      return document.querySelector(`${api.sel.postEntry}[data-floor="${n}"]`)
+    }
+
     function jump(floor) {
-      const el = document.querySelector(`${api.sel.postEntry}[data-floor="${floor}"]`)
+      const el = floorEl(floor)
       if (!el) {
         api.ui.toast(`#${floor} 楼不在当前页`, { type: 'error' })
         return false

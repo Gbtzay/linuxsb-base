@@ -54,7 +54,9 @@ test('界面精修：默认配置产出全部规则与状态类', async () => {
   assert.ok(css.includes('line-height:1.75'), '排版：正文行高')
   assert.ok(css.includes('PingFang SC'), '排版：中文字体栈')
   assert.ok(css.includes('.post-content pre'), '代码块规则存在')
-  assert.ok(css.includes("[data-floor='1']"), '楼层：OP 高亮规则')
+  assert.ok(!css.includes("[data-floor='1']"), '主楼不再左边高亮')
+  assert.ok(!/:not\(\[data-floor\]\)/.test(css), 'v8.7.5 主楼也不高亮')
+  assert.match(css, /li\.post-entry\{border-bottom/, '楼层分隔线还在')
   assert.ok(!css.includes("content:'楼主'"), '不再挂楼主徽标，和站点自己的身份标记重复')
 
   const dbg = await w.LSB.bus.request('skin:debug')
@@ -66,6 +68,20 @@ test('界面精修：默认配置产出全部规则与状态类', async () => {
   assert.equal(dbg.active.density, '舒适')
   assert.equal(dbg.active.shell, true)
   assert.ok(dbg.styleBytes > 0)
+})
+
+test('氢壳：帖子里的原生收藏按钮不能被藏掉', async () => {
+  const { w } = makeSite()
+  await loadBase(w, PLUG('skin.user.js'))
+  const css = skinCss(w)
+  assert.ok(
+    !/li\.post-item \.meta-icon\{display:none\}/.test(css),
+    '不能无差别藏掉所有 post-item 的 meta-icon：帖内楼层也是 post-item',
+  )
+  assert.match(css, /li\.post-item:not\(\.post-entry\) \.meta-icon/, '只藏首页列表装饰图标')
+  const fav = w.document.querySelector('.topic-favorites-action .fav-btn')
+  assert.ok(fav, '原生收藏按钮还在')
+  assert.ok(fav.querySelector('.meta-icon'), '收藏星星还在')
 })
 
 test('界面精修：紧凑密度挂状态类并输出压缩规则', async () => {
@@ -215,9 +231,21 @@ test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 称�
     PLUG('skin.user.js'),
   )
   const tools = shell(w).querySelector('[data-lsb-shell-section="tools"]')
-  const labels = [...tools.querySelectorAll('[data-lsb-panel]')].map((b) => b.textContent.trim())
+  const labels = [...tools.querySelectorAll('.lsb-shell-link')].map((b) => b.textContent.trim())
   assert.deepEqual(labels, ['AI 历史', '签到日历', '积分趋势', '称号行情', '年度报告'])
   assert.equal(shell(w).querySelector('#lsb-shell-rail a[href*="daily_checkin"]'), null, '站点每日签到仍留给右栏快捷功能')
+  assert.equal(tools.querySelector('[data-lsb-panel="title-quotes"]'), null)
+  const quotes = tools.querySelector('[data-lsb-rpc="title-quotes:open"]')
+  assert.ok(quotes)
+  quotes.click()
+  await new Promise((r) => setTimeout(r, 0))
+  assert.ok(w.document.querySelector('.lsb-title-quotes-float'), '左栏应开浮层')
+  assert.equal(w.document.querySelector('.lsb-panel-settings'), null, '不应打开氢设置面板')
+  assert.equal(
+    w.document.querySelector('.lsb-title-quotes-fab'),
+    null,
+    '氢壳开着不要右下行情钮',
+  )
 
   const cal = tools.querySelector('[data-lsb-panel="checkin-calendar"]')
   cal.click()
@@ -576,6 +604,121 @@ test('氢壳：站点明暗切换钮迁入顶栏，关壳迁回', async () => {
     w.document.querySelector('body > .top [data-themes-mode-toggle]'),
     '关壳后切换钮回到原顶栏',
   )
+})
+
+test('氢壳：新顶栏搜索入口迁入，关壳迁回', async () => {
+  const { w, tick } = makeHome()
+  w.document.querySelectorAll('form.search-form').forEach((el) => el.remove())
+  const bar = w.document.querySelector('body > .top .bar')
+  const a = w.document.createElement('a')
+  a.className = 'search-page-link'
+  a.setAttribute('href', '/search')
+  a.setAttribute('aria-label', '搜索')
+  a.innerHTML = '<span class="search-page-fake-input">搜索关键词</span>'
+  bar.append(a)
+  await loadBase(w, PLUG('skin.user.js'))
+
+  assert.equal(w.document.querySelectorAll('.search-page-link').length, 1, '迁入不是克隆')
+  assert.ok(
+    w.document.querySelector('#lsb-shell .lsb-shell-search-host .search-page-link'),
+    '搜索入口在壳顶栏，不能留在被藏掉的原顶栏',
+  )
+
+  w.LSB.disable('skin')
+  await tick(20)
+  assert.ok(
+    w.document.querySelector('body > .top .search-page-link'),
+    '关壳后搜索入口回到原顶栏',
+  )
+})
+
+test('氢壳：新外观菜单迁入顶栏，关壳迁回', async () => {
+  const { w, tick } = makeHome()
+  const bar = w.document.querySelector('body > .top .bar')
+  const scheme = w.document.createElement('a')
+  scheme.className = 'color-scheme-top-link'
+  scheme.setAttribute('href', '/color_scheme')
+  scheme.setAttribute('aria-label', '切换色系')
+  bar.append(scheme)
+  const wrap = w.document.createElement('div')
+  wrap.className = 'dark-mode-control'
+  wrap.innerHTML =
+    '<button class="dark-mode-toggle-btn" type="button" aria-label="外观：自动"></button>' +
+    '<div class="dark-mode-menu" role="menu"></div>'
+  bar.append(wrap)
+  w.document.documentElement.setAttribute('data-dark-mode-theme', 'dark')
+  await loadBase(w, PLUG('skin.user.js'))
+
+  assert.equal(w.document.querySelectorAll('.dark-mode-control').length, 1, '迁入不是克隆')
+  assert.ok(
+    w.document.querySelector('#lsb-shell [data-lsb-shell-theme] .dark-mode-control'),
+    '外观菜单在壳顶栏，不能留在被藏掉的原顶栏',
+  )
+  assert.ok(
+    w.document.querySelector('#lsb-shell [data-lsb-shell-theme] .color-scheme-top-link'),
+    '色系入口跟外观一起迁入，否则原顶栏藏掉后也找不到',
+  )
+  assert.ok(
+    /html\[data-dark-mode-theme="dark"\]/.test(skinCss(w)),
+    '站点改用 data-dark-mode-theme 后壳仍声明 dark color-scheme',
+  )
+
+  w.LSB.disable('skin')
+  await tick(20)
+  assert.ok(
+    w.document.querySelector('body > .top .dark-mode-control'),
+    '关壳后外观菜单回到原顶栏',
+  )
+  assert.ok(
+    w.document.querySelector('body > .top .color-scheme-top-link'),
+    '关壳后色系入口回到原顶栏',
+  )
+})
+
+test('氢壳：站点把外观控件补回原顶栏时不再搬走，避免死循环', async () => {
+  const { w, tick } = makeHome()
+  const bar = w.document.querySelector('body > .top .bar')
+  const scheme = w.document.createElement('a')
+  scheme.className = 'color-scheme-top-link'
+  scheme.setAttribute('href', '/color_scheme')
+  bar.append(scheme)
+  const wrap = w.document.createElement('div')
+  wrap.className = 'dark-mode-control'
+  bar.append(wrap)
+
+  let injected = 0
+  const obs = new w.MutationObserver(() => {
+    if (!bar.querySelector('.dark-mode-control')) {
+      injected++
+      if (injected > 40) return
+      const n = w.document.createElement('div')
+      n.className = 'dark-mode-control'
+      bar.append(n)
+    }
+    if (!bar.querySelector('.color-scheme-top-link')) {
+      injected++
+      if (injected > 40) return
+      const n = w.document.createElement('a')
+      n.className = 'color-scheme-top-link'
+      n.setAttribute('href', '/color_scheme')
+      bar.append(n)
+    }
+  })
+  obs.observe(w.document.body, { childList: true, subtree: true })
+
+  await loadBase(w, PLUG('skin.user.js'))
+  await tick(80)
+  obs.disconnect()
+
+  assert.ok(injected <= 4, `站点补种应收敛，实际 ${injected}`)
+  assert.equal(
+    w.document.querySelectorAll('#lsb-shell .dark-mode-control').length,
+    1,
+    '壳里只留第一次迁入的那份',
+  )
+  assert.equal(w.document.querySelectorAll('#lsb-shell .color-scheme-top-link').length, 1)
+  assert.ok(bar.querySelector('.dark-mode-control'), '原顶栏留下一份，站点脚本才不会一直补')
+  assert.ok(bar.querySelector('.color-scheme-top-link'))
 })
 
 test('氢壳：开壳时隐藏右下角 H 按钮，关壳后显现', async () => {
@@ -1100,4 +1243,56 @@ test('壳内跳转：关壳后恢复整页跳转', async () => {
   link.click()
   await tick(40)
   assert.equal(calls.length, 0)
+})
+
+test('氢壳：精华 / 抽奖 / 称号页顶栏文案跟路由走', async () => {
+  const featured = makeDom(homeHtml, 'https://linux.sb/topic_featured')
+  await loadBase(featured.w, PLUG('skin.user.js'))
+  let dbg = await featured.w.LSB.bus.request('skin:debug')
+  assert.equal(dbg.shell.location, '精华')
+
+  const lucky = makeDom(homeHtml, 'https://linux.sb/index.php?sort=lucky')
+  await loadBase(lucky.w, PLUG('skin.user.js'))
+  dbg = await lucky.w.LSB.bus.request('skin:debug')
+  assert.equal(dbg.shell.location, '抽奖')
+
+  const gacha = makeDom(homeHtml, 'https://linux.sb/gacha')
+  await loadBase(gacha.w, PLUG('skin.user.js'))
+  dbg = await gacha.w.LSB.bus.request('skin:debug')
+  assert.equal(dbg.shell.location, '称号抽取')
+
+  const market = makeDom(homeHtml, 'https://linux.sb/gacha_market')
+  await loadBase(market.w, PLUG('skin.user.js'))
+  dbg = await market.w.LSB.bus.request('skin:debug')
+  assert.equal(dbg.shell.location, '称号交易')
+})
+
+test('氢壳：帖内时间轴能读 .post-time（v8.7.5 不再写 data-performance-time）', async () => {
+  const { w, tick } = makeSite()
+  for (const post of w.document.querySelectorAll('li.post-entry')) {
+    post.querySelectorAll('time, [data-performance-time]').forEach((el) => el.remove())
+    if (!post.querySelector('.post-time')) {
+      const stamp = w.document.createElement('span')
+      stamp.className = 'post-time'
+      stamp.textContent = '昨天 21:03'
+      post.append(stamp)
+    }
+  }
+  await loadBase(w, PLUG('skin.user.js'))
+  await tick(40)
+  assert.equal(w.document.querySelector('[data-timeline-date]')?.textContent, '昨天 21:03')
+})
+
+test('壳内跳转：精华页走软跳', async () => {
+  const { w, tick } = makeHome()
+  const calls = stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'))
+  const link = w.document.createElement('a')
+  link.href = 'https://linux.sb/topic_featured'
+  link.textContent = '精华'
+  w.document.querySelector('main.wrap').append(link)
+  link.click()
+  await tick(80)
+  assert.ok(calls.some((u) => /\/topic_featured/.test(u)), '精华拦点击去拉 HTML')
+  assert.equal(w.location.pathname, '/topic_featured')
 })

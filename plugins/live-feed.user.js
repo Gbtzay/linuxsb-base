@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·实时流
 // @namespace    https://linux.sb/
-// @version      1.2.7
+// @version      1.2.12
 // @description  免刷新获取新帖与新回复：前台短周期、后台长周期的自适应轮询（跨标签选主，只有一个标签发请求）；视口锚点补偿让任意滚动位置都能无感插入；打字期间只暂存不打扰；老帖有新回复原地高亮。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.7',
+    version: '1.2.12',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -57,7 +57,7 @@
     let cfg = api.config()
     api.on('config:changed:live-feed', () => {
       cfg = api.config()
-      if (election.isLeader) scheduleNext()
+      if (shouldPoll()) scheduleNext()
     })
 
     /* ── 消息侧：复用未读哨兵的消息箱做「新消息」计数（哨兵缺席则静默降级） ── */
@@ -94,13 +94,34 @@
       return `${it.replies ?? ''}#${it.lastActiveTs ?? 0}`
     }
 
+    function isListRow(li) {
+      return li && !li.classList.contains('notification-item') && !li.classList.contains('post-entry')
+    }
+
+    function listSort() {
+      if (api.page.type === 'user') return api.page.tab === 'replies' ? 'comment' : 'post'
+      return api.page.sort === 'comment' ? 'comment' : 'post'
+    }
+
+    function isUserTopicList() {
+      if (api.page?.type !== 'user') return false
+      const tab = api.page.tab || 'topics'
+      return tab === 'topics' || tab === 'replies'
+    }
+
+    function shouldPoll() {
+      return election.isLeader || isUserTopicList()
+    }
+
     function captureList() {
       const ul = document.querySelector(api.sel?.listUl || 'ul.post-list')
       if (!ul) return false
+      if (ul.querySelector('li.notification-item')) return false
       const seen = new Map()
       let maxId = 0
       let maxTs = 0
       for (const li of ul.querySelectorAll('li.post-item')) {
+        if (!isListRow(li)) continue
         const it = api.parse.listItem(li)
         if (it?.id) {
           seen.set(it.id, freshnessOf(it))
@@ -108,9 +129,7 @@
           maxTs = Math.max(maxTs, it.lastActiveTs || 0)
         }
       }
-      // 流类型：与当前视图同源判定。发布流用 id 序数判新；回复流用活跃时间戳判新。
-      const sort = api.page.sort === 'post' || /([?&])sort=post/.test(location.search) ? 'post' : 'comment'
-      ctx = { ul, seen, maxId, maxTs, sort }
+      ctx = { ul, seen, maxId, maxTs, sort: listSort() }
       mode = 'list'
       return true
     }
@@ -150,6 +169,10 @@
     function init() {
       teardown()
       navGen += 1
+      if (api.page.type === 'user' && !isUserTopicList()) {
+        mode = null
+        return
+      }
       const ok = api.page.type === 'topic' && cfg.trackTopicReplies ? captureTopic() : captureList()
       if (!ok) mode = null
     }
@@ -337,7 +360,11 @@
       return false
     }
 
-    /* ── 轮询：列表模式 ── */
+    function liveDoc(path) {
+      // 当前页巡检不能进全站闸门：哨兵一启动会拉整页通知，称号行情也 30 秒一轮，
+      // 排在它们后面时实时流整段停摆。氢壳无限滚动同样 queue:false。
+      return api.net.doc(path, { queue: false })
+    }
     function listUrl() {
       if (api.page.type === 'forum') {
         return api.routes.forum(api.page.id, { sort: ctx.sort === 'post' ? 'post' : undefined })
@@ -351,13 +378,24 @@
 
     let lastBumped = 0
     const bumpTimers = []
+    function attachNativeUnread(row, src) {
+      const from = src?.querySelector?.('a.unread-topic-notice')
+      if (!row || !from || row.querySelector('a.unread-topic-notice')) return
+      const node = document.importNode(from, true)
+      const title = row.querySelector('a.post-title:not(.post-author)')
+      if (title) title.after(node)
+      else row.querySelector('.post-title-row')?.appendChild(node)
+    }
     function markBumped(items) {
       lastBumped = items.length
-      if (!cfg.highlightBumped || !items.length || !ctx.ul) return
+      if (!items.length || !ctx.ul) return
       for (const it of items) {
         const row = ctx.ul.querySelector(`:scope > li.post-item a.post-title[href*="/topic/${it.id}"]`)
           ?.closest('li.post-item')
         if (!row) continue
+        // 站点刷新会在标题旁留「未读」红点；高亮只闪 2.6 秒，点要一直留到用户进帖。
+        attachNativeUnread(row, it.el)
+        if (!cfg.highlightBumped) continue
         row.classList.remove('lsb-live-bumped')
         void row.offsetWidth
         row.classList.add('lsb-live-bumped')
@@ -387,11 +425,12 @@
       const ul = ctx.ul
       const seen = ctx.seen
       if (!seen) return 0
-      const doc = await api.net.doc(listUrl())
+      const doc = await liveDoc(listUrl())
       if (gen !== navGen || ctx.ul !== ul || ctx.seen !== seen) return 0
       const isPost = ctx.sort === 'post'
       const bumped = []
       for (const li of doc.querySelectorAll('li.post-item')) {
+        if (!isListRow(li)) continue
         const it = api.parse.listItem(li)
         if (!it?.id) continue
         const fp = freshnessOf(it)
@@ -475,7 +514,10 @@
       const frag = document.createDocumentFragment()
       const batch = pending.splice(0, cfg.maxInsert)
       for (const it of batch) {
-        frag.appendChild(document.importNode(it.el, true))
+        const node = document.importNode(it.el, true)
+        const notices = [...node.querySelectorAll('a.unread-topic-notice')]
+        notices.slice(1).forEach((n) => n.remove())
+        frag.appendChild(node)
       }
       // 插入到置顶帖之后，保持置顶始终在最顶部
       const pos = pinnedCount()
@@ -497,6 +539,11 @@
       const absorb = (t) => {
         for (const p of t.posts) {
           if (!p.postId || fresh.has(p.postId)) continue
+          if (p.el?.classList?.contains('quote-threads-child')) {
+            ackLivePost(p.postId)
+            ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+            continue
+          }
           if (isKnownPost(p.postId)) {
             ackLivePost(p.postId)
             ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
@@ -507,14 +554,14 @@
       }
 
       // 新回复总在最后一页
-      let t = api.parse.topic(await api.net.doc(api.routes.topic(tid, Math.max(1, ctx.pages || 1))))
+      let t = api.parse.topic(await liveDoc(api.routes.topic(tid, Math.max(1, ctx.pages || 1))))
       if (gen !== navGen || ctx.tid !== tid) return 0
       absorb(t)
       // 回复把帖子顶到了新页：本轮立即追补，不必等下一个周期。
       // 否则每次翻页都会让新页的首批回复延迟一整个轮询间隔才出现。
       for (let i = 0; i < MAX_PAGE_CATCHUP && t.pages > ctx.pages; i++) {
         ctx.pages = t.pages
-        t = api.parse.topic(await api.net.doc(api.routes.topic(tid, ctx.pages)))
+        t = api.parse.topic(await liveDoc(api.routes.topic(tid, ctx.pages)))
         if (gen !== navGen || ctx.tid !== tid) return 0
         absorb(t)
       }
@@ -546,6 +593,10 @@
         if (p.postId && document.getElementById('post-' + p.postId)) {
           ackLivePost(p.postId)
           ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+          continue
+        }
+        if (p.el?.classList?.contains('quote-threads-child')) {
+          ackLivePost(p.postId)
           continue
         }
         ctx.ul.appendChild(document.importNode(p.el, true))
@@ -592,24 +643,13 @@
           return 0
         } finally {
           inflight = null
-          if (election.isLeader) scheduleNext()
+          if (mode && shouldPoll()) scheduleNext()
         }
       })()
       return inflight
     }
 
     /* ── 跨标签：心跳选主（只有主标签发请求） ── */
-    const JITTER = Number.isFinite(Number(cfg.jitterMs)) ? Math.max(0, Number(cfg.jitterMs)) : 800
-    const election = api.election({
-      onPromote: () => cycle(),
-      onDemote: () => {
-        if (timer) clearTimeout(timer)
-        timer = null
-        nextAt = null
-        hideBanner()
-      },
-      jitter: JITTER,
-    })
     let timer = null
     let nextAt = null
     function intervalMs() {
@@ -620,6 +660,24 @@
       nextAt = Date.now() + intervalMs()
       timer = setTimeout(() => cycle(), intervalMs())
     }
+    const JITTER = Number.isFinite(Number(cfg.jitterMs)) ? Math.max(0, Number(cfg.jitterMs)) : 800
+    const election = api.election({
+      onPromote: () => cycle(),
+      onDemote: () => {
+        if (isUserTopicList()) {
+          // 资料页与首页不是同一条流：被首页主标签抢走后仍要自己巡检，否则只能刷新才看到新帖
+          cycle()
+          return
+        }
+        if (timer) clearTimeout(timer)
+        timer = null
+        nextAt = null
+        hideBanner()
+      },
+      jitter: JITTER,
+    })
+    init()
+    if (shouldPoll()) cycle()
 
     // 阻塞条件一解除就补上暂存内容：焦点离开编辑器、标签页切回前台。
     // 逛吧靠 1 秒心跳反复试探；这里事件驱动——响应更快，也不需要常驻定时器。
@@ -645,7 +703,7 @@
     /* 软导航换页：立刻重建基线。旧实现延迟 80ms，换页窗口里巡检会写进已经卸掉的 ul。 */
     api.on('route:changed', () => {
       init()
-      if (election.isLeader) cycle()
+      if (shouldPoll()) cycle()
     })
     api.on('topic:posts-added', (posts) => {
       if (mode !== 'topic') return
@@ -680,6 +738,7 @@
       nextAt: () => nextAt,
       intervalFor: (hidden) => (hidden ? cfg.bgSec : cfg.pollSec) * 1000,
       pollOnce: () => cycle(),
+      demote: () => election.demote(),
       load: () => (mode === 'topic' ? insertFloors() : insertPending()),
       bannerVisible: () => !!banner && banner.style.display !== 'none',
       bannerText: () => banner?.querySelector('.lsb-live-txt')?.textContent || '',

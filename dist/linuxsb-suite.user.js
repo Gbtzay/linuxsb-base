@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氧（RC）
 // @name:en      LINUX.SB Oxygen (RC)
 // @namespace    https://linux.sb/
-// @version      1.0.60
+// @version      1.0.96
 // @description  【RC】冻新功能，只修阻断。linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 18 个模块。必须先安装「LINUX.SB 氢（RC）」。
 // @description:en  [RC] Feature-frozen. Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen (RC).
 // @author       xB70sR71
@@ -17,22 +17,22 @@
 // ── 包含模块 ──
 // · LSB·楼层统计（示例插件：服务提供方） v1.0.1
 // · LSB·高频发言标记（示例插件：服务消费方） v1.0.1
-// · LSB·断点续读 v1.0.3
-// · LSB·已读置灰 v1.0.3
-// · LSB·首页回位 v1.0.0
+// · LSB·断点续读 v1.0.5
+// · LSB·已读置灰 v1.0.4
+// · LSB·首页回位 v1.0.1
 // · LSB·用户画像悬浮卡 v1.0.1
 // · LSB·主楼预览 v1.1.3
-// · LSB·未读哨兵 v1.0.2
+// · LSB·未读哨兵 v1.0.17
 // · LSB·机会监控 v1.0.1
 // · LSB·签到日历 v1.0.3
 // · LSB·积分趋势 v1.0.2
-// · LSB·称号行情 v1.0.4
+// · LSB·称号行情 v1.0.17
 // · LSB·AI 总结 v1.1.5
 // · LSB·配置迁移 v1.0.0
 // · LSB·个人存档 v1.0.0
 // · LSB·年度报告 v1.0.1
-// · LSB·界面精修 v1.1.37
-// · LSB·实时流 v1.2.7
+// · LSB·界面精修 v1.1.43
+// · LSB·实时流 v1.2.12
 //
 
 
@@ -284,14 +284,14 @@
 
 
 ;
-/* ══════════════ LSB·断点续读 v1.0.3 (resume-reading) ══════════════ */
+/* ══════════════ LSB·断点续读 v1.0.5 (resume-reading) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'resume-reading',
     name: '断点续读',
-    version: '1.0.3',
+    version: '1.0.5',
     description: '记住每帖读到哪层，回来一键续读，未读楼层标 NEW',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -391,21 +391,8 @@
       .lsb-resume-bar .lsb-btn{white-space:nowrap}
     `)
 
-    function findGroup(groups, re) {
-      return groups.find((g) => {
-        const t = (g.textContent || '').trim()
-        return t && re.test(t) && !/^UID\b/i.test(t)
-      })
-    }
-
     function newAnchor(li) {
-      const groups = [...li.querySelectorAll('.post-user-group')]
-      const role =
-        findGroup(groups, /AI机器人/) ||
-        findGroup(groups, /社区主理人/) ||
-        findGroup(groups, /创作者/)
-      if (role) return role
-      const uid = groups.find(
+      const uid = [...li.querySelectorAll('.post-user-group')].find(
         (g) => g.classList.contains('user-uid-badge') || /^UID\b/i.test((g.textContent || '').trim()),
       )
       if (uid) return uid
@@ -478,8 +465,20 @@
     onScroll()
 
     /* ── 续读提示条 ── */
+    function floorEl(floor) {
+      const n = Number(floor)
+      if (!Number.isFinite(n) || n <= 0) {
+        return (
+          document.querySelector('li.post-entry:not([data-floor])')
+          || document.querySelector(`${api.sel.postEntry}:first-child`)
+          || document.querySelector(api.sel.postEntry)
+        )
+      }
+      return document.querySelector(`${api.sel.postEntry}[data-floor="${n}"]`)
+    }
+
     function jump(floor) {
-      const el = document.querySelector(`${api.sel.postEntry}[data-floor="${floor}"]`)
+      const el = floorEl(floor)
       if (!el) {
         api.ui.toast(`#${floor} 楼不在当前页`, { type: 'error' })
         return false
@@ -601,14 +600,14 @@
 
 
 ;
-/* ══════════════ LSB·已读置灰 v1.0.3 (read-mark) ══════════════ */
+/* ══════════════ LSB·已读置灰 v1.0.4 (read-mark) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'read-mark',
     name: '已读置灰',
-    version: '1.0.3',
+    version: '1.0.4',
     description: '看过的帖子在列表中变灰；未读仍用站点自己的标记',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -718,11 +717,13 @@
     }
 
     function paintAll() {
-      for (const li of document.querySelectorAll('ul.post-list > li.post-item')) paint(li)
+      for (const li of document.querySelectorAll(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)')) {
+        paint(li)
+      }
     }
 
     // 现有 + 无限滚动新增的条目各回调一次（幂等）
-    api.dom.each('ul.post-list > li.post-item', paint)
+    api.dom.each(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)', paint)
     // 软导航后 DOM 可能被整段换掉：记账 + 全量重涂
     api.on('route:changed', () => {
       markOpenTopic()
@@ -781,7 +782,7 @@
 
 
 ;
-/* ══════════════ LSB·首页回位 v1.0.0 (home-return) ══════════════ */
+/* ══════════════ LSB·首页回位 v1.0.1 (home-return) ══════════════ */
 (function () {
   'use strict'
 
@@ -791,8 +792,8 @@
   const manifest = {
     id: 'home-return',
     name: '首页回位',
-    version: '1.0.0',
-    description: '回首页时滚到上次点进的那条帖',
+    version: '1.0.1',
+    description: '回首页时滚到上次点进的那条帖；回成功一次后刷新不再跳',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
@@ -839,6 +840,14 @@
         sessionStorage.setItem(KEY, JSON.stringify({ tid, offset, ts: Date.now() }))
       } catch {
         /* 隐私模式可能写不了 */
+      }
+    }
+
+    function clear() {
+      try {
+        sessionStorage.removeItem(KEY)
+      } catch {
+        /* ignore */
       }
     }
 
@@ -908,6 +917,7 @@
       }
       if (!el) return false
       applyScroll(el, rec.offset)
+      clear()
       return true
     }
 
@@ -1473,15 +1483,15 @@
 
 
 ;
-/* ══════════════ LSB·未读哨兵 v1.0.2 (unread-sentinel) ══════════════ */
+/* ══════════════ LSB·未读哨兵 v1.0.17 (unread-sentinel) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'unread-sentinel',
     name: '未读哨兵',
-    version: '1.0.2',
-    description: '低频巡检首页新动态；跨标签选主去重；标题角标 + 通知 + 消息箱面板',
+    version: '1.0.17',
+    description: '低频巡检首页新动态；跨标签选主去重；标题角标 + 通知 + 消息箱；左栏通知红点跟个人卡走',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
@@ -1502,6 +1512,7 @@
     const origTitle = document.title
     let timer = null
     let inflight = null // 在途巡检 Promise：并发调用复用同一轮而非静默丢弃
+    let notifyFresh = false
     let nextAt = null
     let lastErr = null
     const probe = {}
@@ -1514,6 +1525,187 @@
     const inboxSet = (arr) => api.store.set('inbox', arr.slice(0, 100))
     const lastOpenTs = () => api.store.get('lastOpenTs', 0)
 
+    api.ui.style(
+      '.lsb-notify-badge{display:none!important}',
+    )
+
+    function notifyHosts() {
+      const hosts = [...document.querySelectorAll('a[href*="tab=notifications"]')].filter((a) => {
+        const href = a.getAttribute('href') || ''
+        return !/[?&]p=/.test(href)
+      })
+      const mine = document.querySelector('a.nav-mine')
+      if (mine && !hosts.includes(mine)) hosts.push(mine)
+      return hosts
+    }
+
+    function isUserCardNotify(a) {
+      if (a.classList.contains('nav-mine') || a.classList.contains('tab')) return false
+      return !!(a.closest('.user-card, .user-links, [data-lsb-shell-me]'))
+    }
+
+    function isKeywordFilterBadge(el) {
+      return !!(
+        el.classList.contains('home-keyword-filter-count')
+        || el.closest('.home-keyword-filter-button')
+      )
+    }
+
+    function nativesOn(a) {
+      // 个人卡「我的通知」原生是 .notify-badge（红底白字）。
+      // .notification-unread 是通知页浅色胶囊，叠上去会看成白点。
+      if (isUserCardNotify(a)) {
+        a.querySelectorAll('.notification-unread').forEach((el) => el.remove())
+      }
+      return [...a.querySelectorAll('.notify-badge, .notification-unread, .mobile-nav-unread')].filter(
+        (el) => !isKeywordFilterBadge(el),
+      )
+    }
+
+    function rememberOrig(el) {
+      if (!el.hasAttribute('data-lsb-notify-orig')) {
+        el.setAttribute('data-lsb-notify-orig', el.textContent || '')
+      }
+    }
+
+    function showNative(el, label) {
+      rememberOrig(el)
+      el.textContent = label
+      el.hidden = false
+      el.removeAttribute('data-lsb-notify-hid')
+      el.style.removeProperty('display')
+    }
+
+    function hideNative(el) {
+      rememberOrig(el)
+      el.textContent = ''
+      el.setAttribute('data-lsb-notify-hid', '')
+      // 站点 .notification-unread{display:inline-flex} 会盖掉 hidden
+      el.style.setProperty('display', 'none', 'important')
+    }
+
+    function canCreateNative(a) {
+      return !a.classList.contains('nav-mine') && !a.classList.contains('tab')
+    }
+
+    function paintNotify(n) {
+      const count = Math.max(0, Number(n) || 0)
+      const label = count > 9 ? '9+' : String(count)
+      document.querySelectorAll('.lsb-notify-badge').forEach((el) => el.remove())
+      for (const a of notifyHosts()) {
+        const natives = nativesOn(a)
+        if (count <= 0) {
+          for (const el of natives) {
+            if (el.hasAttribute('data-lsb-notify')) el.remove()
+            else hideNative(el)
+          }
+          continue
+        }
+        if (natives.length) {
+          for (const el of natives) showNative(el, label)
+          continue
+        }
+        if (!canCreateNative(a)) continue
+        const el = document.createElement('span')
+        el.className = 'notify-badge'
+        el.setAttribute('data-lsb-notify', '')
+        el.textContent = label
+        a.append(el)
+      }
+    }
+
+    function storedCount() {
+      return Math.max(0, Number(api.store.get('notifyCount', 0)) || 0)
+    }
+
+    function stripCardSoftPills() {
+      for (const a of notifyHosts()) {
+        if (!isUserCardNotify(a)) continue
+        a.querySelectorAll('.notification-unread').forEach((el) => el.remove())
+      }
+    }
+
+    // 刷新后库存经常是 0：先留着站点 SSR 红点，等从个人卡抄到数字再决定藏不藏。
+    function paintStored() {
+      stripCardSoftPills()
+      const n = storedCount()
+      if (n > 0 || notifyFresh) paintNotify(n)
+    }
+
+    function applyNotify(n) {
+      const count = Math.max(0, Number(n) || 0)
+      notifyFresh = true
+      api.store.set('notifyCount', count)
+      paintNotify(count)
+      api.tabs.post('notify', { count })
+    }
+
+    function cardNotifyAnchors(root) {
+      return [...root.querySelectorAll('a[href*="tab=notifications"]')].filter((a) => {
+        const href = a.getAttribute('href') || ''
+        if (/[?&]p=/.test(href)) return false
+        if (a.classList.contains('nav-mine') || a.classList.contains('tab')) return false
+        return !!(a.closest('.user-card, .user-links, [data-lsb-shell-me]'))
+      })
+    }
+
+    /** 从个人卡原生红点读数。打开通知页会把未读标掉，所以不能靠 GET 通知页。
+     *  哨兵自己补的 / 藏掉的点不算原生：只有它们时返回 null，避免软跳把库存写成 0。 */
+    function countNativeNotify(root) {
+      const as = cardNotifyAnchors(root)
+      if (!as.length) return null
+      let max = 0
+      let sawNative = false
+      let sawOurs = false
+      for (const a of as) {
+        const els = [...a.querySelectorAll('.notify-badge, .notification-unread, .mobile-nav-unread')].filter(
+          (el) => !isKeywordFilterBadge(el),
+        )
+        for (const el of els) {
+          if (el.hasAttribute('data-lsb-notify') || el.hasAttribute('data-lsb-notify-hid')) {
+            sawOurs = true
+            continue
+          }
+          sawNative = true
+          const raw = (el.textContent || '').trim()
+          const n = raw === '9+' ? 10 : parseInt(raw, 10)
+          if (Number.isFinite(n) && n > max) max = n
+        }
+      }
+      if (sawNative) return max
+      if (sawOurs) return null
+      return 0
+    }
+
+    function isOwnNotifyPage(page = api.page) {
+      if (page?.type !== 'user' || page.tab !== 'notifications') return false
+      if (api.me.guest || api.me.uid == null) return false
+      return Number(page.id) === Number(api.me.uid)
+    }
+
+    function refreshNotifyFromHere() {
+      if (isOwnNotifyPage()) {
+        applyNotify(0)
+        return
+      }
+      applyNotifyFrom(document)
+      paintStored()
+    }
+
+    function applyNotifyFrom(root) {
+      if (isOwnNotifyPage()) {
+        applyNotify(0)
+        return
+      }
+      if (api.me.guest || api.me.uid == null) {
+        applyNotify(0)
+        return
+      }
+      const n = countNativeNotify(root)
+      if (n == null) return
+      applyNotify(n)
+    }
+
     function unreadCount() {
       return inboxGet().filter((x) => x.lastTs > lastOpenTs()).length
     }
@@ -1523,10 +1715,37 @@
       document.title = n > 0 ? `(${n}) ${origTitle}` : origTitle
     }
 
-    api.tabs.on('events', ({ items }) => {
-      mergeInbox(items)
+    api.tabs.on('events', ({ items, drop }) => {
+      if (Array.isArray(drop) && drop.length) {
+        const dropSet = new Set(drop.map(Number))
+        inboxSet(inboxGet().filter((x) => !dropSet.has(Number(x.id))))
+      }
+      if (items?.length) mergeInbox(items)
       applyTitle()
     })
+    api.tabs.on('notify', ({ count }) => {
+      if (isOwnNotifyPage()) {
+        notifyFresh = true
+        api.store.set('notifyCount', 0)
+        paintNotify(0)
+        return
+      }
+      notifyFresh = true
+      api.store.set('notifyCount', count)
+      paintNotify(count)
+    })
+    api.on('route:changed', () => {
+      refreshNotifyFromHere()
+    })
+    api.dom.each('a[href*="tab=notifications"], a.nav-mine', () => {
+      if (isOwnNotifyPage()) applyNotify(0)
+      else paintStored()
+    })
+
+    /* 红点只抄个人卡原生数字。GET 通知页会被站点当成打开，未读立刻清掉。
+     * 人已经进了自己的通知页时，这一轮就清库存，不必等 3 分钟后再抄首页个人卡。 */
+    applyTitle()
+    refreshNotifyFromHere()
 
     const election = api.election({
       onPromote: () => cycle(),
@@ -1545,6 +1764,7 @@
         try {
           probe.at = Date.now()
           const doc = await api.net.doc('/')
+          applyNotifyFrom(doc)
           const parsed = api.parse.list(doc)
           probe.parsed = parsed.length
           const items = parsed.filter((x) => x.id && x.lastActiveTs)
@@ -1552,23 +1772,39 @@
           probe.seenBefore = Object.keys(seenGet()).length
           const seen = seenGet()
           const fresh = []
+          const pinnedIds = new Set()
           for (const it of items) {
             const prev = seen[it.id]
+            seen[it.id] = Math.max(prev || 0, it.lastActiveTs)
+            if (it.pinned) {
+              pinnedIds.add(it.id)
+              continue
+            }
             if (prev == null || it.lastActiveTs > prev) {
               fresh.push({ id: it.id, title: it.title, lastTs: it.lastActiveTs, replies: it.replies })
             }
-            seen[it.id] = Math.max(prev || 0, it.lastActiveTs)
           }
           // 容量修剪：保留最近 400 帖的水位线
           const entries = Object.entries(seen).sort((a, b) => b[1] - a[1]).slice(0, 400)
           seenSet(Object.fromEntries(entries))
 
+          if (pinnedIds.size) {
+            const kept = inboxGet().filter((x) => !pinnedIds.has(Number(x.id)))
+            if (kept.length !== inboxGet().length) {
+              inboxSet(kept)
+              applyTitle()
+            }
+          }
+
           probe.fresh = fresh.length
           if (fresh.length) {
+            fresh.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0))
             mergeInbox(fresh)
             applyTitle()
-            api.tabs.post('events', { items: fresh })
             if (!force) announce(fresh)
+          }
+          if (fresh.length || pinnedIds.size) {
+            api.tabs.post('events', { items: fresh, drop: [...pinnedIds] })
           }
         } catch (e) {
           lastErr = String((e && e.message) || e); api.log('sentinel 巡检失败', lastErr)
@@ -1628,6 +1864,15 @@
       if (timer) clearTimeout(timer)
       timer = null
       document.title = origTitle // 停用即还原标题，不留角标
+      document.querySelectorAll('.lsb-notify-badge').forEach((el) => el.remove())
+      document.querySelectorAll('[data-lsb-notify]').forEach((el) => el.remove())
+      document.querySelectorAll('[data-lsb-notify-orig]').forEach((el) => {
+        el.style.removeProperty('display')
+        el.hidden = false
+        el.removeAttribute('data-lsb-notify-hid')
+        el.textContent = el.getAttribute('data-lsb-notify-orig') || ''
+        el.removeAttribute('data-lsb-notify-orig')
+      })
     })
 
     /* ── 面板：消息箱 ── */
@@ -1683,7 +1928,6 @@
 
     /* ── 启动 ── */
     // 角色由 election 自行决定（单标签抖动后自动上位，多标签靠心跳竞争）
-    applyTitle()
 
     /* ── 调试接口 ── */
     /* ── 设置页（由 manifest.config 自动生成） ── */
@@ -1694,7 +1938,7 @@
       election: () => election.state(), // id / leaderId / 距上次 leader 心跳，排查跨标签问题用
       lastError: () => lastErr,
       probe: () => probe,
-      diag: () => ({ origTitle, badge: !!cfg.badgeInTitle, unread: unreadCount(), inboxLen: inboxGet().length, lastOpen: lastOpenTs(), firstTs: inboxGet()[0] && inboxGet()[0].lastTs }),
+      diag: () => ({ origTitle, badge: !!cfg.badgeInTitle, unread: unreadCount(), inboxLen: inboxGet().length, lastOpen: lastOpenTs(), firstTs: inboxGet()[0] && inboxGet()[0].lastTs, notifyCount: api.store.get('notifyCount', 0) }),
       tick: () => cycle(true), // force 绕过 follower 门禁，测试用
       inbox: inboxGet,
       seen: seenGet,
@@ -2406,7 +2650,7 @@
 
 
 ;
-/* ══════════════ LSB·称号行情 v1.0.4 (title-quotes) ══════════════ */
+/* ══════════════ LSB·称号行情 v1.0.17 (title-quotes) ══════════════ */
 /**
  * 数据源：/gacha_market 在售卡片。站点按页展示（约 24 条/页），必须跟分页把挂单收全；
  * 只拉每个筛选的第一页会丢掉中间价，巡检高低价就会和交易页对不上。
@@ -2418,24 +2662,32 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.4',
-    description: '称号交易挂单高低价与全场锚点趋势',
+    version: '1.0.17',
+    description: '称号交易挂单高低价、全场锚点折线；各称号可切挂单合成K或高低折线；全站浮层；氢壳开着走左栏，关壳才留右下钮',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
     config: {
-      intervalMin: { type: 'number', label: '巡检间隔 (分钟)', default: 1 },
+      intervalSec: { type: 'number', label: '巡检间隔 (秒)', default: 30 },
       keepDays: { type: 'number', label: '保留天数', default: 90 },
     },
   }
 
   const MERGE_MS = 12 * 3600e3
+  const MOVER_TOP = 10
   const FORCE_DEBOUNCE_MS = 5000
+  const WATCH_MS = 10000
+  const WATCH_TTL_MS = 15000
+  const WATCH_BEAT_MS = 5000
   const MAX_PAGES = 40
   const ROLES = [
     { id: 'hi', label: '最高', color: 'var(--danger,#d55)' },
     { id: 'midHi', label: '中位偏上', color: 'var(--warning,#c90)' },
     { id: 'midLo', label: '中位偏下', color: 'var(--brand,#5eaaa0)' },
+    { id: 'lo', label: '最低', color: 'var(--success,#3aa08f)' },
+  ]
+  const TITLE_LINES = [
+    { id: 'hi', label: '最高', color: 'var(--danger,#d55)' },
     { id: 'lo', label: '最低', color: 'var(--success,#3aa08f)' },
   ]
 
@@ -2524,6 +2776,68 @@
     }
     return titles
   }
+
+  const BOOK_STALE_MS = 3 * 3600e3
+
+  function bookFromListings(listings) {
+    const rows = {}
+    for (const x of listings || []) {
+      if (!x || !x.id) continue
+      const qty = Number(x.qty) > 0 ? Number(x.qty) : 1
+      rows[String(x.id)] = { key: titleKey(x.name, x.rarity), qty }
+    }
+    return rows
+  }
+
+  function diffBook(prevRows, listings) {
+    const curr = bookFromListings(listings)
+    const prev = prevRows || {}
+    const out = {}
+    const add = (key, sold, fills) => {
+      if (!key || (!(sold > 0) && !(fills > 0))) return
+      if (!out[key]) out[key] = { sold: 0, fills: 0 }
+      out[key].sold += sold
+      out[key].fills += fills
+    }
+    for (const [id, row] of Object.entries(prev)) {
+      const now = curr[id]
+      if (!now) {
+        add(row.key, Number(row.qty) > 0 ? Number(row.qty) : 0, 1)
+        continue
+      }
+      const before = Number(row.qty) > 0 ? Number(row.qty) : 0
+      const after = Number(now.qty) > 0 ? Number(now.qty) : 0
+      if (after < before) add(now.key || row.key, before - after, 1)
+    }
+    return out
+  }
+
+  function estimateFlow(prevBook, listings, now = Date.now()) {
+    if (!prevBook || !prevBook.rows || !Number.isFinite(prevBook.t)) return {}
+    if (now - prevBook.t > BOOK_STALE_MS) return {}
+    return diffBook(prevBook.rows, listings)
+  }
+
+  function flowTraded(flow) {
+    return Object.values(flow || {}).some((d) => Number(d?.sold) > 0 || Number(d?.fills) > 0)
+  }
+
+  function sumFlow(series, key, { rangeDays = 7, now = Date.now() } = {}) {
+    const cutoff = rangeCutoff(rangeDays, now)
+    let sold = 0
+    let fills = 0
+    for (const s of series || []) {
+      if (!s || s.t < cutoff) continue
+      const d = (s.flow && s.flow[key]) || (s.titles && s.titles[key])
+      if (!d) continue
+      const ds = Number(d.sold)
+      const df = Number(d.fills)
+      if (ds > 0) sold += ds
+      if (df > 0) fills += df
+    }
+    return { sold, fills }
+  }
+
   function pickAnchors(listings, titles) {
     if (!listings || !listings.length) return []
     let hiL = listings[0]
@@ -2568,9 +2882,309 @@
     return a + '#' + t
   }
 
+  function rangeCutoff(rangeDays, now = Date.now()) {
+    const d = Number(rangeDays)
+    if (d === 0) {
+      const start = new Date(now)
+      start.setHours(0, 0, 0, 0)
+      return start.getTime()
+    }
+    const days = Number.isFinite(d) && d > 0 ? d : 7
+    return now - days * 864e5
+  }
+
+  function periodMs(rangeDays, barMin) {
+    const d = Number(rangeDays)
+    if (d === 0) {
+      const m = Number(barMin)
+      if (m === 1 || m === 5 || m === 15 || m === 30 || m === 60) return m * 60e3
+      return 30 * 60e3
+    }
+    if (!Number.isFinite(d) || d < 0) return 4 * 3600e3
+    if (d <= 7) return 4 * 3600e3
+    if (d <= 30) return 864e5
+    return 3 * 864e5
+  }
+
+  function foldCandles(series, key, { rangeDays = 7, now = Date.now(), barMin } = {}) {
+    const period = periodMs(rangeDays, barMin)
+    const cutoff = rangeCutoff(rangeDays, now)
+    const raw = series || []
+    const inRange = raw.filter((s) => s.t >= cutoff)
+    const snaps = (inRange.length ? inRange : rangeDays === 0 ? [] : raw).slice().sort((a, b) => a.t - b.t)
+    const points = snaps.map((s) => ({
+      t: s.t,
+      q: s.titles && s.titles[key] ? s.titles[key] : null,
+    }))
+    const firstWith = points.find((p) => p.q)
+    if (!firstWith) return []
+    const start = Math.floor(firstWith.t / period) * period
+    const end = Math.floor(now / period) * period + period
+    const bars = []
+    let prevC = null
+    for (let b = start; b < end; b += period) {
+      const quotes = points.filter((p) => p.t >= b && p.t < b + period && p.q).map((p) => p.q)
+      if (!quotes.length) continue
+      const mids = quotes.map((q) => q.mid)
+      const c = mids[mids.length - 1]
+      const o = prevC == null ? mids[0] : prevC
+      bars.push({
+        t: b,
+        o,
+        h: Math.max(o, ...mids),
+        l: Math.min(o, ...mids),
+        c,
+      })
+      prevC = c
+    }
+    return bars
+  }
+
+  function mean(nums) {
+    const a = (nums || []).filter((n) => Number.isFinite(n))
+    if (!a.length) return null
+    return a.reduce((s, x) => s + x, 0) / a.length
+  }
+
+  function snapshotIndex(titles) {
+    const buckets = {}
+    const all = []
+    for (const v of Object.values(titles || {})) {
+      if (!v || !Number.isFinite(v.mid)) continue
+      const r = typeof v.rarity === 'string' ? v.rarity : ''
+      if (!buckets[r]) buckets[r] = []
+      buckets[r].push(v.mid)
+      all.push(v.mid)
+    }
+    const byRarity = {}
+    for (const [r, mids] of Object.entries(buckets)) {
+      byRarity[r] = { mean: mean(mids), n: mids.length }
+    }
+    return { overall: mean(all), byRarity }
+  }
+
+  function indexPoints(series, rarity) {
+    const out = []
+    for (const s of series || []) {
+      const idx = snapshotIndex(s.titles || {})
+      const mid = rarity === null ? idx.overall : idx.byRarity[rarity]?.mean
+      if (Number.isFinite(mid)) out.push({ t: s.t, mid })
+    }
+    return out
+  }
+
+  function foldIndexCandles(points, opts) {
+    const key = '__idx'
+    const series = (points || [])
+      .filter((p) => p && Number.isFinite(p.t) && Number.isFinite(p.mid))
+      .map((p) => ({ t: p.t, titles: { [key]: { mid: p.mid } } }))
+    return foldCandles(series, key, opts)
+  }
+
+  function sma(values, n) {
+    const out = []
+    const k = Number(n)
+    for (let i = 0; i < (values || []).length; i++) {
+      if (!Number.isFinite(k) || k < 1 || i + 1 < k) {
+        out[i] = null
+        continue
+      }
+      out[i] = mean(values.slice(i + 1 - k, i + 1))
+    }
+    return out
+  }
+
+  function stdevPop(values) {
+    const a = (values || []).filter((n) => Number.isFinite(n))
+    if (!a.length) return null
+    const m = mean(a)
+    let s = 0
+    for (const x of a) s += (x - m) * (x - m)
+    return Math.sqrt(s / a.length)
+  }
+
+  function bollinger(closes, n = 20, k = 2) {
+    const mid = sma(closes, n)
+    const upper = []
+    const lower = []
+    const kk = Number(k)
+    for (let i = 0; i < (closes || []).length; i++) {
+      if (mid[i] == null || !Number.isFinite(kk)) {
+        upper[i] = null
+        lower[i] = null
+        continue
+      }
+      const sd = stdevPop(closes.slice(i + 1 - n, i + 1))
+      upper[i] = mid[i] + kk * sd
+      lower[i] = mid[i] - kk * sd
+    }
+    return { mid, upper, lower }
+  }
+
+  function overlays(bars) {
+    const closes = (bars || []).map((b) => b.c)
+    const sma5 = sma(closes, 5)
+    const bb = bollinger(closes, 20, 2)
+    return closes.map((_, i) => {
+      const row = {}
+      if (sma5[i] != null) row.sma5 = sma5[i]
+      if (bb.mid[i] != null) {
+        row.sma20 = bb.mid[i]
+        row.bbMid = bb.mid[i]
+        row.bbUpper = bb.upper[i]
+        row.bbLower = bb.lower[i]
+      }
+      return row
+    })
+  }
+
+  function niceTicks(min, max, n = 4) {
+    if (!(max > min)) return [min]
+    const span = max - min
+    const step0 = span / n
+    const mag = Math.pow(10, Math.floor(Math.log10(step0)))
+    const err = step0 / mag
+    const step = err >= 7.5 ? 10 * mag : err >= 3 ? 5 * mag : err >= 1.5 ? 2 * mag : mag
+    const lo = Math.floor(min / step) * step
+    const hi = Math.ceil(max / step) * step
+    const ticks = []
+    for (let v = lo; v <= hi + step * 0.25; v += step) {
+      ticks.push(Number(Number(v).toPrecision(12)))
+    }
+    return ticks.length ? ticks : [min, max]
+  }
+
+  function fmtPrice(v) {
+    if (!Number.isFinite(v)) return ''
+    return Number.isInteger(v) ? String(v) : String(Math.round(v * 10) / 10)
+  }
+
+  function fmtTime(t, rangeDays) {
+    const d = new Date(t)
+    const md = `${d.getMonth() + 1}-${d.getDate()}`
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    if (rangeDays === 0) return `${hh}:${mm}`
+    if (rangeDays <= 7) return `${md} ${hh}:${mm}`
+    return md
+  }
+
+  function fmtPct(ratio) {
+    if (!Number.isFinite(ratio)) return ''
+    const p = ratio * 100
+    const sign = p > 0 ? '+' : ''
+    return `${sign}${(Math.round(p * 10) / 10).toFixed(1)}%`
+  }
+
+  function movers(latestTitles, baseTitles) {
+    const latest = latestTitles || {}
+    const base = baseTitles || {}
+    const listed = []
+    const delisted = []
+    const up = []
+    const down = []
+    for (const key of Object.keys(latest)) {
+      if (!base[key]) {
+        const meta = splitKey(key)
+        listed.push({ key, name: meta.name, rarity: latest[key].rarity ?? meta.rarity, mid: latest[key].mid })
+      }
+    }
+    for (const key of Object.keys(base)) {
+      if (!latest[key]) {
+        const meta = splitKey(key)
+        delisted.push({ key, name: meta.name, rarity: base[key].rarity ?? meta.rarity })
+      }
+    }
+    for (const key of Object.keys(latest)) {
+      if (!base[key]) continue
+      const cur = Number(latest[key].mid)
+      const prev = Number(base[key].mid)
+      if (!Number.isFinite(cur) || !Number.isFinite(prev) || prev === 0) continue
+      const delta = cur - prev
+      const pct = delta / prev
+      if (pct === 0) continue
+      const meta = splitKey(key)
+      const row = {
+        key,
+        name: meta.name,
+        rarity: latest[key].rarity ?? meta.rarity,
+        mid: cur,
+        delta,
+        pct,
+      }
+      if (pct > 0) up.push(row)
+      else down.push(row)
+    }
+    const byKey = (a, b) => a.key.localeCompare(b.key, 'zh-CN')
+    up.sort((a, b) => b.pct - a.pct || byKey(a, b))
+    down.sort((a, b) => a.pct - b.pct || byKey(a, b))
+    return {
+      up: up.slice(0, MOVER_TOP),
+      down: down.slice(0, MOVER_TOP),
+      listed,
+      delisted,
+    }
+  }
+
+  function boardPair(series, { rangeDays = 7, now = Date.now(), mode = 'short' } = {}) {
+    const all = (series || []).slice().sort((a, b) => a.t - b.t)
+    if (mode === 'short') {
+      return {
+        latest: all[all.length - 1] || null,
+        base: all.length >= 2 ? all[all.length - 2] : null,
+        emptyWindow: false,
+      }
+    }
+    const cutoff = rangeCutoff(rangeDays, now)
+    const view = all.filter((s) => s.t >= cutoff)
+    if (!view.length) return { latest: null, base: null, emptyWindow: true }
+    return { latest: view[view.length - 1], base: view[0], emptyWindow: false }
+  }
+
+  function fmtBarTip(bar, rangeDays, barMin) {
+    const t = Number(bar.t)
+    const o = Number(bar.o)
+    const h = Number(bar.h)
+    const l = Number(bar.l)
+    const c = Number(bar.c)
+    const chg = c - o
+    const sign = chg > 0 ? '+' : ''
+    const when = `${fmtTime(t, rangeDays)}–${fmtTime(t + periodMs(rangeDays, barMin), rangeDays)}`
+    const lines = [
+      when,
+      `开 ${fmtPrice(o)}`,
+      `高 ${fmtPrice(h)}`,
+      `低 ${fmtPrice(l)}`,
+      `收 ${fmtPrice(c)}  ${sign}${fmtPrice(chg)}`,
+    ]
+    const add = (label, raw) => {
+      const v = Number(raw)
+      if (!Number.isFinite(v)) return
+      lines.push(`${label} ${fmtPrice(v)}`)
+    }
+    add('均5', bar.sma5)
+    add('均20', bar.sma20)
+    add('上轨', bar.bbUpper)
+    add('下轨', bar.bbLower)
+    return lines.join('\n')
+  }
+
   function setup(api) {
     const esc = api.util.esc
     let cfg = api.config()
+    ;(function migrateInterval() {
+      const saved = api.store.get('__config', {}) || {}
+      if ('intervalSec' in saved) return
+      if (!('intervalMin' in saved)) return
+      const min = Number(saved.intervalMin)
+      // 1 分钟 / 30 分钟是旧默认，不是用户定制；换成 30 秒
+      let sec = 30
+      if (Number.isFinite(min) && min > 0 && min !== 1 && min !== 30) {
+        sec = Math.max(1, Math.round(min * 60))
+      }
+      api.saveConfig({ intervalSec: sec })
+      cfg = api.config()
+    })()
     api.on('config:changed:title-quotes', () => {
       cfg = api.config()
       if (election.isLeader) scheduleNext()
@@ -2582,21 +3196,66 @@
     let lastAt = null
     let toasted = false
     let rangeDays = 7
+    let boardView = 'quotes'
+    let boardRarity = null
+    let boardMove = 'short'
+    let focusKey = null
+    let forceFoldOpen = false
+    const getKind = () => (api.store.get('chartKind') === 'line' ? 'line' : 'candle')
+    const setKind = (k) => api.store.set('chartKind', k === 'line' ? 'line' : 'candle')
+    const getBarMin = () => {
+      const m = Number(api.store.get('barMin', 30))
+      return m === 1 || m === 5 || m === 15 || m === 30 || m === 60 ? m : 30
+    }
+    const setBarMin = (n) => {
+      const m = Number(n)
+      api.store.set('barMin', m === 1 || m === 5 || m === 15 || m === 30 || m === 60 ? m : 30)
+    }
+    let clipSeq = 0
     const get = () => api.store.get('series', []) || []
     const set = (a) => api.store.set('series', a)
+    const tabId = Math.random().toString(36).slice(2, 10)
+    let beatTimer = null
+    let armedMs = null
+    let drag = null
+    let plotW = 800
+    let plotH = 380
+    let sizeWatch = null
+    let sizeTimer = 0
+    let plotGen = 0
+
+    function readChartH() {
+      const n = Number(api.store.get('chartH', 380))
+      return Math.min(720, Math.max(240, Number.isFinite(n) && n > 0 ? n : 380))
+    }
+    plotH = readChartH()
 
     function pushSnap(snap, now = Date.now()) {
       const arr = get()
       const last = arr[arr.length - 1]
-      if (last && snapSig(last) === snapSig(snap) && now - last.t < MERGE_MS) {
+      const traded = flowTraded(snap.flow)
+      if (last && snapSig(last) === snapSig(snap) && now - last.t < MERGE_MS && !traded) {
         last.t = Math.max(last.t, now)
         set(arr)
         return false
       }
-      arr.push({ t: now, anchors: snap.anchors, titles: snap.titles })
+      arr.push({ t: now, anchors: snap.anchors, titles: snap.titles, flow: snap.flow || {} })
       const deadline = now - cfg.keepDays * 864e5
       set(arr.filter((x) => x.t >= deadline))
       return true
+    }
+
+    function ingestListings(listings, now = Date.now()) {
+      const prev = api.store.get('book', null)
+      const flow = estimateFlow(prev, listings, now)
+      api.store.set('book', { t: now, rows: bookFromListings(listings) })
+      const titles = foldTitles(listings)
+      for (const k of Object.keys(titles)) {
+        titles[k].sold = flow[k]?.sold ?? 0
+        titles[k].fills = flow[k]?.fills ?? 0
+      }
+      const anchors = pickAnchors(listings, titles)
+      return pushSnap({ anchors, titles, flow }, now)
     }
 
     function isMarket() {
@@ -2626,11 +3285,84 @@
       render(el)
     }
 
-    function lines(points, keys) {
+    function plotGeom() {
+      return { W: plotW, H: plotH, P: { l: 52, r: 14, t: 12, b: 32 } }
+    }
+
+    function timeWindow(times, rangeDays, now, barMin) {
+      const tMax = now
+      const rangeMin = rangeCutoff(rangeDays, now)
+      const nums = (times || []).filter((t) => Number.isFinite(t) && t <= tMax)
+      const inRange = nums.filter((t) => t >= rangeMin)
+      const src = inRange.length ? inRange : rangeDays === 0 ? nums.filter((t) => t >= rangeMin) : nums
+      const dataMin = src.length ? Math.min(...src) : rangeMin
+      let tMin = Math.max(rangeMin, Math.min(dataMin, tMax))
+      const period = periodMs(rangeDays, barMin)
+      const minSpan = Math.max(period, rangeDays === 0 ? 30 * 60e3 : 3600e3)
+      if (tMax - tMin < minSpan) tMin = Math.max(rangeMin, tMax - minSpan)
+      const pad = Math.max((tMax - tMin) * 0.05, period * 0.35)
+      tMin = Math.max(rangeMin, tMin - pad)
+      return { tMin, tMax: tMax + pad * 0.12 }
+    }
+
+    function yScale(min, max, P, H) {
+      const pad = (max - min || 1) * 0.12
+      const lo = min - pad
+      const hi = max + pad
+      const span = hi - lo || 1
+      const Y = (v) => P.t + (1 - (v - lo) / span) * (H - P.t - P.b)
+      return { lo, hi, Y, ticks: niceTicks(min, max, 4) }
+    }
+
+    function xScale(tMin, tMax, P, W) {
+      const span = Math.max(1, tMax - tMin)
+      return (t) => P.l + ((t - tMin) / span) * (W - P.l - P.r)
+    }
+
+    function gridAndAxes({ W, H, P, Y, ticks, tMin, tMax, rangeDays, clip }) {
+      const innerW = W - P.l - P.r
+      const innerH = H - P.t - P.b
+      const x0 = P.l
+      const x1 = P.l + innerW
+      const y0 = P.t
+      const y1 = P.t + innerH
+      const hair = 'stroke="currentColor" vector-effect="non-scaling-stroke" shape-rendering="crispEdges"'
+      const gridH = ticks
+        .map((v) => {
+          const y = Y(v)
+          if (y < y0 - 0.5 || y > y1 + 0.5) return ''
+          return `<line class="lsb-title-quotes-grid" x1="${x0}" x2="${x1}" y1="${y.toFixed(1)}" y2="${y.toFixed(1)}" ${hair} stroke-opacity="0.28"></line>
+            <text x="${x0 - 8}" y="${(y + 3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="currentColor" fill-opacity="0.62">${esc(fmtPrice(v))}</text>`
+        })
+        .join('')
+      const tMid = tMin + (tMax - tMin) / 2
+      const times = tMax > tMin ? [tMin, tMid, tMax] : [tMin]
+      const X = xScale(tMin, tMax, P, W)
+      const gridV = times
+        .map((t) => {
+          const x = X(t)
+          return `<line class="lsb-title-quotes-grid" x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${y0}" y2="${y1}" ${hair} stroke-opacity="0.16"></line>`
+        })
+        .join('')
+      const labels = times
+        .map((t, i) => {
+          const x = X(t)
+          const anchor = i === 0 ? 'start' : i === times.length - 1 ? 'end' : 'middle'
+          return `<text x="${x.toFixed(1)}" y="${H - 8}" text-anchor="${anchor}" font-size="10" fill="currentColor" fill-opacity="0.62">${esc(fmtTime(t, rangeDays))}</text>`
+        })
+        .join('')
+      return `<defs><clipPath id="${clip}"><rect x="${x0}" y="${y0}" width="${innerW}" height="${innerH}"></rect></clipPath></defs>
+        <rect x="${x0}" y="${y0}" width="${innerW}" height="${innerH}" fill="currentColor" fill-opacity="0.04" stroke="currentColor" stroke-opacity="0.32" vector-effect="non-scaling-stroke"></rect>
+        ${gridH}${gridV}${labels}`
+    }
+
+    function chartSvg(extraClass, W, H, inner) {
+      return `<svg class="lsb-svg${extraClass ? ` ${extraClass}` : ''}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" font-family="ui-sans-serif, system-ui, sans-serif">${inner}</svg>`
+    }
+
+    function lines(points, keys, rangeDays = 7, now = Date.now()) {
       if (points.length < 2) return ''
-      const W = 620
-      const H = 170
-      const P = { l: 46, r: 12, t: 12, b: 22 }
+      const { W, H, P } = plotGeom()
       const vals = []
       for (const p of points) {
         for (const k of keys) if (p[k.id] != null) vals.push(p[k.id])
@@ -2638,28 +3370,131 @@
       if (!vals.length) return ''
       const min = Math.min(...vals)
       const max = Math.max(...vals)
-      const span = max - min || 1
-      const X = (i) => P.l + (i / (points.length - 1)) * (W - P.l - P.r)
-      const Y = (v) => P.t + (1 - (v - min) / span) * (H - P.t - P.b)
+      const { Y, ticks } = yScale(min, max, P, H)
+      const { tMin, tMax } = timeWindow(
+        points.map((p) => p.t),
+        rangeDays,
+        now,
+        getBarMin(),
+      )
+      const X = xScale(tMin, tMax, P, W)
+      const clip = `lsb-tq-l-${++clipSeq}`
       const polylines = keys
         .map((k) => {
           const pts = points
-            .map((p, i) => (p[k.id] == null ? null : `${X(i).toFixed(1)},${Y(p[k.id]).toFixed(1)}`))
-            .filter(Boolean)
+            .filter((p) => p[k.id] != null && p.t != null)
+            .map((p) => `${X(p.t).toFixed(1)},${Y(p[k.id]).toFixed(1)}`)
             .join(' ')
           if (!pts) return ''
-          return `<polyline points="${pts}" fill="none" stroke="${k.color}" stroke-width="2"></polyline>`
+          return `<polyline points="${pts}" fill="none" stroke="${k.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" clip-path="url(#${clip})"></polyline>`
         })
         .join('')
-      return `
-        <svg class="lsb-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img" style="aspect-ratio:${W}/${H}">
-          <rect x="${P.l}" y="${P.t}" width="${W - P.l - P.r}" height="${H - P.t - P.b}" fill="none" stroke="var(--line-soft,#eee)"></rect>
-          ${polylines}
-          <text x="${P.l - 6}" y="${Y(max) + 4}" text-anchor="end" font-size="11" fill="var(--text-muted,#888)">${max}</text>
-          <text x="${P.l - 6}" y="${Y(min) + 4}" text-anchor="end" font-size="11" fill="var(--text-muted,#888)">${min}</text>
-          <text x="${P.l}" y="${H - 6}" font-size="11" fill="var(--text-muted,#888)">${new Date(points[0].t).toLocaleDateString('zh-CN')}</text>
-          <text x="${W - P.r}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--text-muted,#888)">${new Date(points[points.length - 1].t).toLocaleDateString('zh-CN')}</text>
-        </svg>`
+      const frame = gridAndAxes({ W, H, P, Y, ticks, tMin, tMax, rangeDays, clip })
+      return chartSvg('', W, H, `${frame}${polylines}`)
+    }
+
+    function overlayPaths(bars, overlayRows, X, Y, period) {
+      if (!overlayRows) return ''
+      const draw = (key, stroke, dash) => {
+        const segs = []
+        let d = ''
+        const flush = () => {
+          if (d) segs.push(d)
+          d = ''
+        }
+        for (let i = 0; i < bars.length; i++) {
+          if (i > 0 && bars[i].t - bars[i - 1].t > period) flush()
+          const v = Number(overlayRows[i]?.[key])
+          if (!Number.isFinite(v)) {
+            flush()
+            continue
+          }
+          const x = X(bars[i].t + period / 2).toFixed(1)
+          const y = Y(v).toFixed(1)
+          d += d ? ` L${x} ${y}` : `M${x} ${y}`
+        }
+        flush()
+        const dashAttr = dash ? ' stroke-dasharray="4 3"' : ''
+        return segs
+          .map(
+            (p) =>
+              `<path fill="none" stroke="${stroke}" stroke-width="1.4"${dashAttr} vector-effect="non-scaling-stroke" pointer-events="none" d="${p}"></path>`,
+          )
+          .join('')
+      }
+      return (
+        draw('sma5', '#6b8afd', false) +
+        draw('sma20', '#c9892e', false) +
+        draw('bbUpper', '#8b8d9a', true) +
+        draw('bbLower', '#8b8d9a', true)
+      )
+    }
+
+    function candles(bars, rangeDays = 7, now = Date.now(), overlayRows = null) {
+      if (!bars.length) return ''
+      const { W, H, P } = plotGeom()
+      const barMin = getBarMin()
+      const period = periodMs(rangeDays, barMin)
+      const vals = bars.flatMap((bar) => [bar.o, bar.h, bar.l, bar.c])
+      if (overlayRows) {
+        for (const row of overlayRows) {
+          if (!row) continue
+          for (const v of Object.values(row)) {
+            if (Number.isFinite(v)) vals.push(v)
+          }
+        }
+      }
+      const min = Math.min(...vals)
+      const max = Math.max(...vals)
+      const { Y, ticks } = yScale(min, max, P, H)
+      const { tMin, tMax } = timeWindow(
+        bars.map((bar) => bar.t),
+        rangeDays,
+        now,
+        barMin,
+      )
+      const X = xScale(tMin, tMax, P, W)
+      const innerW = W - P.l - P.r
+      const span = Math.max(1, tMax - tMin)
+      const slots = Math.max(bars.length + 1, span / period)
+      const bodyW = Math.max(5, Math.min(14, (innerW / slots) * 0.58))
+      const clip = `lsb-tq-k-${++clipSeq}`
+      const parts = bars
+        .map((bar, i) => {
+          const x = X(bar.t + period / 2)
+          const yO = Y(bar.o)
+          const yC = Y(bar.c)
+          const color = bar.c > bar.o ? '#d94c4c' : bar.c < bar.o ? '#2a9a7c' : '#8b8d9a'
+          const yH = Y(bar.h)
+          const yL = Y(bar.l)
+          const flat = Math.abs(yO - yC) < 1.2
+          const hair = 'vector-effect="non-scaling-stroke"'
+          const body = flat
+            ? `<line class="lsb-title-quotes-body" x1="${(x - bodyW / 2).toFixed(1)}" x2="${(x + bodyW / 2).toFixed(1)}" y1="${yC.toFixed(1)}" y2="${yC.toFixed(1)}" stroke="${color}" stroke-width="2" stroke-linecap="square" ${hair}></line>`
+            : `<rect class="lsb-title-quotes-body" x="${(x - bodyW / 2).toFixed(1)}" y="${Math.min(yO, yC).toFixed(1)}" width="${bodyW.toFixed(1)}" height="${Math.max(1.2, Math.abs(yO - yC)).toFixed(1)}" fill="${color}" stroke="${color}" stroke-width="1" ${hair}></rect>`
+          const wick = `<line class="lsb-title-quotes-wick" x1="${x.toFixed(1)}" x2="${x.toFixed(1)}" y1="${yH.toFixed(1)}" y2="${yL.toFixed(1)}" stroke="${color}" stroke-width="1" ${hair}></line>`
+          const innerH = H - P.t - P.b
+          const slotW = Math.max(bodyW + 6, innerW / slots)
+          const hit = `<rect class="lsb-title-quotes-hit" x="${(x - slotW / 2).toFixed(1)}" y="${P.t}" width="${slotW.toFixed(1)}" height="${innerH}" fill="transparent"></rect>`
+          let ovAttrs = ''
+          if (overlayRows) {
+            const ov = overlayRows[i] || {}
+            const put = (attr, raw) => {
+              const v = Number(raw)
+              if (!Number.isFinite(v)) return
+              ovAttrs += ` ${attr}="${v}"`
+            }
+            put('data-sma5', ov.sma5)
+            put('data-sma20', ov.sma20)
+            put('data-bb-upper', ov.bbUpper)
+            put('data-bb-lower', ov.bbLower)
+          }
+          return `<g class="lsb-title-quotes-bar" data-t="${bar.t}" data-o="${bar.o}" data-h="${bar.h}" data-l="${bar.l}" data-c="${bar.c}"${ovAttrs}>${hit}${wick}${body}</g>`
+        })
+        .join('')
+      const ovSvg = overlayPaths(bars, overlayRows, X, Y, period)
+      const frame = gridAndAxes({ W, H, P, Y, ticks, tMin, tMax, rangeDays, clip })
+      return chartSvg('lsb-title-quotes-k', W, H, `${frame}<g clip-path="url(#${clip})">${parts}${ovSvg}</g>`)
     }
 
     function statusLine() {
@@ -2675,92 +3510,231 @@
       if (!host) return
       const all = get()
       const latest = all[all.length - 1]
-      const cutoff = Date.now() - rangeDays * 864e5
+      const cutoff = rangeCutoff(rangeDays)
       const view = all.filter((x) => x.t >= cutoff)
-      const chartSrc = view.length >= 2 ? view : all
-      const anchors = latest?.anchors || []
-      const byRole = Object.fromEntries(anchors.map((x) => [x.role, x]))
-      const cards = ROLES.filter((r) => byRole[r.id])
-        .map((r) => {
-          const a = byRole[r.id]
-          return `<div class="lsb-title-quotes-card">
-            <span class="lsb-row-desc">${esc(r.label)}</span>
+      const chartSrc = view.length >= 2 ? view : rangeDays === 0 ? view : all
+      const kind = getKind()
+
+      const viewBtns = `<button class="lsb-btn${boardView === 'quotes' ? ' is-primary' : ''}" data-board-view="quotes">行情</button>
+          <button class="lsb-btn${boardView === 'board' ? ' is-primary' : ''}" data-board-view="board">大盘</button>`
+      const chartBtns =
+        boardView === 'quotes'
+          ? [
+              ['candle', 'K线'],
+              ['line', '折线'],
+            ]
+              .map(
+                ([id, label]) =>
+                  `<button class="lsb-btn${kind === id ? ' is-primary' : ''}" data-chart="${id}">${label}</button>`,
+              )
+              .join('')
+          : ''
+      const rangeBtns = [
+        [0, '本日'],
+        [7, '7天'],
+        [30, '30天'],
+        [90, '90天'],
+      ]
+        .map(
+          ([d, label]) =>
+            `<button class="lsb-btn${rangeDays === d ? ' is-primary' : ''}" data-range="${d}">${label}</button>`,
+        )
+        .join('')
+      const barMin = getBarMin()
+      const showBarMin = rangeDays === 0 && (boardView === 'board' || kind !== 'line')
+      const barMinBtns = showBarMin
+        ? [1, 5, 15, 30, 60]
+            .map(
+              (m) =>
+                `<button type="button" class="lsb-btn${barMin === m ? ' is-primary' : ''}" data-bar-min="${m}">${m}分</button>`,
+            )
+            .join('')
+        : ''
+      const tools = `<span style="display:flex;gap:6px;align-items:center">${viewBtns}</span>
+        <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+          ${chartBtns ? `<span style="display:flex;gap:6px">${chartBtns}</span>` : ''}
+          <span style="display:flex;gap:6px">${rangeBtns}</span>
+          ${barMinBtns ? `<span style="display:flex;gap:6px">${barMinBtns}</span>` : ''}
+        </span>`
+      const isEmbed = host.classList.contains('lsb-title-quotes-embed')
+      const isFloat = host.classList.contains('lsb-title-quotes-float-body')
+      const keepOpen =
+        (isEmbed && !!host.querySelector('details.lsb-title-quotes-fold')?.open) || forceFoldOpen
+      const head = isEmbed
+        ? `<div class="lsb-cal-head">${tools}</div>`
+        : `<div class="lsb-cal-head">
+          ${isFloat ? '' : '<strong>称号行情</strong>'}
+          <span class="lsb-row-desc">${esc(statusLine())}</span>
+          ${tools}
+        </div>`
+
+      let bodyHtml = ''
+      if (boardView === 'board') {
+        if (!all.length) {
+          bodyHtml = '<div class="lsb-empty">还没采到行情。打开交易页或等下一轮巡检。</div>'
+        } else {
+          const raritySet = new Set()
+          for (const s of view) {
+            for (const t of Object.values(s.titles || {})) raritySet.add(t.rarity ?? '')
+          }
+          const latestIdx = snapshotIndex(latest?.titles || {})
+          const rarities = [...raritySet].sort((a, b) => {
+            const na = latestIdx.byRarity[a]?.n ?? 0
+            const nb = latestIdx.byRarity[b]?.n ?? 0
+            if (nb !== na) return nb - na
+            return a.localeCompare(b, 'zh-CN')
+          })
+          const chips =
+            `<button type="button" class="lsb-title-quotes-chip${boardRarity === null ? ' is-primary' : ''}" data-board-idx="all">总指数</button>` +
+            rarities
+              .map((r) => {
+                const label = r === '' ? '未知' : r
+                const on = boardRarity === r
+                return `<button type="button" class="lsb-title-quotes-chip${on ? ' is-primary' : ''}" data-board-idx="rarity" data-rarity="${esc(r)}">${esc(label)}</button>`
+              })
+              .join('')
+          const bars = foldIndexCandles(indexPoints(all, boardRarity), { rangeDays, barMin })
+          let chartBlock = '<div class="lsb-empty">这个时间窗还不够画指数</div>'
+          if (bars.length) {
+            const ov = overlays(bars)
+            chartBlock =
+              `<div class="lsb-title-quotes-host">${candles(bars, rangeDays, Date.now(), ov)}</div>` +
+              `<div class="lsb-row-desc">K · 5 · 20 · 布林</div>` +
+              `<div class="lsb-row-desc">挂单中位 · 非成交</div>`
+          }
+          const moveBtns = `<div style="display:flex;gap:6px;margin:8px 0">
+          <button class="lsb-btn${boardMove === 'short' ? ' is-primary' : ''}" data-board-move="short">短线</button>
+          <button class="lsb-btn${boardMove === 'range' ? ' is-primary' : ''}" data-board-move="range">区间</button>
+        </div>`
+          const pair = boardPair(all, { rangeDays, mode: boardMove })
+          let pack = { up: [], down: [], listed: [], delisted: [] }
+          if (pair.emptyWindow) pack = null
+          else if (pair.latest && !pair.base && boardMove === 'short') pack = movers(pair.latest.titles, {})
+          else if (pair.latest && pair.base) pack = movers(pair.latest.titles, pair.base.titles)
+          const nameBtn = (row) =>
+            `<button type="button" class="lsb-title-quotes-name" data-board-key="${esc(row.key)}">${esc(row.name)}</button>`
+          const moverLine = (row) => {
+            const dSign = row.delta > 0 ? '+' : ''
+            const fl = sumFlow(all, row.key, { rangeDays })
+            return `<div class="lsb-title-quotes-mover">${nameBtn(row)}<span>${dSign}${esc(fmtPrice(row.delta))} · ${esc(fmtPct(row.pct))} · 估 ${fl.fills}笔 ${fl.sold}件</span></div>`
+          }
+          const summarySide = (label, items) => {
+            if (!items.length) return ''
+            const shown = items.slice(0, 20)
+            const tail = items.length > 20 ? '等' : ''
+            return `<div class="lsb-row-desc">${label} ${items.length}：${shown.map(nameBtn).join('')}${tail}</div>`
+          }
+          let rankBody = '<div class="lsb-empty">没有可比的涨跌</div>'
+          if (pack) {
+            const { up, down, listed, delisted } = pack
+            if (up.length || down.length || listed.length || delisted.length) {
+              rankBody =
+                `<div class="lsb-title-quotes-movers">${[
+                  ['涨幅 Top 10', up],
+                  ['跌幅 Top 10', down],
+                ]
+                  .map(
+                    ([title, rows]) =>
+                      `<div><div class="lsb-row-desc">${title}</div>${rows.map(moverLine).join('')}</div>`,
+                  )
+                  .join('')}</div>` +
+                summarySide('新上', listed) +
+                summarySide('下架', delisted)
+            }
+          }
+          bodyHtml = `<div class="lsb-title-quotes-chips">${chips}</div>${chartBlock}${moveBtns}${rankBody}`
+        }
+      } else {
+        const anchors = latest?.anchors || []
+        const byRole = Object.fromEntries(anchors.map((x) => [x.role, x]))
+        const cards = ROLES.filter((r) => byRole[r.id])
+          .map((r) => {
+            const a = byRole[r.id]
+            return `<div class="lsb-title-quotes-card">
+            <span class="lsb-row-desc"><span class="lsb-title-quotes-pip" style="background:${r.color}"></span>${esc(r.label)}</span>
             <strong>${esc(a.name)}</strong>
             <span class="lsb-row-desc">${esc(a.rarity)} · ${esc(a.price)} 积分</span>
           </div>`
-        })
-        .join('')
-      let marketChart = '<div class="lsb-empty">还没采到行情。打开交易页或等下一轮巡检。</div>'
-      if (all.length === 1) {
-        marketChart = '<div class="lsb-empty">再等一轮巡检后开始绘制折线。</div>'
-      } else if (all.length >= 2) {
-        const pts = chartSrc.map((s) => {
-          const row = { t: s.t }
-          for (const a of s.anchors || []) row[a.role] = a.price
-          return row
-        })
-        marketChart = `<div class="lsb-title-quotes-host">${lines(pts, ROLES)}</div>`
-      }
+          })
+          .join('')
+        let marketChart = '<div class="lsb-empty">还没采到行情。打开交易页或等下一轮巡检。</div>'
+        if (all.length === 1) {
+          marketChart = '<div class="lsb-empty">再等一轮巡检后开始绘制折线。</div>'
+        } else if (all.length >= 2) {
+          const pts = chartSrc.map((s) => {
+            const row = { t: s.t }
+            for (const a of s.anchors || []) row[a.role] = a.price
+            return row
+          })
+          marketChart = `<div class="lsb-title-quotes-host">${lines(pts, ROLES, rangeDays)}</div>`
+        }
 
-      const listed = latest?.titles || {}
-      const keys = new Set()
-      for (const s of all) Object.keys(s.titles || {}).forEach((k) => keys.add(k))
-      const ordered = [...keys].sort((a, b) => {
-        const da = listed[a] ? 0 : 1
-        const db = listed[b] ? 0 : 1
-        if (da !== db) return da - db
-        return (listed[a]?.lo ?? 1e15) - (listed[b]?.lo ?? 1e15) || a.localeCompare(b, 'zh-CN')
-      })
-      const rows = ordered
-        .map((k) => {
-          const meta = splitKey(k)
-          const cur = listed[k]
-          const off = !cur
-          const lo = cur?.lo
-          const hi = cur?.hi
-          const titleKeys = [
-            { id: 'hi', color: 'var(--danger,#d55)' },
-            { id: 'lo', color: 'var(--success,#3aa08f)' },
-          ]
-          const body =
-            all.length >= 2
-              ? `<div class="lsb-title-quotes-host">${lines(
-                  chartSrc.map((s) => {
+        const openKeys = new Set(
+          [...host.querySelectorAll('.lsb-title-quotes-row[open]')].map((el) => el.getAttribute('data-key')),
+        )
+        if (focusKey) openKeys.add(focusKey)
+        const listed = latest?.titles || {}
+        const keys = new Set()
+        for (const s of all) Object.keys(s.titles || {}).forEach((k) => keys.add(k))
+        const ordered = [...keys].sort((a, b) => {
+          const da = listed[a] ? 0 : 1
+          const db = listed[b] ? 0 : 1
+          if (da !== db) return da - db
+          return (listed[a]?.lo ?? 1e15) - (listed[b]?.lo ?? 1e15) || a.localeCompare(b, 'zh-CN')
+        })
+        const rows = ordered
+          .map((k) => {
+            const meta = splitKey(k)
+            const cur = listed[k]
+            const off = !cur
+            const lo = cur?.lo
+            const hi = cur?.hi
+            let body = ''
+            if (kind === 'line') {
+              const pick = (src) =>
+                src
+                  .map((s) => {
                     const t = s.titles && s.titles[k]
-                    return { t: s.t, lo: t?.lo, hi: t?.hi }
-                  }),
-                  titleKeys,
-                )}</div>`
-              : ''
-          const price = off ? '已下架' : `最低 ${lo} · 最高 ${hi} · 上架 ${cur.n ?? 0} 个`
-          return `<details class="lsb-title-quotes-row${off ? ' is-off' : ''}">
+                    return t ? { t: s.t, lo: t.lo, hi: t.hi } : null
+                  })
+                  .filter(Boolean)
+              let pts = pick(view)
+              if (pts.length < 2 && rangeDays !== 0) pts = pick(all)
+              if (pts.length >= 2) {
+                body =
+                  `<div class="lsb-title-quotes-host">${lines(pts, TITLE_LINES, rangeDays)}</div>` +
+                  `<div class="lsb-row-desc">挂单高低 · 非成交</div>`
+              }
+            } else {
+              const bars = foldCandles(all, k, { rangeDays, barMin })
+              if (bars.length) {
+                body =
+                  `<div class="lsb-title-quotes-host">${candles(bars, rangeDays)}</div>` +
+                  `<div class="lsb-row-desc">挂单合成 · 非成交</div>`
+              }
+            }
+            const flow = sumFlow(all, k, { rangeDays })
+            const est = `估 ${flow.fills} 笔 · ${flow.sold} 件`
+            const price = off
+              ? `已下架 · ${est}`
+              : `最低 ${lo} · 最高 ${hi} · 上架 ${cur.n ?? 0} 个 · ${est}`
+            return `<details class="lsb-title-quotes-row${off ? ' is-off' : ''}" data-key="${esc(k)}"${openKeys.has(k) ? ' open' : ''}>
             <summary><strong>${esc(meta.name)}</strong>
               <span class="lsb-row-desc">${esc(meta.rarity)} · ${esc(price)}</span></summary>
             ${body}
           </details>`
-        })
-        .join('')
-
-      const rangeBtns = [7, 30, 90]
-        .map(
-          (d) =>
-            `<button class="lsb-btn${rangeDays === d ? ' is-primary' : ''}" data-range="${d}">${d}天</button>`,
-        )
-        .join('')
-      const isEmbed = host.classList.contains('lsb-title-quotes-embed')
-      const keepOpen = isEmbed && !!host.querySelector('details.lsb-title-quotes-fold')?.open
-      const head = isEmbed
-        ? `<div class="lsb-cal-head"><span style="margin-left:auto;display:flex;gap:6px">${rangeBtns}</span></div>`
-        : `<div class="lsb-cal-head">
-          <strong>称号行情</strong>
-          <span class="lsb-row-desc">${esc(statusLine())}</span>
-          <span style="margin-left:auto;display:flex;gap:6px">${rangeBtns}</span>
-        </div>`
-      const inner = `
-        ${head}
-        <div class="lsb-title-quotes-anchors">${cards || ''}</div>
+          })
+          .join('')
+        bodyHtml = `<div class="lsb-title-quotes-anchors">${cards || ''}</div>
         ${marketChart}
         ${rows ? `<div class="lsb-title-quotes-list">${rows}</div>` : ''}`
+      }
+
+      const estNote = `<div class="lsb-row-desc">成交为挂单剩余变化的估计，含下架/撤单，不是真成交</div>`
+      const inner = `
+        ${head}
+        ${estNote}
+        ${bodyHtml}`
       host.classList.add('lsb-title-quotes')
       host.innerHTML = isEmbed
         ? `<details class="lsb-title-quotes-fold"${keepOpen ? ' open' : ''}>
@@ -2769,20 +3743,135 @@
             <div class="lsb-title-quotes-fold-body">${inner}</div>
           </details>`
         : inner
+      forceFoldOpen = false
+      focusKey = null
       host.querySelectorAll('[data-range]').forEach((b) => {
         b.onclick = () => {
           rangeDays = Number(b.dataset.range)
           render(host)
         }
       })
+      host.querySelectorAll('[data-bar-min]').forEach((b) => {
+        b.onclick = () => {
+          setBarMin(Number(b.getAttribute('data-bar-min')))
+          render(host)
+        }
+      })
+      host.querySelectorAll('[data-chart]').forEach((b) => {
+        b.onclick = () => {
+          setKind(b.dataset.chart)
+          render(host)
+        }
+      })
+      host.querySelectorAll('[data-board-view]').forEach((b) => {
+        b.onclick = () => {
+          boardView = b.dataset.boardView
+          render(host)
+        }
+      })
+      host.querySelectorAll('[data-board-idx]').forEach((el) => {
+        el.onclick = () => {
+          if (el.getAttribute('data-board-idx') === 'all') boardRarity = null
+          else boardRarity = el.getAttribute('data-rarity')
+          render(host)
+        }
+      })
+      host.querySelectorAll('[data-board-move]').forEach((b) => {
+        b.onclick = () => {
+          boardMove = b.getAttribute('data-board-move') === 'range' ? 'range' : 'short'
+          render(host)
+        }
+      })
+      host.querySelectorAll('[data-board-key]').forEach((el) => {
+        el.onclick = () => {
+          focusKey = el.getAttribute('data-board-key')
+          boardView = 'quotes'
+          forceFoldOpen = true
+          render(host)
+        }
+      })
+      bindCandleTips(host)
+      bindChartSize(host)
+    }
+
+    function bindChartSize(root) {
+      if (sizeWatch) {
+        sizeWatch.disconnect()
+        sizeWatch = null
+      }
+      const wraps = [...root.querySelectorAll('.lsb-title-quotes-host')]
+      const h = readChartH()
+      for (const wrap of wraps) wrap.style.height = `${h}px`
+      const sample = wraps[0]
+      if (sample && sample.clientWidth >= 40) {
+        const nw = Math.round(sample.clientWidth)
+        const nh = Math.round(sample.clientHeight || h)
+        if (Math.abs(nw - plotW) > 8 || Math.abs(nh - plotH) > 8) {
+          plotW = Math.max(320, nw)
+          plotH = Math.min(720, Math.max(240, nh || h))
+          queueMicrotask(() => render(root))
+          return
+        }
+      }
+      if (!sample || typeof ResizeObserver === 'undefined') return
+      const gen = ++plotGen
+      sizeWatch = new ResizeObserver((entries) => {
+        const el = entries[0]?.target
+        if (!el?.isConnected || gen !== plotGen) return
+        window.clearTimeout(sizeTimer)
+        sizeTimer = window.setTimeout(() => {
+          if (gen !== plotGen || !el.isConnected) return
+          const nw = Math.round(el.clientWidth)
+          const nh = Math.round(el.clientHeight)
+          if (nw < 40 || nh < 40) return
+          if (Math.abs(nw - plotW) < 8 && Math.abs(nh - plotH) < 8) return
+          api.store.set('chartH', Math.min(720, Math.max(240, nh)))
+          plotW = Math.max(320, nw)
+          plotH = Math.min(720, Math.max(240, nh))
+          render(root)
+        }, 320)
+      })
+      sizeWatch.observe(sample)
+    }
+
+    function bindCandleTips(root) {
+      for (const wrap of root.querySelectorAll('.lsb-title-quotes-host')) {
+        if (!wrap.querySelector('svg.lsb-title-quotes-k')) continue
+        let tip = wrap.querySelector('.lsb-title-quotes-tip')
+        if (!tip) {
+          tip = document.createElement('div')
+          tip.className = 'lsb-title-quotes-tip'
+          wrap.append(tip)
+        }
+        const hide = () => tip.classList.remove('is-on')
+        wrap.onmousemove = (e) => {
+          const g = e.target.closest?.('.lsb-title-quotes-bar')
+          if (!g || !wrap.contains(g)) {
+            hide()
+            return
+          }
+          tip.textContent = fmtBarTip(g.dataset, rangeDays, getBarMin())
+          tip.classList.add('is-on')
+          const box = wrap.getBoundingClientRect()
+          const tw = tip.offsetWidth || 0
+          const th = tip.offsetHeight || 0
+          let x = e.clientX - box.left + 12
+          let y = e.clientY - box.top - th - 8
+          if (box.width && x + tw > box.width - 4) x = Math.max(4, box.width - tw - 4)
+          if (x < 4) x = 4
+          if (y < 4) y = e.clientY - box.top + 16
+          if (box.height && y + th > box.height - 4) y = Math.max(4, box.height - th - 4)
+          tip.style.left = `${x}px`
+          tip.style.top = `${y}px`
+        }
+        wrap.onmouseleave = hide
+      }
     }
 
     function refreshViews() {
       mountEmbed()
-      const panel = document.querySelector('.lsb-view')
-      if (panel && panel.querySelector('.lsb-title-quotes, .lsb-title-quotes-anchors')) {
-        /* 打开面板时由 tab render 负责；这里只刷新交易页 */
-      }
+      const body = document.querySelector('.lsb-title-quotes-float-body')
+      if (body) render(body)
     }
 
     async function cycle(force = false) {
@@ -2803,9 +3892,7 @@
             lastErr = null
             return { empty: true }
           }
-          const titles = foldTitles(listings)
-          const anchors = pickAnchors(listings, titles)
-          pushSnap({ anchors, titles })
+          ingestListings(listings)
           lastErr = null
           lastAt = Date.now()
           toasted = false
@@ -2827,10 +3914,23 @@
       return inflight
     }
 
+    function watching() {
+      const beat = api.store.get('watchBeat', null)
+      const t = Number(beat && beat.t)
+      return Number.isFinite(t) && t > 0 && Date.now() - t < WATCH_TTL_MS
+    }
+    function configMs() {
+      const n = Number(cfg.intervalSec)
+      return Math.max(250, (Number.isFinite(n) && n > 0 ? n : 30) * 1000)
+    }
+    function pollMs() {
+      const ms = configMs()
+      return watching() ? Math.min(WATCH_MS, ms) : ms
+    }
     function scheduleNext() {
       if (timer) clearTimeout(timer)
-      const ms = Math.max(250, Number(cfg.intervalMin) * 60000)
-      timer = setTimeout(() => cycle(), ms)
+      armedMs = pollMs()
+      timer = setTimeout(() => cycle(), armedMs)
       timer.unref?.()
     }
     function scheduleForceSnap() {
@@ -2847,37 +3947,312 @@
       onDemote: () => {
         if (timer) clearTimeout(timer)
         timer = null
+        armedMs = null
       },
       jitter: 800,
     })
 
+    function pageVisible() {
+      return document.visibilityState === 'visible' && !document.hidden
+    }
+    function stopBeatTimer() {
+      if (beatTimer) clearInterval(beatTimer)
+      beatTimer = null
+    }
+    function maybeReschedule() {
+      if (election.isLeader && pollMs() !== armedMs) scheduleNext()
+    }
+    function writeWatchBeat() {
+      if (!api.store.get('floatOpen')) return
+      if (!pageVisible()) return
+      const beat = { t: Date.now(), id: tabId }
+      api.store.set('watchBeat', beat)
+      api.tabs.post('watch', beat)
+      maybeReschedule()
+    }
+    function startBeatTimer() {
+      stopBeatTimer()
+      writeWatchBeat()
+      beatTimer = setInterval(writeWatchBeat, WATCH_BEAT_MS)
+      beatTimer.unref?.()
+    }
+    api.tabs.on('watch', () => maybeReschedule())
+
+    function applyRect(el) {
+      const r = api.store.get('floatRect', null)
+      el.style.position = 'fixed'
+      el.style.zIndex = '99990'
+      el.style.minWidth = '360px'
+      el.style.minHeight = '360px'
+      el.style.maxWidth = '94vw'
+      el.style.maxHeight = '90vh'
+      if (
+        r &&
+        Number.isFinite(r.left) &&
+        Number.isFinite(r.top) &&
+        Number.isFinite(r.width) &&
+        Number.isFinite(r.height)
+      ) {
+        el.style.left = `${r.left}px`
+        el.style.top = `${r.top}px`
+        el.style.width = `${Math.max(360, r.width)}px`
+        el.style.height = `${Math.max(360, r.height)}px`
+        el.style.right = 'auto'
+        el.style.bottom = 'auto'
+      } else {
+        el.style.left = 'auto'
+        el.style.top = 'auto'
+        el.style.right = '16px'
+        el.style.bottom = '130px'
+        el.style.width = '560px'
+        el.style.height = '640px'
+      }
+    }
+    function persistRect(el) {
+      const box = el.getBoundingClientRect()
+      if (!box.width || !box.height) return
+      const prev = api.store.get('floatRect', null) || {}
+      const height = el.classList.contains('is-collapsed') && Number.isFinite(prev.height)
+        ? prev.height
+        : box.height
+      api.store.set('floatRect', { left: box.left, top: box.top, width: box.width, height })
+    }
+    function clamp(el) {
+      const box = el.getBoundingClientRect()
+      const vw = window.innerWidth || 800
+      const vh = window.innerHeight || 600
+      let left = box.left
+      let top = box.top
+      if (box.right < 40) left = 0
+      if (box.left > vw - 40) left = Math.max(0, vw - 40)
+      if (box.bottom < 28) top = 0
+      if (box.top > vh - 28) top = Math.max(0, vh - 28)
+      el.style.left = `${left}px`
+      el.style.top = `${top}px`
+      el.style.right = 'auto'
+      el.style.bottom = 'auto'
+    }
+    function setCollapsed(on) {
+      const el = document.querySelector('.lsb-title-quotes-float')
+      if (!el) return
+      el.classList.toggle('is-collapsed', !!on)
+      el.style.minHeight = on ? '0px' : '360px'
+      api.store.set('floatCollapsed', !!on)
+      const btn = el.querySelector('[data-float-collapse]')
+      if (btn) btn.textContent = on ? '展开' : '收起'
+    }
+    function unmountFloat() {
+      document.querySelectorAll('.lsb-title-quotes-float').forEach((n) => n.remove())
+    }
+    function unmountFab() {
+      document.querySelectorAll('.lsb-title-quotes-fab').forEach((n) => n.remove())
+    }
+    function shellOn() {
+      return document.documentElement.classList.contains('lsb-skin-shell-on')
+    }
+    function syncFab() {
+      if (shellOn()) unmountFab()
+      else mountFab()
+    }
+    function bindChrome(el) {
+      const head = el.querySelector('.lsb-title-quotes-float-head')
+      head.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('button')) return
+        const box = el.getBoundingClientRect()
+        drag = { kind: 'move', dx: e.clientX - box.left, dy: e.clientY - box.top }
+        e.preventDefault()
+      })
+      el.querySelector('.lsb-title-quotes-float-resize').addEventListener('pointerdown', (e) => {
+        const box = el.getBoundingClientRect()
+        drag = { kind: 'resize', x: e.clientX, y: e.clientY, w: box.width, h: box.height, l: box.left, t: box.top }
+        e.preventDefault()
+        e.stopPropagation()
+      })
+      el.querySelector('[data-float-close]').addEventListener('click', () => closeFloat())
+      el.querySelector('[data-float-collapse]').addEventListener('click', () => {
+        setCollapsed(!el.classList.contains('is-collapsed'))
+      })
+      el.addEventListener('wheel', onFloatWheel, { passive: false })
+    }
+    function onFloatWheel(e) {
+      const dy = e.deltaY
+      const root = e.currentTarget
+      const scroller = e.target?.closest?.('.lsb-title-quotes-float-body')
+      if (scroller && root.contains(scroller)) {
+        const top = scroller.scrollTop
+        const max = scroller.scrollHeight - scroller.clientHeight
+        if ((dy < 0 && top > 0) || (dy > 0 && top < max - 0.5)) return
+      }
+      e.preventDefault()
+    }
+    function onPointerMove(e) {
+      const el = document.querySelector('.lsb-title-quotes-float')
+      if (!drag || !el) return
+      if (drag.kind === 'move') {
+        el.style.left = `${e.clientX - drag.dx}px`
+        el.style.top = `${e.clientY - drag.dy}px`
+        el.style.right = 'auto'
+        el.style.bottom = 'auto'
+      } else {
+        el.style.left = `${drag.l}px`
+        el.style.top = `${drag.t}px`
+        el.style.width = `${Math.max(360, drag.w + (e.clientX - drag.x))}px`
+        el.style.height = `${Math.max(360, drag.h + (e.clientY - drag.y))}px`
+        el.style.right = 'auto'
+        el.style.bottom = 'auto'
+      }
+    }
+    function onPointerUp() {
+      const el = document.querySelector('.lsb-title-quotes-float')
+      if (drag && el) {
+        clamp(el)
+        persistRect(el)
+      }
+      drag = null
+    }
+    function onWinResize() {
+      const el = document.querySelector('.lsb-title-quotes-float')
+      if (el) clamp(el)
+    }
+    function onVis() {
+      if (!api.store.get('floatOpen')) return
+      if (pageVisible()) startBeatTimer()
+      else stopBeatTimer()
+    }
+    function onKey(e) {
+      if (e.key !== 'Escape') return
+      if (document.querySelector('.lsb-panel')) return
+      if (!api.store.get('floatOpen')) return
+      closeFloat()
+    }
+    function mountFab() {
+      let btn = document.querySelector('.lsb-title-quotes-fab')
+      if (!btn) {
+        btn = document.createElement('button')
+        btn.className = 'lsb-title-quotes-fab'
+        btn.type = 'button'
+        btn.textContent = '行情'
+        btn.title = '称号行情'
+        btn.setAttribute('aria-label', '称号行情')
+        document.body.append(btn)
+        btn.addEventListener('click', () => openFloat())
+      }
+    }
+    function mountFloat() {
+      let el = document.querySelector('.lsb-title-quotes-float')
+      if (!el) {
+        el = document.createElement('div')
+        el.className = 'lsb-title-quotes-float'
+        el.innerHTML =
+          `<div class="lsb-title-quotes-float-head"><strong>称号行情</strong>` +
+          `<button type="button" class="lsb-btn" data-float-collapse>收起</button>` +
+          `<button type="button" class="lsb-panel-close" data-float-close title="关闭">×</button></div>` +
+          `<div class="lsb-title-quotes-float-body"></div>` +
+          `<div class="lsb-title-quotes-float-resize"></div>`
+        document.body.append(el)
+        bindChrome(el)
+      }
+      applyRect(el)
+      setCollapsed(!!api.store.get('floatCollapsed', false))
+      return el
+    }
+    function closeFloat() {
+      stopBeatTimer()
+      const beat = api.store.get('watchBeat', null)
+      if (beat && beat.id === tabId) {
+        const off = { t: 0, id: tabId }
+        api.store.set('watchBeat', off)
+        api.tabs.post('watch', off)
+      }
+      api.store.set('floatOpen', false)
+      unmountFloat()
+      maybeReschedule()
+    }
+    function showFloat({ expand } = {}) {
+      api.store.set('floatOpen', true)
+      if (expand) api.store.set('floatCollapsed', false)
+      const el = mountFloat()
+      setCollapsed(!!api.store.get('floatCollapsed', false))
+      const body = el.querySelector('.lsb-title-quotes-float-body')
+      render(body)
+      startBeatTimer()
+      maybeReschedule()
+    }
+    function openFloat() {
+      showFloat({ expand: true })
+    }
+
+    document.addEventListener('pointermove', onPointerMove)
+    document.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('resize', onWinResize)
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('visibilitychange', onVis)
+
     api.on('route:changed', () => {
       mountEmbed()
       if (isMarket()) scheduleForceSnap()
+      syncFab()
     })
+    api.on('plugin:activated', syncFab)
+    api.on('plugin:disabled', syncFab)
+    api.on('config:changed:skin', () => {
+      queueMicrotask(syncFab)
+    })
+    const fabWatch = new MutationObserver(syncFab)
+    fabWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
     mountEmbed()
     if (isMarket()) scheduleForceSnap()
+    syncFab()
+    if (api.store.get('floatOpen')) showFloat({ expand: false })
+    api.handle('title-quotes:open', () => openFloat())
 
     api.onDispose(() => {
       if (timer) clearTimeout(timer)
       if (forceTimer) clearTimeout(forceTimer)
+      if (sizeTimer) window.clearTimeout(sizeTimer)
+      if (sizeWatch) sizeWatch.disconnect()
+      sizeWatch = null
+      stopBeatTimer()
       timer = null
       forceTimer = null
+      document.removeEventListener('pointermove', onPointerMove)
+      document.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('resize', onWinResize)
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('visibilitychange', onVis)
+      fabWatch.disconnect()
       unmountEmbed()
+      unmountFloat()
+      unmountFab()
     })
 
     api.ui.tab({
       name: '称号行情',
       order: 66,
       render(host) {
-        render(host)
+        api.ui.buildForm(host, manifest.config, api.config(), (v) => api.saveConfig(v))
+        const row = document.createElement('div')
+        row.className = 'lsb-actions'
+        row.style.justifyContent = 'flex-start'
+        row.style.borderTop = '0'
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'lsb-btn is-primary'
+        btn.textContent = '打开浮层'
+        btn.addEventListener('click', () => openFloat())
+        row.appendChild(btn)
+        host.appendChild(row)
       },
     })
 
     api.ui.style(
-      '.lsb-title-quotes-host{min-width:0;width:100%;overflow:hidden}' +
-        '.lsb-title-quotes .lsb-svg,.lsb-title-quotes-embed .lsb-svg{display:block;width:100%;height:auto;max-width:100%}' +
+        '.lsb-title-quotes-host{position:relative;min-width:0;width:100%;height:380px;min-height:240px;max-height:720px;resize:vertical;overflow:hidden;margin:2px 0 4px}' +
+        '.lsb-title-quotes .lsb-svg,.lsb-title-quotes-embed .lsb-svg,.lsb-title-quotes-host .lsb-svg{display:block;width:100%;height:100%;max-width:none;color:var(--text,#222)}' +
+        '.lsb-title-quotes-bar{cursor:crosshair}' +
+        '.lsb-title-quotes-tip{position:absolute;z-index:4;display:none;pointer-events:none;font-size:12px;line-height:1.45;padding:6px 8px;border-radius:6px;background:var(--panel,#fff);color:var(--text,#222);border:1px solid var(--line,#ddd);box-shadow:0 6px 18px var(--shadow-medium,rgba(0,0,0,.18));white-space:pre-line;max-width:min(16em,calc(100% - 8px));overflow-wrap:anywhere;word-break:break-word}' +
+        '.lsb-title-quotes-tip.is-on{display:block}' +
         '.lsb-title-quotes-anchors{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin:8px 0}' +
+        '.lsb-title-quotes-pip{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;vertical-align:0.1em}' +
         '.lsb-title-quotes-card{border:1px solid var(--line-soft,#eee);border-radius:8px;padding:8px 10px}' +
         '.lsb-title-quotes-card strong{display:block;font-size:16px;margin:2px 0}' +
         '.lsb-title-quotes-row{margin:6px 0;border:1px solid var(--line-soft,#eee);border-radius:8px;padding:6px 10px}' +
@@ -2885,7 +4260,24 @@
         '.lsb-title-quotes-row.is-off{opacity:.65}' +
         '.lsb-title-quotes-embed{margin:0 0 16px}' +
         '.lsb-title-quotes-fold{border:1px solid var(--line-soft,#eee);border-radius:8px;padding:8px 12px}' +
-        '.lsb-title-quotes-fold-sum{cursor:pointer;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}',
+        '.lsb-title-quotes-fold-sum{cursor:pointer;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}' +
+        '.lsb-title-quotes-chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}' +
+        '.lsb-title-quotes-chip{padding:4px 10px;border:1px solid var(--line,#ddd);border-radius:6px;background:var(--bg,#fafafa);color:var(--text,#222);cursor:pointer;font-size:12px}' +
+        '.lsb-title-quotes-chip:hover{border-color:var(--brand,#5eaaa0);color:var(--brand,#5eaaa0)}' +
+        '.lsb-title-quotes-chip.is-primary{background:var(--brand,#5eaaa0);border-color:var(--brand,#5eaaa0);color:#fff}' +
+        '.lsb-title-quotes-movers{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:8px 0}' +
+        '.lsb-title-quotes-mover{display:flex;gap:8px;justify-content:space-between;align-items:baseline;margin:4px 0;font-size:13px}' +
+        '.lsb-title-quotes-name{border:0;background:none;padding:0;color:var(--brand,#5eaaa0);cursor:pointer;font:inherit;text-align:left}' +
+        '.lsb-title-quotes-name:hover{text-decoration:underline}' +
+        '.lsb-title-quotes-fab{position:fixed;right:62px;bottom:74px;z-index:99998;width:38px;height:38px;border-radius:50%;border:1px solid var(--line,#ddd);background:var(--panel,#fff);color:var(--brand,#5eaaa0);cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px var(--shadow-base,rgba(0,0,0,.15))}' +
+        '.lsb-title-quotes-float{position:fixed;z-index:99990;display:flex;flex-direction:column;background:var(--panel,#fff);color:var(--text,#222);border:1px solid var(--line,#ddd);border-radius:10px;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3));overflow:hidden;overscroll-behavior:contain}' +
+        '.lsb-title-quotes-float-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line-soft,#eee);cursor:move;flex:0 0 auto}' +
+        '.lsb-title-quotes-float-head strong{font-size:14px;margin-right:auto}' +
+        '.lsb-title-quotes-float-head .lsb-panel-close{margin-left:0}' +
+        '.lsb-title-quotes-float-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:8px 12px}' +
+        '.lsb-title-quotes-float-resize{position:absolute;right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}' +
+        '.lsb-title-quotes-float.is-collapsed{height:auto !important;min-height:0 !important}' +
+        '.lsb-title-quotes-float.is-collapsed .lsb-title-quotes-float-body,.lsb-title-quotes-float.is-collapsed .lsb-title-quotes-float-resize{display:none}',
     )
 
     api.handle('title-quotes:debug', () => ({
@@ -2895,11 +4287,44 @@
       foldTitles,
       median,
       pickAnchors,
+      bookFromListings,
+      diffBook,
+      estimateFlow,
+      sumFlow,
+      flowTraded,
+      BOOK_STALE_MS,
+      periodMs,
+      rangeCutoff,
+      fmtBarTip,
+      fmtPct,
+      movers,
+      boardPair,
+      foldCandles,
+      mean,
+      snapshotIndex,
+      indexPoints,
+      foldIndexCandles,
+      sma,
+      stdevPop,
+      bollinger,
+      overlays,
       pushSnap,
+      ingestListings,
       series: get,
-      reset: () => set([]),
+      reset: () => {
+        set([])
+        api.store.set('book', null)
+      },
       snap: () => cycle(true),
-      intervalMin: () => Number(cfg.intervalMin),
+      intervalMs: pollMs,
+      watching,
+      watchBeat: () => api.store.get('watchBeat', null),
+      setWatchBeat: (v) => api.store.set('watchBeat', v),
+      openFloat,
+      closeFloat,
+      barMin: getBarMin,
+      writeWatchBeat,
+      tabId: () => tabId,
       armed: () => !!timer,
       lastErr: () => lastErr,
       lastAt: () => lastAt,
@@ -4423,14 +5848,14 @@
 
 
 ;
-/* ══════════════ LSB·界面精修 v1.1.37 (skin) ══════════════ */
+/* ══════════════ LSB·界面精修 v1.1.43 (skin) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.37',
+    version: '1.1.43',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -4445,7 +5870,7 @@
         options: ['紧凑', '舒适'],
       },
       codeblock: { type: 'switch', label: '代码块样式强化', default: true },
-      floors: { type: 'switch', label: '楼层优化（分隔线 + OP 高亮）', default: true },
+      floors: { type: 'switch', label: '楼层优化（分隔线）', default: true },
       measure: { type: 'switch', label: '宽屏限宽阅读（≥1280px 生效）', default: false },
     },
   }
@@ -4457,6 +5882,7 @@
     const extrasHomes = new Map()
     const asideHomes = new Map()
     let themeToggleHome = null
+    let colorSchemeHome = null
     let onlineObs = null
     let extrasObs = null
     let timelineRaf = 0
@@ -4501,8 +5927,8 @@
         }
         html.lsb-skin-shell-topic{--lsb-shell-main-inset:var(--lsb-shell-gutter)}
         html.lsb-skin-shell-user{--lsb-shell-main-inset:calc(var(--lsb-shell-gutter) + 12px)}
-        html[data-themes-color-mode="dark"]{color-scheme:dark}
-        html[data-themes-color-mode="light"]{color-scheme:light}
+        html[data-themes-color-mode="dark"],html[data-dark-mode-theme="dark"]{color-scheme:dark}
+        html[data-themes-color-mode="light"],html[data-dark-mode-theme="light"]{color-scheme:light}
         #lsb-shell{
           display:none;position:fixed;inset:0;z-index:7999;pointer-events:none;
         }
@@ -4559,6 +5985,21 @@
           border-radius:var(--lsb-radius);overflow:hidden;
           background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
         }
+        .lsb-shell-search-host .search-page-link{
+          display:flex;align-items:center;margin:0;padding:0;width:100%;max-width:none;height:30px;
+          grid-area:auto;grid-column:auto;grid-row:auto;justify-self:stretch;
+          border:1px solid var(--line,#ddd);border-radius:var(--lsb-radius);
+          background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
+          color:var(--text-subtle,#888);text-decoration:none;overflow:hidden;
+        }
+        .lsb-shell-search-host .search-page-fake-input{
+          flex:1;min-width:0;padding:0 10px;font-size:13px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+        }
+        .lsb-shell-search-host .search-page-fake-icon{
+          display:inline-flex;align-items:center;justify-content:center;
+          flex:0 0 30px;width:30px;height:100%;
+        }
         .lsb-shell-search-host select{
           border:0;border-radius:var(--lsb-radius-sm);background:transparent;
           color:var(--text,#222);font-size:12px;height:26px;
@@ -4583,12 +6024,20 @@
           margin-left:16px;font-size:13px;font-weight:600;letter-spacing:-.01em;
           color:var(--text,#222);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:22vw;
         }
-        .lsb-shell-theme{margin-left:8px;display:flex;align-items:center}
+        .lsb-shell-theme{margin-left:8px;display:flex;align-items:center;gap:8px;overflow:visible;position:relative}
         .lsb-shell-theme [data-themes-mode-toggle]{
           border:0;background:transparent;color:var(--text,#222);cursor:pointer;
           width:32px;height:32px;padding:4px;border-radius:var(--lsb-radius-sm);
         }
         .lsb-shell-theme [data-themes-mode-toggle] svg{display:block;width:18px;height:18px}
+        .lsb-shell-theme .dark-mode-control{position:relative;flex:0 0 auto;grid-area:auto;justify-self:auto}
+        .lsb-shell-theme .dark-mode-menu{z-index:8003}
+        .lsb-shell-theme .color-scheme-top-link{
+          display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;
+          grid-area:auto;justify-self:auto;flex:0 0 30px;
+          color:var(--text-muted,#888);text-decoration:none;
+        }
+        .lsb-shell-theme .color-scheme-top-link svg{width:17px;height:17px;display:block}
         #lsb-shell-aside{
           display:none;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
           width:var(--lsb-shell-aside);z-index:7999;overflow:auto;padding:12px 10px 16px;
@@ -4659,7 +6108,7 @@
         html.lsb-skin-shell-on li.post-item .post-avatar img{
           width:32px!important;height:32px!important;border-radius:50%;
         }
-        html.lsb-skin-shell-on li.post-item .meta-icon{display:none}
+        html.lsb-skin-shell-on li.post-item:not(.post-entry) .meta-icon{display:none}
         html.lsb-skin-shell-on main.wrap{
           max-width:none!important;margin-left:0!important;margin-right:0!important;width:auto!important;
           padding-left:var(--lsb-shell-gutter)!important;
@@ -4787,7 +6236,6 @@
       if (cfg.floors) {
         parts.push(`
           html.lsb-skin-floors-on li.post-entry{border-bottom:1px solid var(--line-soft,#eee)}
-          html.lsb-skin-floors-on li.post-entry[data-floor='1']{border-left:3px solid var(--brand,#5eaaa0);border-radius:4px}
         `)
       }
 
@@ -4877,16 +6325,21 @@
         { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
         { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
         { plugin: 'points-ledger', panel: 'points-ledger', label: '积分趋势' },
-        { plugin: 'title-quotes', panel: 'title-quotes', label: '称号行情' },
+        { plugin: 'title-quotes', rpc: 'title-quotes:open', label: '称号行情' },
         { plugin: 'annual-report', panel: 'annual-report', label: '年度报告' },
       ]
         .filter((t) => active.has(t.plugin))
-        .map(({ panel, label }) => ({ panel, label }))
+        .map(({ panel, rpc, label }) => (rpc ? { rpc, label } : { panel, label }))
     }
 
     function locationText() {
       const p = api.page || {}
-      if (p.type === 'home') return '全部主题'
+      if (p.type === 'home') {
+        if (p.sort === 'lucky') return '抽奖'
+        if (p.sort === 'card') return '发卡'
+        if (p.sort === 'comment') return '新评论'
+        return '全部主题'
+      }
       if (p.type === 'forum') {
         const f = (api.forums || []).find((x) => x.id === p.id)
         return f?.name || '版块'
@@ -4901,6 +6354,13 @@
         return (document.querySelector('h1.post-content-title')?.textContent || '').trim() || '帖子'
       }
       if (p.type === 'user') return '用户'
+      if (p.type === 'featured') return '精华'
+      if (p.type === 'footprint') return '足迹'
+      if (p.type === 'gacha') return '称号抽取'
+      if (p.type === 'gacha_market') return '称号交易'
+      if (p.type === 'gacha_profile') return '我的称号'
+      if (p.type === 'wallet') return '我的烧饼'
+      if (p.type === 'invite') return '邀请中心'
       return 'LINUX SB'
     }
 
@@ -4927,29 +6387,21 @@
 
     function adoptSearch(host) {
       if (!(host instanceof Element)) return
-      const existing = host.querySelector('form')
-      if (existing) return
-      const form =
-        document.querySelector('body > .top .search-form') || document.querySelector('.search-form')
-      if (!(form instanceof HTMLFormElement) || host.contains(form)) return
-      searchHome = { parent: form.parentNode, next: form.nextSibling }
-      form.classList.add('lsb-shell-search')
-      host.append(form)
+      if (host.querySelector('form, .search-page-link')) return
+      const el =
+        document.querySelector('body > .top .search-form') ||
+        document.querySelector('body > .top .search-page-link') ||
+        document.querySelector('.search-form') ||
+        document.querySelector('a.search-page-link')
+      if (!(el instanceof Element) || host.contains(el)) return
+      searchHome = { parent: el.parentNode, next: el.nextSibling }
+      el.classList.add('lsb-shell-search')
+      host.append(el)
     }
 
     function restoreSearch() {
-      const form = document.querySelector('form.lsb-shell-search')
-      if (!form || !searchHome?.parent?.isConnected) {
-        form?.classList.remove('lsb-shell-search')
-        searchHome = null
-        return
-      }
-      if (searchHome.next?.parentNode === searchHome.parent) {
-        searchHome.parent.insertBefore(form, searchHome.next)
-      } else {
-        searchHome.parent.append(form)
-      }
-      form.classList.remove('lsb-shell-search')
+      const el = document.querySelector('.lsb-shell-search')
+      restoreNode(el, searchHome, 'lsb-shell-search')
       searchHome = null
     }
 
@@ -5130,17 +6582,34 @@
 
     function adoptThemeToggle(host) {
       if (!(host instanceof Element)) return
-      const btn = document.querySelector('[data-themes-mode-toggle]')
-      if (!btn || host.contains(btn)) return
-      if (!themeToggleHome) themeToggleHome = { parent: btn.parentNode, next: btn.nextSibling }
-      btn.classList.add('lsb-shell-theme-toggle')
-      host.append(btn)
+      if (!host.querySelector('.color-scheme-top-link')) {
+        const scheme =
+          document.querySelector('body > .top a.color-scheme-top-link') ||
+          document.querySelector('a.color-scheme-top-link')
+        if (scheme && !host.contains(scheme)) {
+          if (!colorSchemeHome) colorSchemeHome = { parent: scheme.parentNode, next: scheme.nextSibling }
+          scheme.classList.add('lsb-shell-theme-scheme')
+          host.append(scheme)
+        }
+      }
+      if (host.querySelector('.dark-mode-control, [data-themes-mode-toggle]')) return
+      const widget =
+        document.querySelector('body > .top .dark-mode-control') ||
+        document.querySelector('.dark-mode-control') ||
+        document.querySelector('[data-themes-mode-toggle]')
+      if (!widget || host.contains(widget)) return
+      if (!themeToggleHome) themeToggleHome = { parent: widget.parentNode, next: widget.nextSibling }
+      widget.classList.add('lsb-shell-theme-toggle')
+      host.append(widget)
     }
 
     function restoreThemeToggle() {
-      const btn = document.querySelector('[data-themes-mode-toggle]')
-      restoreNode(btn, themeToggleHome, 'lsb-shell-theme-toggle')
+      const widget = document.querySelector('.lsb-shell-theme-toggle')
+      restoreNode(widget, themeToggleHome, 'lsb-shell-theme-toggle')
       themeToggleHome = null
+      const scheme = document.querySelector('.lsb-shell-theme-scheme')
+      restoreNode(scheme, colorSchemeHome, 'lsb-shell-theme-scheme')
+      colorSchemeHome = null
     }
 
     function nativeCards() {
@@ -5202,7 +6671,7 @@
       let changed = false
       if (quick) {
         const node = quick.cloneNode(true)
-        node.querySelectorAll('[data-themes-mode-toggle]').forEach((n) => n.remove())
+        node.querySelectorAll('[data-themes-mode-toggle], .dark-mode-control').forEach((n) => n.remove())
         keep.quick = node.outerHTML
         changed = true
       }
@@ -5300,6 +6769,9 @@
     function renderLinks(links) {
       return links
         .map((link) => {
+          if (link.rpc) {
+            return `<button type="button" class="lsb-shell-link" data-lsb-rpc="${esc(link.rpc)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
+          }
           if (link.panel) {
             return `<button type="button" class="lsb-shell-link" data-lsb-panel="${esc(link.panel)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
           }
@@ -5426,7 +6898,7 @@
       timeline.style.setProperty('--lsb-timeline-progress', `${progress}%`)
       timeline.querySelector('[data-timeline-current]').textContent =
         Number.isFinite(floor) && floor > 1 ? `#${floor}` : '主帖'
-      const time = post?.querySelector('time, span[data-performance-time]')
+      const time = post?.querySelector('time, span[data-performance-time], .post-time')
       timeline.querySelector('[data-timeline-date]').textContent = (time?.textContent || '').trim().slice(0, 24)
       timeline.querySelector('[data-timeline-total]').textContent = `${Math.max(0, posts.length - 1)} 条回复`
       const track = timeline.querySelector('.lsb-shell-track')
@@ -5489,6 +6961,12 @@
         <aside id="lsb-shell-aside" aria-label="站点信息"></aside>`
       el.querySelector('[data-lsb-shell-settings]').addEventListener('click', () => api.ui.openPanel('skin'))
       el.querySelector('#lsb-shell-rail').addEventListener('click', (e) => {
+        const rpcBtn = e.target.closest('[data-lsb-rpc]')
+        if (rpcBtn) {
+          e.preventDefault()
+          api.request(rpcBtn.getAttribute('data-lsb-rpc'))
+          return
+        }
         const btn = e.target.closest('[data-lsb-panel]')
         if (!btn) return
         e.preventDefault()
@@ -5736,6 +7214,8 @@
         path === '/'
         || path === '/index.php'
         || path === '/latest'
+        || path === '/topic_featured'
+        || path === '/unread_topic_notice_footprint'
         || /^\/forum\/\d+/.test(path)
         || /^\/category\/\d+/.test(path)
       )
@@ -6048,10 +7528,14 @@
     api.on('plugin:activated', scheduleRefresh)
     api.on('plugin:disabled', scheduleRefresh)
     api.on('topic:posts-added', scheduleTimeline)
-    api.dom.each('[data-themes-mode-toggle]', () => {
-      if (!cfg.shell) return
-      adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
-    })
+    api.dom.each(
+      '.dark-mode-control, [data-themes-mode-toggle], a.color-scheme-top-link, a.search-page-link, form.search-form',
+      () => {
+        if (!cfg.shell) return
+        adoptSearch(document.querySelector('.lsb-shell-search-host'))
+        adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
+      },
+    )
 
     api.onDispose(() => {
       unregMenu()
@@ -6091,14 +7575,14 @@
 
 
 ;
-/* ══════════════ LSB·实时流 v1.2.7 (live-feed) ══════════════ */
+/* ══════════════ LSB·实时流 v1.2.12 (live-feed) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.7',
+    version: '1.2.12',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -6139,7 +7623,7 @@
     let cfg = api.config()
     api.on('config:changed:live-feed', () => {
       cfg = api.config()
-      if (election.isLeader) scheduleNext()
+      if (shouldPoll()) scheduleNext()
     })
 
     /* ── 消息侧：复用未读哨兵的消息箱做「新消息」计数（哨兵缺席则静默降级） ── */
@@ -6176,13 +7660,34 @@
       return `${it.replies ?? ''}#${it.lastActiveTs ?? 0}`
     }
 
+    function isListRow(li) {
+      return li && !li.classList.contains('notification-item') && !li.classList.contains('post-entry')
+    }
+
+    function listSort() {
+      if (api.page.type === 'user') return api.page.tab === 'replies' ? 'comment' : 'post'
+      return api.page.sort === 'comment' ? 'comment' : 'post'
+    }
+
+    function isUserTopicList() {
+      if (api.page?.type !== 'user') return false
+      const tab = api.page.tab || 'topics'
+      return tab === 'topics' || tab === 'replies'
+    }
+
+    function shouldPoll() {
+      return election.isLeader || isUserTopicList()
+    }
+
     function captureList() {
       const ul = document.querySelector(api.sel?.listUl || 'ul.post-list')
       if (!ul) return false
+      if (ul.querySelector('li.notification-item')) return false
       const seen = new Map()
       let maxId = 0
       let maxTs = 0
       for (const li of ul.querySelectorAll('li.post-item')) {
+        if (!isListRow(li)) continue
         const it = api.parse.listItem(li)
         if (it?.id) {
           seen.set(it.id, freshnessOf(it))
@@ -6190,9 +7695,7 @@
           maxTs = Math.max(maxTs, it.lastActiveTs || 0)
         }
       }
-      // 流类型：与当前视图同源判定。发布流用 id 序数判新；回复流用活跃时间戳判新。
-      const sort = api.page.sort === 'post' || /([?&])sort=post/.test(location.search) ? 'post' : 'comment'
-      ctx = { ul, seen, maxId, maxTs, sort }
+      ctx = { ul, seen, maxId, maxTs, sort: listSort() }
       mode = 'list'
       return true
     }
@@ -6232,6 +7735,10 @@
     function init() {
       teardown()
       navGen += 1
+      if (api.page.type === 'user' && !isUserTopicList()) {
+        mode = null
+        return
+      }
       const ok = api.page.type === 'topic' && cfg.trackTopicReplies ? captureTopic() : captureList()
       if (!ok) mode = null
     }
@@ -6419,7 +7926,11 @@
       return false
     }
 
-    /* ── 轮询：列表模式 ── */
+    function liveDoc(path) {
+      // 当前页巡检不能进全站闸门：哨兵一启动会拉整页通知，称号行情也 30 秒一轮，
+      // 排在它们后面时实时流整段停摆。氢壳无限滚动同样 queue:false。
+      return api.net.doc(path, { queue: false })
+    }
     function listUrl() {
       if (api.page.type === 'forum') {
         return api.routes.forum(api.page.id, { sort: ctx.sort === 'post' ? 'post' : undefined })
@@ -6433,13 +7944,24 @@
 
     let lastBumped = 0
     const bumpTimers = []
+    function attachNativeUnread(row, src) {
+      const from = src?.querySelector?.('a.unread-topic-notice')
+      if (!row || !from || row.querySelector('a.unread-topic-notice')) return
+      const node = document.importNode(from, true)
+      const title = row.querySelector('a.post-title:not(.post-author)')
+      if (title) title.after(node)
+      else row.querySelector('.post-title-row')?.appendChild(node)
+    }
     function markBumped(items) {
       lastBumped = items.length
-      if (!cfg.highlightBumped || !items.length || !ctx.ul) return
+      if (!items.length || !ctx.ul) return
       for (const it of items) {
         const row = ctx.ul.querySelector(`:scope > li.post-item a.post-title[href*="/topic/${it.id}"]`)
           ?.closest('li.post-item')
         if (!row) continue
+        // 站点刷新会在标题旁留「未读」红点；高亮只闪 2.6 秒，点要一直留到用户进帖。
+        attachNativeUnread(row, it.el)
+        if (!cfg.highlightBumped) continue
         row.classList.remove('lsb-live-bumped')
         void row.offsetWidth
         row.classList.add('lsb-live-bumped')
@@ -6469,11 +7991,12 @@
       const ul = ctx.ul
       const seen = ctx.seen
       if (!seen) return 0
-      const doc = await api.net.doc(listUrl())
+      const doc = await liveDoc(listUrl())
       if (gen !== navGen || ctx.ul !== ul || ctx.seen !== seen) return 0
       const isPost = ctx.sort === 'post'
       const bumped = []
       for (const li of doc.querySelectorAll('li.post-item')) {
+        if (!isListRow(li)) continue
         const it = api.parse.listItem(li)
         if (!it?.id) continue
         const fp = freshnessOf(it)
@@ -6557,7 +8080,10 @@
       const frag = document.createDocumentFragment()
       const batch = pending.splice(0, cfg.maxInsert)
       for (const it of batch) {
-        frag.appendChild(document.importNode(it.el, true))
+        const node = document.importNode(it.el, true)
+        const notices = [...node.querySelectorAll('a.unread-topic-notice')]
+        notices.slice(1).forEach((n) => n.remove())
+        frag.appendChild(node)
       }
       // 插入到置顶帖之后，保持置顶始终在最顶部
       const pos = pinnedCount()
@@ -6579,6 +8105,11 @@
       const absorb = (t) => {
         for (const p of t.posts) {
           if (!p.postId || fresh.has(p.postId)) continue
+          if (p.el?.classList?.contains('quote-threads-child')) {
+            ackLivePost(p.postId)
+            ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+            continue
+          }
           if (isKnownPost(p.postId)) {
             ackLivePost(p.postId)
             ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
@@ -6589,14 +8120,14 @@
       }
 
       // 新回复总在最后一页
-      let t = api.parse.topic(await api.net.doc(api.routes.topic(tid, Math.max(1, ctx.pages || 1))))
+      let t = api.parse.topic(await liveDoc(api.routes.topic(tid, Math.max(1, ctx.pages || 1))))
       if (gen !== navGen || ctx.tid !== tid) return 0
       absorb(t)
       // 回复把帖子顶到了新页：本轮立即追补，不必等下一个周期。
       // 否则每次翻页都会让新页的首批回复延迟一整个轮询间隔才出现。
       for (let i = 0; i < MAX_PAGE_CATCHUP && t.pages > ctx.pages; i++) {
         ctx.pages = t.pages
-        t = api.parse.topic(await api.net.doc(api.routes.topic(tid, ctx.pages)))
+        t = api.parse.topic(await liveDoc(api.routes.topic(tid, ctx.pages)))
         if (gen !== navGen || ctx.tid !== tid) return 0
         absorb(t)
       }
@@ -6628,6 +8159,10 @@
         if (p.postId && document.getElementById('post-' + p.postId)) {
           ackLivePost(p.postId)
           ctx.maxPostId = Math.max(ctx.maxPostId || 0, p.postId)
+          continue
+        }
+        if (p.el?.classList?.contains('quote-threads-child')) {
+          ackLivePost(p.postId)
           continue
         }
         ctx.ul.appendChild(document.importNode(p.el, true))
@@ -6674,24 +8209,13 @@
           return 0
         } finally {
           inflight = null
-          if (election.isLeader) scheduleNext()
+          if (mode && shouldPoll()) scheduleNext()
         }
       })()
       return inflight
     }
 
     /* ── 跨标签：心跳选主（只有主标签发请求） ── */
-    const JITTER = Number.isFinite(Number(cfg.jitterMs)) ? Math.max(0, Number(cfg.jitterMs)) : 800
-    const election = api.election({
-      onPromote: () => cycle(),
-      onDemote: () => {
-        if (timer) clearTimeout(timer)
-        timer = null
-        nextAt = null
-        hideBanner()
-      },
-      jitter: JITTER,
-    })
     let timer = null
     let nextAt = null
     function intervalMs() {
@@ -6702,6 +8226,24 @@
       nextAt = Date.now() + intervalMs()
       timer = setTimeout(() => cycle(), intervalMs())
     }
+    const JITTER = Number.isFinite(Number(cfg.jitterMs)) ? Math.max(0, Number(cfg.jitterMs)) : 800
+    const election = api.election({
+      onPromote: () => cycle(),
+      onDemote: () => {
+        if (isUserTopicList()) {
+          // 资料页与首页不是同一条流：被首页主标签抢走后仍要自己巡检，否则只能刷新才看到新帖
+          cycle()
+          return
+        }
+        if (timer) clearTimeout(timer)
+        timer = null
+        nextAt = null
+        hideBanner()
+      },
+      jitter: JITTER,
+    })
+    init()
+    if (shouldPoll()) cycle()
 
     // 阻塞条件一解除就补上暂存内容：焦点离开编辑器、标签页切回前台。
     // 逛吧靠 1 秒心跳反复试探；这里事件驱动——响应更快，也不需要常驻定时器。
@@ -6727,7 +8269,7 @@
     /* 软导航换页：立刻重建基线。旧实现延迟 80ms，换页窗口里巡检会写进已经卸掉的 ul。 */
     api.on('route:changed', () => {
       init()
-      if (election.isLeader) cycle()
+      if (shouldPoll()) cycle()
     })
     api.on('topic:posts-added', (posts) => {
       if (mode !== 'topic') return
@@ -6762,6 +8304,7 @@
       nextAt: () => nextAt,
       intervalFor: (hidden) => (hidden ? cfg.bgSec : cfg.pollSec) * 1000,
       pollOnce: () => cycle(),
+      demote: () => election.demote(),
       load: () => (mode === 'topic' ? insertFloors() : insertPending()),
       bannerVisible: () => !!banner && banner.style.display !== 'none',
       bannerText: () => banner?.querySelector('.lsb-live-txt')?.textContent || '',
@@ -6787,7 +8330,7 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.60',
+    version: '1.0.96',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },

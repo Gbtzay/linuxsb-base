@@ -257,3 +257,151 @@ test('实时流：上位巡检结束后会排上下一轮', async () => {
     `上位后应排上下一轮巡检，nextAt=${dbg.nextAt()} lastErr=${dbg.lastErr()} mode=${dbg.mode()}`,
   )
 })
+
+const userHtml = readFileSync(new URL('./fixtures/user1.html', import.meta.url), 'utf8')
+const notifyHtml = readFileSync(new URL('./fixtures/notifications.html', import.meta.url), 'utf8')
+
+test('实时流：个人资料页新主题免刷新插入，且不复制原生未读点', async () => {
+  let serve = userHtml
+  const { w, until } = makeSite(userHtml, '/user/1', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true },
+  })
+  feedStub(w, () => serve)
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+  assert.equal(dbg.mode(), 'list', '资料页主题列表应进入 list 模式')
+
+  const extra =
+    '<li class="post-item"><div class="post-body"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/99999999">资料页新帖</a>' +
+    '<a class="unread-topic-notice" href="/topic/99999999">未读</a>' +
+    '<a class="unread-topic-notice" href="/topic/99999999">未读</a></div>' +
+    '<div class="post-meta"><span data-performance-time="1893456000"></span><span>0</span></div></div></li>'
+  serve = userHtml.replace('</ul>', extra + '</ul>')
+  const before = w.document.querySelectorAll('ul.post-list > li.post-item').length
+  await dbg.pollOnce()
+  assert.ok(
+    await until(() => w.document.querySelectorAll('ul.post-list > li.post-item').length === before + 1),
+    '资料页新帖应免刷新插入',
+  )
+  const row = [...w.document.querySelectorAll('li.post-item')].find((li) =>
+    li.querySelector('a.post-title[href="/topic/99999999"]'),
+  )
+  assert.ok(row)
+  assert.equal(
+    row.querySelectorAll('a.unread-topic-notice').length,
+    1,
+    '插入后只留一颗原生未读点，不能实时流再叠一颗',
+  )
+})
+
+test('实时流：通知 tab 不当成主题流，避免误报新帖', async () => {
+  const { w, until } = makeSite(notifyHtml, '/user/5372?tab=notifications', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  feedStub(w, () => notifyHtml)
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+  assert.equal(dbg.mode(), null, '通知列表不是主题流')
+  assert.equal(dbg.pending(), 0)
+  assert.equal(dbg.bannerVisible(), false)
+  assert.equal(dbg.lastErr(), null, '通知页巡检失败会在运行日志里报实时流出错')
+})
+
+test('实时流：列表里是通知条目时不进入主题流', async () => {
+  const { w, until } = makeSite(notifyHtml, '/user/5372', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  const fetched = []
+  w.fetch = async (url) => {
+    fetched.push(String(url))
+    return { status: 200, ok: true, url: String(url), text: async () => notifyHtml }
+  }
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+  assert.equal(dbg.mode(), null, '通知条目不能当新帖流')
+  assert.equal(dbg.lastErr(), null)
+  assert.equal(dbg.pending(), 0)
+})
+
+test('实时流：资料页被首页抢走主标签后仍继续巡检', async () => {
+  const { w, until } = makeSite(userHtml, '/user/1', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true },
+  })
+  feedStub(w, () => userHtml)
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+  dbg.demote()
+  assert.equal(dbg.role(), 'follower')
+  assert.ok(dbg.nextAt() != null, '让位后资料页仍要排下一轮，不能被首页主标签饿死')
+})
+
+test('实时流：哨兵不得打开通知页，也不能堵住当前页巡检', async () => {
+  let serve = homeHtml
+  const { w, until } = makeSite(homeHtml, '/', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true },
+    'lsb_base:unread-sentinel:__config': { jitterMs: 0, intervalMin: 1, badgeInTitle: false },
+  })
+  const calls = []
+  let releaseNotify
+  const notifyHold = new Promise((r) => {
+    releaseNotify = r
+  })
+  w.fetch = async (url) => {
+    const u = String(url)
+    calls.push(u)
+    if (/tab=notifications/.test(u)) {
+      await notifyHold
+      return { status: 200, ok: true, url: u, text: async () => '<html><body></body></html>' }
+    }
+    return { status: 200, ok: true, url: u, text: async () => serve }
+  }
+  await loadBase(w, PLUG('unread-sentinel.user.js'), PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  const first = dbg.pollOnce()
+  const firstDone = await Promise.race([
+    first.then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 2000)),
+  ])
+  assert.equal(firstDone, true, '实时流首轮巡检仍要结束')
+  assert.ok(!calls.some((u) => /tab=notifications/.test(u)), `后台打开通知页会清未读：${JSON.stringify(calls)}`)
+  serve = homeHtml.replace('</ul>', EXTRA_TOPIC + '</ul>')
+  const before = w.document.querySelectorAll('ul.post-list > li.post-item').length
+  const second = dbg.pollOnce()
+  assert.ok(
+    await until(() => w.document.querySelectorAll('ul.post-list > li.post-item').length === before + 1, 2000),
+    '哨兵巡检首页时，新帖仍应插进当前列表',
+  )
+  await second
+  releaseNotify()
+})
+
+test('实时流：精华 / 抽奖按新帖序数巡检，不当成回复流', async () => {
+  const { w, until } = makeSite(homeHtml, '/topic_featured', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  feedStub(w, () => homeHtml)
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  assert.equal(dbg.mode(), 'list')
+  assert.equal(dbg.baseline().sort, 'post', '精华没有 sort=comment，要用 id 判新')
+
+  const lucky = makeSite(homeHtml, '/index.php?sort=lucky', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  feedStub(lucky.w, () => homeHtml)
+  await loadBase(lucky.w, PLUG('live-feed.user.js'))
+  const luckyDbg = await lucky.w.LSB.bus.request('live-feed:debug')
+  await lucky.until(() => luckyDbg.role() === 'leader', 3000)
+  assert.equal(luckyDbg.baseline().sort, 'post', '抽奖流按帖 id，不能因缺时间戳整页漏报')
+})

@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氢（RC）
 // @name:en      LINUX.SB Hydrogen (RC)
 // @namespace    https://linux.sb/
-// @version      0.1.22
+// @version      0.1.33
 // @description  【RC】冻新功能，只修阻断。linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧（RC）」一起使用。
 // @description:en  [RC] Feature-frozen. Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen (RC) for features.
 // @author       xB70sR71
@@ -64,6 +64,14 @@
     const m = String(v || "").trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
     if (!m) return null;
     return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+  function compareVersion(a, b) {
+    const pa = parseVersion(a) || [0, 0, 0];
+    const pb = parseVersion(b) || [0, 0, 0];
+    for (let i = 0; i < 3; i++) {
+      if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+    }
+    return 0;
   }
   function satisfies(version, range) {
     const r = String(range || "*").trim();
@@ -284,6 +292,7 @@
     parseLikeTargets: () => parseLikeTargets,
     parseList: () => parseList,
     parseListItem: () => parseListItem,
+    parseNotifications: () => parseNotifications,
     parsePost: () => parsePost,
     parseTopic: () => parseTopic,
     parseUser: () => parseUser,
@@ -309,7 +318,19 @@
     search: "/search",
     checkin: "/daily_checkin",
     leaderboard: (type = "points") => `/leaderboard?type=${type}`,
-    invite: "/invite_code",
+    invite: "/invite_center",
+    inviteLegacy: "/invite_code",
+    gacha: "/gacha",
+    gachaMarket: "/gacha_market",
+    gachaProfile: "/gacha_profile",
+    gachaForge: "/gacha_forge_center",
+    gachaRecycle: "/gacha_recycle_center",
+    gachaRecipes: "/gacha_recipes",
+    wallet: "/community_wallet",
+    featured: "/topic_featured",
+    footprint: "/unread_topic_notice_footprint",
+    colorScheme: "/color_scheme",
+    keywordFilter: "/home_keyword_filter_settings",
     donate: (topicId) => `/donate${topicId ? `?topic_id=${topicId}` : ""}`,
     donateFeed: "/donate_feed",
     notify: (id) => `/notify/${id}`,
@@ -330,7 +351,7 @@
   var SEL = {
     topicPosts: "ul.topic-post-list > li.post-entry, ul.post-list > li.post-entry",
     topicUl: "ul.topic-post-list, ul.post-list",
-    listItems: "ul.post-list > li.post-item",
+    listItems: "ul.post-list > li.post-item:not(.post-entry)",
     listUl: "ul.post-list",
     postEntry: "li.post-entry"
   };
@@ -358,10 +379,22 @@
       "/topic_edit": "topic_edit",
       "/daily_checkin": "checkin",
       "/leaderboard": "leaderboard",
+      "/invite_center": "invite",
       "/invite_code": "invite",
       "/forum_list": "forum_list",
       "/search": "search",
-      "/donate": "donate"
+      "/donate": "donate",
+      "/gacha": "gacha",
+      "/gacha_market": "gacha_market",
+      "/gacha_profile": "gacha_profile",
+      "/gacha_forge_center": "gacha_forge",
+      "/gacha_recycle_center": "gacha_recycle",
+      "/gacha_recipes": "gacha_recipes",
+      "/community_wallet": "wallet",
+      "/topic_featured": "featured",
+      "/unread_topic_notice_footprint": "footprint",
+      "/color_scheme": "color_scheme",
+      "/home_keyword_filter_settings": "keyword_filter"
     };
     if (known[path]) return { type: known[path] };
     if (/^\/notify\/\d+$/.test(path)) return { type: "notify", id: num(path) };
@@ -440,7 +473,8 @@
     return [...out.values()].sort((a, b) => a.id - b.id);
   }
   function parseListItem(li) {
-    const titleA = li.querySelector("a.post-title");
+    if (li.classList.contains("post-entry")) return null;
+    const titleA = li.querySelector("a.post-title:not(.post-author)");
     if (!titleA) return null;
     const authorA = li.querySelector('.post-avatar a[href^="/user/"]') || li.querySelector('.post-meta a[href^="/user/"]');
     const forumA = li.querySelector('.post-forum-meta a[href^="/forum/"], .post-meta a[href^="/forum/"]');
@@ -464,6 +498,17 @@
   function parseList(root = document) {
     return [...root.querySelectorAll(SEL.listItems)].map(parseListItem).filter((x) => x && x.id);
   }
+  function postLikeCount(li) {
+    const likeBtn = li.querySelector("[data-like-coin-action]");
+    if (likeBtn) return num(text(li.querySelector(".like-coin-count")));
+    const donate = li.querySelector(".donate-topic-reaction-count, [data-donate-topic-like-count]");
+    if (donate) {
+      const n = num(text(donate));
+      if (Number.isFinite(n)) return n;
+      return num(donate.getAttribute("data-donate-topic-like-count"));
+    }
+    return null;
+  }
   function parsePost(li) {
     const idm = (li.id || "").match(/^post-(\d+)$/);
     const authorA = li.querySelector("a.post-title.post-author") || li.querySelector('.post-avatar a[href^="/user/"]');
@@ -474,11 +519,11 @@
       floor: li.dataset?.floor ? Number(li.dataset.floor) : 0,
       authorId: authorA ? idFrom(authorA.getAttribute("href"), "user") : null,
       authorName: authorA ? text(authorA) || authorA.querySelector("img")?.getAttribute("alt") || null : null,
-      groups: [...li.querySelectorAll(".post-user-group")].map((g) => text(g)).filter((t) => t && !/^UID/.test(t)),
+      groups: [...li.querySelectorAll(".post-user-group")].filter((g) => !g.classList.contains("gacha-title-post-badge") && !g.classList.contains("user-uid-badge")).map((g) => text(g)).filter((t) => t && !/^UID/.test(t)),
       ts: stamp ? num(stamp.getAttribute("data-performance-time")) : null,
       html: li.querySelector(".post-content")?.innerHTML ?? "",
       content: text(li.querySelector(".post-content")),
-      likes: likeBtn ? num(text(li.querySelector(".like-coin-count"))) : null,
+      likes: postLikeCount(li),
       liked: likeBtn ? likeBtn.getAttribute("data-like-coin-liked") === "1" : null,
       coined: likeBtn ? num(likeBtn.getAttribute("data-like-coin-coined")) : null,
       el: li
@@ -526,8 +571,21 @@
       items: parseList(doc)
     };
   }
+  function parseNotifications(root = document) {
+    return [...root.querySelectorAll("li.notification-item")].map((el) => {
+      const topicA = el.querySelector('a[href*="/topic/"]');
+      const href = topicA ? topicA.getAttribute("href") : "";
+      const content = el.querySelector(".notification-content");
+      return {
+        id: href ? idFrom(href, "topic") : null,
+        title: content ? text(content) : text(el),
+        href,
+        unread: el.classList.contains("unread")
+      };
+    });
+  }
   function parseLikeTargets(doc = document) {
-    return [...doc.querySelectorAll("[data-like-coin-action]")].map((btn) => ({
+    const coins = [...doc.querySelectorAll("[data-like-coin-action]")].map((btn) => ({
       type: btn.getAttribute("data-like-coin-type"),
       id: num(btn.getAttribute("data-like-coin-id")),
       tiers: (btn.getAttribute("data-like-coin-tiers") || "").split(",").filter(Boolean).map(num),
@@ -536,6 +594,22 @@
       count: num(text(btn.parentElement?.querySelector(".like-coin-count"))),
       el: btn
     }));
+    if (coins.length) return coins;
+    return [...doc.querySelectorAll("[data-donate-btn]")].map((btn) => {
+      const replyRaw = btn.getAttribute("data-donate-reply-id");
+      const topicRaw = btn.getAttribute("data-donate-topic-id");
+      const id = replyRaw != null && replyRaw !== "" ? num(replyRaw) : num(topicRaw);
+      const countEl = btn.querySelector(".donate-topic-reaction-count") || btn;
+      return {
+        type: "donate",
+        id,
+        tiers: [],
+        liked: null,
+        coined: null,
+        count: num(text(countEl)),
+        el: btn
+      };
+    });
   }
   function snapshot(doc = document, loc = location, prev = null) {
     const page = detectPage(loc);
@@ -549,7 +623,9 @@
     };
     if (page.type === "topic") snap.topic = same && prev.topic ? prev.topic : parseTopic(doc);
     if (page.type === "user") snap.user = same && prev.user ? prev.user : parseUser(doc);
-    if (page.type === "home" || page.type === "forum") snap.list = same && prev.list ? prev.list : parseList(doc);
+    if (page.type === "home" || page.type === "forum" || page.type === "featured" || page.type === "footprint") {
+      snap.list = same && prev.list ? prev.list : parseList(doc);
+    }
     return snap;
   }
 
@@ -950,19 +1026,19 @@
 .lsb-toast-title{font-weight:600;margin-bottom:2px}
 .lsb-launcher{position:fixed;right:16px;bottom:74px;z-index:99998;width:38px;height:38px;border-radius:50%;border:1px solid var(--line,#ddd);background:var(--panel,#fff);color:var(--brand,#5eaaa0);cursor:pointer;font-size:15px;font-weight:700;box-shadow:0 4px 12px var(--shadow-base,rgba(0,0,0,.15))}
 .lsb-launcher:hover{border-color:var(--brand,#5eaaa0)}
-.lsb-mask{position:fixed;inset:0;z-index:99998;background:var(--backdrop,rgba(0,0,0,.45))}
-.lsb-panel{position:fixed;z-index:99999;left:50%;top:50%;transform:translate(-50%,-50%);width:min(720px,94vw);max-height:82vh;display:flex;flex-direction:column;border:1px solid var(--line,#ddd);border-radius:10px;background:var(--panel,#fff);color:var(--text,#222);font-size:13px;overflow:hidden;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3))}
+.lsb-mask{position:fixed;inset:0;z-index:99998;background:var(--backdrop,rgba(0,0,0,.45));overscroll-behavior:contain}
+.lsb-panel{position:fixed;z-index:99999;left:50%;top:50%;transform:translate(-50%,-50%);width:min(720px,94vw);max-height:82vh;display:flex;flex-direction:column;border:1px solid var(--line,#ddd);border-radius:10px;background:var(--panel,#fff);color:var(--text,#222);font-size:13px;overflow:hidden;overscroll-behavior:contain;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3))}
 .lsb-panel-settings{height:min(640px,82vh)}
 .lsb-panel-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line-soft,#eee)}
 .lsb-panel-head strong{font-size:14px}
 .lsb-panel-head .lsb-ver{color:var(--text-muted,#888);font-size:11px}
 .lsb-panel-close{margin-left:auto;border:0;background:transparent;color:var(--text-muted,#888);font-size:18px;cursor:pointer;line-height:1}
 .lsb-panel-body{display:flex;min-height:0;flex:1}
-.lsb-tabs{flex:0 0 168px;border-right:1px solid var(--line-soft,#eee);overflow:auto;padding:6px}
+.lsb-tabs{flex:0 0 168px;border-right:1px solid var(--line-soft,#eee);overflow:auto;overscroll-behavior:contain;padding:6px}
 .lsb-tab{display:block;width:100%;text-align:left;padding:7px 9px;margin-bottom:2px;border:0;border-radius:6px;background:transparent;color:var(--text,#222);cursor:pointer;font-size:13px}
 .lsb-tab:hover{background:var(--bg,#f6f6f6)}
 .lsb-tab.is-active{background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600}
-.lsb-view{flex:1;min-width:0;overflow:auto;padding:12px 14px}
+.lsb-view{flex:1;min-width:0;overflow:auto;overscroll-behavior:contain;padding:12px 14px}
 .lsb-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--line-soft,#f0f0f0)}
 .lsb-row:last-child{border-bottom:0}
 .lsb-row-main{min-width:0;flex:1}
@@ -983,6 +1059,19 @@
 .lsb-op:hover{color:var(--brand,#5eaaa0);background:var(--brand-soft,#eef6f5)}
 .lsb-empty{color:var(--text-muted,#888);padding:14px 0}
 `;
+  function trapOverscroll(root) {
+    const onWheel = (e) => {
+      const dy = e.deltaY;
+      const scroller = e.target?.closest?.(".lsb-view, .lsb-tabs");
+      if (scroller && root.contains(scroller)) {
+        const top = scroller.scrollTop;
+        const max = scroller.scrollHeight - scroller.clientHeight;
+        if (dy < 0 && top > 0 || dy > 0 && top < max - 0.5) return;
+      }
+      e.preventDefault();
+    };
+    root.addEventListener("wheel", onWheel, { passive: false });
+  }
   var UI = class {
     constructor({ title = "LINUX.SB · 氢（RC）", version = "" } = {}) {
       this.title = title;
@@ -1138,6 +1227,8 @@
       document.addEventListener("keydown", onKey);
       this._panel = { mask, panel, onKey };
       document.body.append(mask, panel);
+      trapOverscroll(mask);
+      trapOverscroll(panel);
       this._renderTabs();
       this.showTab(tabId || this._tabs[0]?.id);
     }
@@ -1594,8 +1685,48 @@
     }
   };
 
+  // src/check-update.js
+  var SCRIPTS = [
+    {
+      id: "hydrogen",
+      gfId: 592914,
+      label: "氢",
+      installUrl: "https://greasyfork.org/zh-CN/scripts/592914-linux-sb-%E6%B0%A2-beta"
+    },
+    {
+      id: "oxygen",
+      gfId: 592915,
+      label: "氧",
+      installUrl: "https://greasyfork.org/zh-CN/scripts/592915-linux-sb-%E6%B0%A7-beta"
+    }
+  ];
+  function gfJsonUrl(gfId) {
+    return `https://greasyfork.org/zh-CN/scripts/${gfId}.json`;
+  }
+  function parseStoreScript(json) {
+    if (!json || typeof json !== "object") return null;
+    const version = typeof json.version === "string" ? json.version.trim() : "";
+    if (!version) return null;
+    const url = typeof json.url === "string" ? json.url.trim() : "";
+    return { version, url };
+  }
+  function classifyVersion(local, store) {
+    if (!parseVersion(local) || !parseVersion(store)) return "invalid";
+    const cmp = compareVersion(local, store);
+    if (cmp < 0) return "behind";
+    if (cmp > 0) return "ahead";
+    return "equal";
+  }
+  function localOxygenVersion(plugins) {
+    const suite = (plugins || []).find((p) => p.id === "suite");
+    return suite && suite.version ? String(suite.version) : null;
+  }
+  function installHref(parsed, fallback) {
+    return parsed && parsed.url || fallback;
+  }
+
   // src/core.js
-  var VERSION = "0.1.22";
+  var VERSION = "0.1.33";
   var PERMISSIONS = {
     read: "读取页面结构与站内 GET 请求",
     write: "代表当前用户发起写操作（回复/点赞/收藏等）",
@@ -2165,6 +2296,7 @@
           topic: parseTopic,
           post: parsePost,
           user: parseUser,
+          notifications: parseNotifications,
           likeTargets: parseLikeTargets,
           detectPage,
           snapshot
@@ -2348,6 +2480,12 @@
           host.appendChild(info);
         }
       });
+      this.ui.registerTab({
+        id: "__core_updates",
+        name: "检查更新",
+        order: 3,
+        render: (host) => this._renderUpdateTab(host)
+      });
     }
     /** 运行日志面板：持久化错误 + 实时运行日志，可过滤/搜索/导出 */
     _renderLogTab(host) {
@@ -2413,6 +2551,120 @@
       const wrap = document.createElement("div");
       host.appendChild(wrap);
       render();
+    }
+    _renderUpdateTab(host) {
+      const wrap = document.createElement("div");
+      host.appendChild(wrap);
+      let gen = 0;
+      let inflight = null;
+      const scripts = {
+        hydrogen: SCRIPTS.find((s) => s.id === "hydrogen"),
+        oxygen: SCRIPTS.find((s) => s.id === "oxygen")
+      };
+      const snapshot2 = () => {
+        const ox = localOxygenVersion([...this.plugins.values()]);
+        return {
+          hydrogen: { local: VERSION, missing: false },
+          oxygen: { local: ox, missing: !ox }
+        };
+      };
+      const paint = (states, { busy = false } = {}) => {
+        const loc = snapshot2();
+        const badgeClass = (status) => {
+          if (status === "behind" || status === "fail" || status === "invalid") return "lsb-badge is-err";
+          if (status === "equal") return "lsb-badge is-on";
+          return "lsb-badge";
+        };
+        const badgeText = (st) => {
+          if (!st || !st.status) return "";
+          return {
+            behind: "有更新",
+            equal: "已是最新",
+            ahead: "比商店新",
+            missing: "未安装",
+            invalid: "版本号无效",
+            fail: "查询失败"
+          }[st.status] || "";
+        };
+        const desc = (id, st) => {
+          const local = loc[id].local;
+          if (!st || !st.status) return local ? `本地 ${local}` : "";
+          if (st.status === "missing") return "";
+          if (st.status === "behind" || st.status === "ahead") return `本地 ${local} · 商店 ${st.store}`;
+          if (st.status === "equal") return `本地与商店同为 ${local}`;
+          if (st.status === "invalid") return [local, st.store].filter(Boolean).join(" · ");
+          if (st.status === "fail") return st.connect ? "氢需要允许 greasyfork.org 跨域" : "无法读取 Greasy Fork";
+          return "";
+        };
+        const install2 = (id, st) => {
+          const script = scripts[id];
+          const show = st && (st.status === "behind" || st.status === "missing");
+          if (!show) return "";
+          const href = st.status === "missing" ? script.installUrl : installHref(st.parsed, script.installUrl);
+          return `<a class="lsb-btn is-primary" data-install href="${esc(href)}" target="_blank" rel="noopener noreferrer">打开安装页</a>`;
+        };
+        const row = (id) => {
+          const st = states[id] || (loc[id].missing ? { status: "missing" } : null);
+          const local = loc[id].local;
+          const bt = badgeText(st);
+          const ver = local ? `<span class="lsb-badge">v${esc(local)}</span>` : "";
+          const bd = bt ? `<span class="${badgeClass(st.status)}">${esc(bt)}</span>` : "";
+          const d = desc(id, st);
+          return `<div class="lsb-row" data-script="${id}">
+          <div class="lsb-row-main">
+            <div class="lsb-row-name">${esc(scripts[id].label)} ${ver}${bd}</div>
+            ${d ? `<div class="lsb-row-desc">${esc(d)}</div>` : ""}
+          </div>${install2(id, st)}</div>`;
+        };
+        wrap.innerHTML = `<div class="lsb-actions" style="border:0;padding:0 0 8px;justify-content:flex-start"><button class="lsb-btn is-primary" type="button" data-check${busy ? " disabled" : ""}>${busy ? "查询中…" : "对照 Greasy Fork"}</button></div>` + row("hydrogen") + row("oxygen") + '<div class="lsb-row-desc">安装仍由油猴接管；两个都要装，先氢后氧。</div>';
+        const btn = wrap.querySelector("[data-check]");
+        if (btn && !busy) btn.onclick = () => run();
+      };
+      const loadOne = async (script) => {
+        try {
+          const json = await this.net.json(gfJsonUrl(script.gfId), { external: true });
+          const parsed = parseStoreScript(json);
+          if (!parsed) return { error: "read" };
+          return { parsed };
+        } catch (e) {
+          const msg = String(e && e.message || e);
+          return { error: /域名未放行|跨域请求被拒绝/.test(msg) ? "connect" : "read" };
+        }
+      };
+      const run = () => {
+        if (inflight) return inflight;
+        const my = ++gen;
+        inflight = (async () => {
+          paint({ oxygen: snapshot2().oxygen.missing ? { status: "missing" } : null }, { busy: true });
+          const loc = snapshot2();
+          const jobs = [loadOne(scripts.hydrogen)];
+          if (!loc.oxygen.missing) jobs.push(loadOne(scripts.oxygen));
+          const settled = await Promise.allSettled(jobs);
+          if (my !== gen || !wrap.isConnected) return;
+          const fromLoad = (res, local) => {
+            if (res.status !== "fulfilled") {
+              return { status: "fail", connect: false };
+            }
+            const v = res.value;
+            if (v.error === "connect") return { status: "fail", connect: true };
+            if (v.error) return { status: "fail", connect: false };
+            const status = classifyVersion(local, v.parsed.version);
+            return { status, store: v.parsed.version, parsed: v.parsed };
+          };
+          const hRes = settled[0];
+          const states = { hydrogen: fromLoad(hRes, loc.hydrogen.local) };
+          if (loc.oxygen.missing) states.oxygen = { status: "missing" };
+          else states.oxygen = fromLoad(settled[1], loc.oxygen.local);
+          if (states.hydrogen.status === "fail" || states.oxygen.status === "fail") {
+            this.log("core", "检查更新查询失败");
+          }
+          paint(states);
+        })().finally(() => {
+          if (inflight && my === gen) inflight = null;
+        });
+        return inflight;
+      };
+      paint({ oxygen: snapshot2().oxygen.missing ? { status: "missing" } : null });
     }
     _renderPluginList(host) {
       if (!this.plugins.size) {
