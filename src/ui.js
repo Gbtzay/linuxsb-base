@@ -17,19 +17,19 @@ const CSS = `
 .lsb-toast-title{font-weight:600;margin-bottom:2px}
 .lsb-launcher{position:fixed;right:16px;bottom:74px;z-index:99998;width:38px;height:38px;border-radius:50%;border:1px solid var(--line,#ddd);background:var(--panel,#fff);color:var(--brand,#5eaaa0);cursor:pointer;font-size:15px;font-weight:700;box-shadow:0 4px 12px var(--shadow-base,rgba(0,0,0,.15))}
 .lsb-launcher:hover{border-color:var(--brand,#5eaaa0)}
-.lsb-mask{position:fixed;inset:0;z-index:99998;background:var(--backdrop,rgba(0,0,0,.45))}
-.lsb-panel{position:fixed;z-index:99999;left:50%;top:50%;transform:translate(-50%,-50%);width:min(720px,94vw);max-height:82vh;display:flex;flex-direction:column;border:1px solid var(--line,#ddd);border-radius:10px;background:var(--panel,#fff);color:var(--text,#222);font-size:13px;overflow:hidden;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3))}
+.lsb-mask{position:fixed;inset:0;z-index:99998;background:var(--backdrop,rgba(0,0,0,.45));overscroll-behavior:contain}
+.lsb-panel{position:fixed;z-index:99999;left:50%;top:50%;transform:translate(-50%,-50%);width:min(720px,94vw);max-height:82vh;display:flex;flex-direction:column;border:1px solid var(--line,#ddd);border-radius:10px;background:var(--panel,#fff);color:var(--text,#222);font-size:13px;overflow:hidden;overscroll-behavior:contain;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3))}
 .lsb-panel-settings{height:min(640px,82vh)}
 .lsb-panel-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line-soft,#eee)}
 .lsb-panel-head strong{font-size:14px}
 .lsb-panel-head .lsb-ver{color:var(--text-muted,#888);font-size:11px}
 .lsb-panel-close{margin-left:auto;border:0;background:transparent;color:var(--text-muted,#888);font-size:18px;cursor:pointer;line-height:1}
 .lsb-panel-body{display:flex;min-height:0;flex:1}
-.lsb-tabs{flex:0 0 168px;border-right:1px solid var(--line-soft,#eee);overflow:auto;padding:6px}
+.lsb-tabs{flex:0 0 168px;border-right:1px solid var(--line-soft,#eee);overflow:auto;overscroll-behavior:contain;padding:6px}
 .lsb-tab{display:block;width:100%;text-align:left;padding:7px 9px;margin-bottom:2px;border:0;border-radius:6px;background:transparent;color:var(--text,#222);cursor:pointer;font-size:13px}
 .lsb-tab:hover{background:var(--bg,#f6f6f6)}
 .lsb-tab.is-active{background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600}
-.lsb-view{flex:1;min-width:0;overflow:auto;padding:12px 14px}
+.lsb-view{flex:1;min-width:0;overflow:auto;overscroll-behavior:contain;padding:12px 14px}
 .lsb-row{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--line-soft,#f0f0f0)}
 .lsb-row:last-child{border-bottom:0}
 .lsb-row-main{min-width:0;flex:1}
@@ -50,6 +50,20 @@ const CSS = `
 .lsb-op:hover{color:var(--brand,#5eaaa0);background:var(--brand-soft,#eef6f5)}
 .lsb-empty{color:var(--text-muted,#888);padding:14px 0}
 `
+
+function trapOverscroll(root) {
+  const onWheel = (e) => {
+    const dy = e.deltaY
+    const scroller = e.target?.closest?.('.lsb-view, .lsb-tabs')
+    if (scroller && root.contains(scroller)) {
+      const top = scroller.scrollTop
+      const max = scroller.scrollHeight - scroller.clientHeight
+      if ((dy < 0 && top > 0) || (dy > 0 && top < max - 0.5)) return
+    }
+    e.preventDefault()
+  }
+  root.addEventListener('wheel', onWheel, { passive: false })
+}
 
 export class UI {
   constructor({ title = 'LINUX.SB · 氢（RC）', version = '' } = {}) {
@@ -220,6 +234,8 @@ export class UI {
     document.addEventListener('keydown', onKey)
     this._panel = { mask, panel, onKey }
     document.body.append(mask, panel)
+    trapOverscroll(mask)
+    trapOverscroll(panel)
     this._renderTabs()
     this.showTab(tabId || this._tabs[0]?.id)
   }

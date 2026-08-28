@@ -1,10 +1,11 @@
 import { num, text, idFrom } from './util.js'
 
 /**
- * 站点适配层：把 bbs1org（linux.sb v8.6.x）的 HTML 结构收敛成结构化对象。
+ * 站点适配层：把 bbs1org（linux.sb v8.6.x / v8.7.5）的 HTML 结构收敛成结构化对象。
  *
  * 只有这一个文件知道选择器。站点改版时只改这里，依附插件不受影响。
- * 选择器依据 linux.sb 实测页面（/topic/:id、/、/user/:id）。
+ * 选择器依据 linux.sb 实测页面（/topic/:id、/、/user/:id）；v8.7.5 帖内楼层也是
+ * li.post-item.post-entry，列表选择器必须把它们排除。
  */
 
 export const ROUTES = {
@@ -24,7 +25,19 @@ export const ROUTES = {
   search: '/search',
   checkin: '/daily_checkin',
   leaderboard: (type = 'points') => `/leaderboard?type=${type}`,
-  invite: '/invite_code',
+  invite: '/invite_center',
+  inviteLegacy: '/invite_code',
+  gacha: '/gacha',
+  gachaMarket: '/gacha_market',
+  gachaProfile: '/gacha_profile',
+  gachaForge: '/gacha_forge_center',
+  gachaRecycle: '/gacha_recycle_center',
+  gachaRecipes: '/gacha_recipes',
+  wallet: '/community_wallet',
+  featured: '/topic_featured',
+  footprint: '/unread_topic_notice_footprint',
+  colorScheme: '/color_scheme',
+  keywordFilter: '/home_keyword_filter_settings',
   donate: (topicId) => `/donate${topicId ? `?topic_id=${topicId}` : ''}`,
   donateFeed: '/donate_feed',
   notify: (id) => `/notify/${id}`,
@@ -48,7 +61,7 @@ export const USER_TABS = ['topics', 'replies', 'notifications', 'points_rewards'
 export const SEL = {
   topicPosts: 'ul.topic-post-list > li.post-entry, ul.post-list > li.post-entry',
   topicUl: 'ul.topic-post-list, ul.post-list',
-  listItems: 'ul.post-list > li.post-item',
+  listItems: 'ul.post-list > li.post-item:not(.post-entry)',
   listUl: 'ul.post-list',
   postEntry: 'li.post-entry',
 }
@@ -78,10 +91,22 @@ export function detectPage(loc = location) {
     '/topic_edit': 'topic_edit',
     '/daily_checkin': 'checkin',
     '/leaderboard': 'leaderboard',
+    '/invite_center': 'invite',
     '/invite_code': 'invite',
     '/forum_list': 'forum_list',
     '/search': 'search',
     '/donate': 'donate',
+    '/gacha': 'gacha',
+    '/gacha_market': 'gacha_market',
+    '/gacha_profile': 'gacha_profile',
+    '/gacha_forge_center': 'gacha_forge',
+    '/gacha_recycle_center': 'gacha_recycle',
+    '/gacha_recipes': 'gacha_recipes',
+    '/community_wallet': 'wallet',
+    '/topic_featured': 'featured',
+    '/unread_topic_notice_footprint': 'footprint',
+    '/color_scheme': 'color_scheme',
+    '/home_keyword_filter_settings': 'keyword_filter',
   }
   if (known[path]) return { type: known[path] }
   if (/^\/notify\/\d+$/.test(path)) return { type: 'notify', id: num(path) }
@@ -179,9 +204,10 @@ export function readForums(doc = document) {
   return [...out.values()].sort((a, b) => a.id - b.id)
 }
 
-/** 列表页（首页 / 版块页 / 用户页）的一条条目 */
+/** 列表页（首页 / 版块页 / 用户页 / 精华 / 足迹）的一条条目 */
 export function parseListItem(li) {
-  const titleA = li.querySelector('a.post-title')
+  if (li.classList.contains('post-entry')) return null
+  const titleA = li.querySelector('a.post-title:not(.post-author)')
   if (!titleA) return null
   const authorA = li.querySelector('.post-avatar a[href^="/user/"]') || li.querySelector('.post-meta a[href^="/user/"]')
   const forumA = li.querySelector('.post-forum-meta a[href^="/forum/"], .post-meta a[href^="/forum/"]')
@@ -212,6 +238,18 @@ export function parseList(root = document) {
     .filter((x) => x && x.id)
 }
 
+function postLikeCount(li) {
+  const likeBtn = li.querySelector('[data-like-coin-action]')
+  if (likeBtn) return num(text(li.querySelector('.like-coin-count')))
+  const donate = li.querySelector('.donate-topic-reaction-count, [data-donate-topic-like-count]')
+  if (donate) {
+    const n = num(text(donate))
+    if (Number.isFinite(n)) return n
+    return num(donate.getAttribute('data-donate-topic-like-count'))
+  }
+  return null
+}
+
 /** 帖子页的一个楼层 */
 export function parsePost(li) {
   const idm = (li.id || '').match(/^post-(\d+)$/)
@@ -226,12 +264,13 @@ export function parsePost(li) {
       ? text(authorA) || authorA.querySelector('img')?.getAttribute('alt') || null
       : null,
     groups: [...li.querySelectorAll('.post-user-group')]
+      .filter((g) => !g.classList.contains('gacha-title-post-badge') && !g.classList.contains('user-uid-badge'))
       .map((g) => text(g))
       .filter((t) => t && !/^UID/.test(t)),
     ts: stamp ? num(stamp.getAttribute('data-performance-time')) : null,
     html: li.querySelector('.post-content')?.innerHTML ?? '',
     content: text(li.querySelector('.post-content')),
-    likes: likeBtn ? num(text(li.querySelector('.like-coin-count'))) : null,
+    likes: postLikeCount(li),
     liked: likeBtn ? likeBtn.getAttribute('data-like-coin-liked') === '1' : null,
     coined: likeBtn ? num(likeBtn.getAttribute('data-like-coin-coined')) : null,
     el: li,
@@ -284,9 +323,24 @@ export function parseUser(doc = document) {
   }
 }
 
+/** 用户页「通知」tab：li.notification-item；未读靠自身 unread 类。链接进主题，不是 /notify/:id。 */
+export function parseNotifications(root = document) {
+  return [...root.querySelectorAll('li.notification-item')].map((el) => {
+    const topicA = el.querySelector('a[href*="/topic/"]')
+    const href = topicA ? topicA.getAttribute('href') : ''
+    const content = el.querySelector('.notification-content')
+    return {
+      id: href ? idFrom(href, 'topic') : null,
+      title: content ? text(content) : text(el),
+      href,
+      unread: el.classList.contains('unread'),
+    }
+  })
+}
+
 /** 帖子页里的点赞/打赏元数据，供插件做批量操作 */
 export function parseLikeTargets(doc = document) {
-  return [...doc.querySelectorAll('[data-like-coin-action]')].map((btn) => ({
+  const coins = [...doc.querySelectorAll('[data-like-coin-action]')].map((btn) => ({
     type: btn.getAttribute('data-like-coin-type'),
     id: num(btn.getAttribute('data-like-coin-id')),
     tiers: (btn.getAttribute('data-like-coin-tiers') || '').split(',').filter(Boolean).map(num),
@@ -295,6 +349,22 @@ export function parseLikeTargets(doc = document) {
     count: num(text(btn.parentElement?.querySelector('.like-coin-count'))),
     el: btn,
   }))
+  if (coins.length) return coins
+  return [...doc.querySelectorAll('[data-donate-btn]')].map((btn) => {
+    const replyRaw = btn.getAttribute('data-donate-reply-id')
+    const topicRaw = btn.getAttribute('data-donate-topic-id')
+    const id = replyRaw != null && replyRaw !== '' ? num(replyRaw) : num(topicRaw)
+    const countEl = btn.querySelector('.donate-topic-reaction-count') || btn
+    return {
+      type: 'donate',
+      id,
+      tiers: [],
+      liked: null,
+      coined: null,
+      count: num(text(countEl)),
+      el: btn,
+    }
+  })
 }
 
 /**
@@ -314,6 +384,8 @@ export function snapshot(doc = document, loc = location, prev = null) {
   }
   if (page.type === 'topic') snap.topic = same && prev.topic ? prev.topic : parseTopic(doc)
   if (page.type === 'user') snap.user = same && prev.user ? prev.user : parseUser(doc)
-  if (page.type === 'home' || page.type === 'forum') snap.list = same && prev.list ? prev.list : parseList(doc)
+  if (page.type === 'home' || page.type === 'forum' || page.type === 'featured' || page.type === 'footprint') {
+    snap.list = same && prev.list ? prev.list : parseList(doc)
+  }
   return snap
 }

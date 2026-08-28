@@ -1,6 +1,6 @@
 {
   "name": "linuxsb-base",
-  "version": "0.1.22",
+  "version": "0.1.33",
   "private": true,
   "type": "module",
   "scripts": {

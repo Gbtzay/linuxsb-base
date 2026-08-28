@@ -14,9 +14,11 @@ const PLUG = (n) => readFileSync(new URL(`../plugins/${n}.user.js`, import.meta.
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
 
-const listItem = (id, title, ts, replies = 0) =>
+const listItem = (id, title, ts, replies = 0, { unread = false } = {}) =>
   '<li class="post-item"><div class="post-body"><div class="post-title-row">' +
-  `<a class="post-title" href="/topic/${id}">${title}</a></div>` +
+  `<a class="post-title" href="/topic/${id}">${title}</a>` +
+  (unread ? `<a class="unread-topic-notice" href="/topic/${id}">未读</a>` : '') +
+  '</div>' +
   `<div class="post-meta"><span data-performance-time="${ts}"></span><span>${replies}</span></div>` +
   '</div></li>'
 
@@ -473,6 +475,36 @@ test('置灰行被顶起来：高亮期间拉回不透明，不被 lsb-seen 压�
   assert.match(css, /lsb-live-bumped[\s\S]{0,180}box-shadow/, '高亮用左边线，不只改半透明背景')
 })
 
+test('老帖被顶起来：接上轮询里的原生未读点，高亮掉了点还在', async () => {
+  const OLD = listItem(4242, '已读老帖', 1700000000, 3)
+  const NEW = listItem(4242, '已读老帖', 1893457777, 7, { unread: true })
+  const base = homeHtml.replace('</ul>', OLD + '</ul>')
+  let serve = base
+  const { w, tick, until } = makeSite(base, '/', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true, highlightBumped: true },
+  })
+  installVirtualLayout(w)
+  feedStub(w, () => serve)
+  await loadBase(w, PLUG('live-feed'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+
+  const row = () =>
+    [...w.document.querySelectorAll('li.post-item')].find((li) => li.querySelector('a.post-title[href*="/topic/4242"]'))
+  assert.equal(row()?.querySelectorAll('a.unread-topic-notice').length, 0, '基线没有未读点')
+
+  serve = base.replace(OLD, NEW)
+  await dbg.pollOnce()
+  assert.equal(dbg.lastBumped(), 1)
+  assert.equal(row()?.querySelectorAll('a.unread-topic-notice').length, 1, '应把站点原生未读点接到现有行')
+  assert.equal(row()?.querySelector('a.unread-topic-notice')?.textContent.trim(), '未读')
+
+  await tick(2800)
+  assert.equal(row()?.classList.contains('lsb-live-bumped'), false, '左边线高亮可以结束')
+  assert.equal(row()?.querySelectorAll('a.unread-topic-notice').length, 1, '原生未读点不跟 2.6 秒高亮一起卸')
+})
+
 /* ═══════════ 帖子页翻页追补 ═══════════ */
 
 test('帖子页：新回复把帖子顶到新一页时，本轮立即追补而非等下个周期', async () => {
@@ -687,6 +719,27 @@ test('实时流（帖子）：站点已经插进楼中楼的回复，不再复�
   )
   assert.equal(host.nextElementSibling, native, '仍跟在被回复楼后面')
   assert.notEqual(ul.lastElementChild, native, '不得被追加到列表末尾（回复栏一侧）')
+})
+
+test('实时流（帖子）：quote-threads-child 不追加到回复栏下面', async () => {
+  let serve = topicHtml
+  const child =
+    '<li class="post-item post-entry quote-threads-child" id="post-777666" data-floor="301">' +
+    '<a class="post-title post-author" href="/user/9">嵌套</a>' +
+    '<div class="post-content"><p>楼中楼</p></div></li>'
+  const { w, until } = makeSite(topicHtml, '/topic/1', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: true, pauseWhileTyping: false },
+  })
+  feedStub(w, () => serve)
+  await loadBase(w, PLUG('live-feed'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+
+  serve = topicHtml.replace('</ul>', child + '</ul>')
+  await dbg.pollOnce()
+  assert.equal(w.document.getElementById('post-777666'), null, '嵌套回复不能丢到列表末尾')
+  assert.equal(dbg.pending(), 0, '也不要横幅催着加载楼中楼')
 })
 
 test('发现新帖时读取 toastOnNew：关闭自动插入则弹提示', async () => {

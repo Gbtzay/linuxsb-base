@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LSB·首页回位
 // @namespace    https://linux.sb/
-// @version      1.0.0
-// @description  首页点进帖子时记下位置；不管用什么方式回到首页，都滚回那条帖。需要 LINUX.SB 基座。
+// @version      1.0.1
+// @description  首页点进帖子时记下位置；回首页滚回那条帖，成功一次后丢掉记录。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -19,8 +19,8 @@
   const manifest = {
     id: 'home-return',
     name: '首页回位',
-    version: '1.0.0',
-    description: '回首页时滚到上次点进的那条帖',
+    version: '1.0.1',
+    description: '回首页时滚到上次点进的那条帖；回成功一次后刷新不再跳',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
@@ -67,6 +67,14 @@
         sessionStorage.setItem(KEY, JSON.stringify({ tid, offset, ts: Date.now() }))
       } catch {
         /* 隐私模式可能写不了 */
+      }
+    }
+
+    function clear() {
+      try {
+        sessionStorage.removeItem(KEY)
+      } catch {
+        /* ignore */
       }
     }
 
@@ -136,6 +144,7 @@
       }
       if (!el) return false
       applyScroll(el, rec.offset)
+      clear()
       return true
     }
 

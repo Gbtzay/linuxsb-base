@@ -148,23 +148,20 @@ test('首页回位：第一页没有时加载后续页再回位', async () => {
 })
 
 test('首页回位：氢壳软跳清滚动后仍能回位', async () => {
-  const { w, tick, until } = makeHome()
-  const { id } = firstList(w)
-  w.sessionStorage.setItem(KEY, JSON.stringify({ tid: id, offset: 90, ts: Date.now() }))
-  stubRect(w, id, 400)
-  const scrolled = captureScroll(w)
+  const probe = makeHome()
+  const { id } = firstList(probe.w)
   const forumHtml = homeHtml
     .replace(/<ul class="post-list">[\s\S]*?<\/ul>/, '<ul class="post-list"></ul>')
     .replace('<title>', '<title>技术交流 - ')
+  const { w, tick, until } = makeDom(forumHtml, 'https://linux.sb/forum/4')
+  w.sessionStorage.setItem(KEY, JSON.stringify({ tid: id, offset: 90, ts: Date.now() }))
+  stubRect(w, id, 400)
+  const scrolled = captureScroll(w)
   stubHtmlFetch(w, (url) => (/\/forum\/4/.test(String(url)) ? forumHtml : homeHtml))
   await loadBase(w, PLUG('home-return.user.js'), PLUG('skin.user.js'))
   await tick(50)
-  scrolled.length = 0
+  assert.ok(w.sessionStorage.getItem(KEY), '在版块页不应先把记录用掉')
 
-  const forumLink = w.document.querySelector('a[href="/forum/4"]')
-  assert.ok(forumLink, '夹具有技术交流入口')
-  forumLink.click()
-  await tick(80)
   const homeLink = w.document.querySelector('#lsb-shell-rail a[href="/"], a.lsb-shell-brand')
   assert.ok(homeLink, '左栏或站名可回首页')
   homeLink.click()
@@ -179,4 +176,27 @@ test('首页回位：用户页点帖不记首页位置', async () => {
   const a = w.document.querySelector('a.post-title[href*="/topic/"]')
   if (a) a.click()
   assert.equal(w.sessionStorage.getItem(KEY), null, '非首页不写记录')
+})
+
+test('首页回位：回成功一次后刷新不再跳回', async () => {
+  const probe = makeHome()
+  const { id } = firstList(probe.w)
+  const { w, tick } = makeHome()
+  w.sessionStorage.setItem(KEY, JSON.stringify({ tid: id, offset: 90, ts: Date.now() }))
+  stubRect(w, id, 400)
+  const scrolled = captureScroll(w)
+  await loadBase(w, PLUG('home-return.user.js'))
+  await tick(80)
+  assert.ok(
+    scrolled.some((y) => y === 310),
+    `第一次进首页应回位到 310，实际 ${JSON.stringify(scrolled)}`,
+  )
+  assert.equal(w.sessionStorage.getItem(KEY), null, '回位成功应丢掉记录，否则刷新还会跳')
+  scrolled.length = 0
+  const dbg = await w.LSB.bus.request('home-return:debug')
+  await dbg.restore()
+  assert.ok(
+    !scrolled.some((y) => y === 310),
+    `没有新记录时不应再滚，实际 ${JSON.stringify(scrolled)}`,
+  )
 })

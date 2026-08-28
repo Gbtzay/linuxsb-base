@@ -69,7 +69,7 @@ test('SEL 覆盖帖子楼层的两种 ul 类名', () => {
   assert.match(SEL.topicPosts, /topic-post-list/)
   assert.match(SEL.topicPosts, /post-list/)
   assert.match(SEL.topicUl, /topic-post-list/)
-  assert.equal(SEL.listItems, 'ul.post-list > li.post-item')
+  assert.equal(SEL.listItems, 'ul.post-list > li.post-item:not(.post-entry)')
 })
 
 test('软导航后 snapshot 与 CSRF 跟随当前文档，不再残留旧帖', async () => {

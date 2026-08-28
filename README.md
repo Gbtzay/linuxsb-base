@@ -1,6 +1,6 @@
 # linuxsb-base — LINUX.SB 脚本基座
 
-> 为 linux.sb（烧饼社区 / bbs1org v8.6.x）编写的油猴脚本**基座**。
+> 为 linux.sb（烧饼社区 / bbs1org v8.6.x–v8.7.5）编写的油猴脚本**基座**。
 > 它自己不做业务功能，而是给其它依附脚本提供四样东西：
 >
 > 1. **站点接口** —— 页面识别、DOM 解析、CSRF、登录身份、语义化动作（回复/点赞…）
@@ -105,14 +105,14 @@
 |---|---|---|
 | `resume-reading` | **断点续读**：记住每帖读到哪层，回来弹「接着看」，未读楼层标 NEW；面板含阅读历史与容量管理 | read/storage/ui/events |
 | `read-mark` | **已读置灰**：看过的帖子在列表中整行变灰；未读仍用站点自己的标记，不再另挂角标；无限滚动新增条目同样生效 | read/storage/ui/events |
-| `home-return` | **首页回位**：首页点进帖子时记下位置；后退、点站名或「全部主题」等回到首页时滚回那条；不在第一页则继续加载直到找到 | read/storage/ui/events |
+| `home-return` | **首页回位**：首页点进帖子时记下位置；后退、点站名或「全部主题」等回到首页时滚回那条；成功一次后丢掉记录，刷新不再跳；不在第一页则继续加载直到找到 | read/storage/ui/events |
 | `hover-profile` | **用户画像悬浮卡**：悬停用户链接显示等级/积分/最近主题；TTL 缓存 + 失败负缓存，绝不重复请求 | read/storage/ui/events |
 | `topic-preview` | **主楼预览**：列表标题旁「预览」按钮，点开蒙层浮窗用同源 iframe 嵌原帖并裁掉顶栏/侧栏/页脚；点标题仍整页进帖 | read/ui/events |
-| `unread-sentinel` | **未读哨兵**：低频巡检首页新动态；跨标签心跳选主（只有一个标签发请求）；标题角标 + 桌面通知 + 消息箱面板 | read/storage/ui/events |
+| `unread-sentinel` | **未读哨兵**：低频巡检首页新动态；跨标签心跳选主（只有一个标签发请求）；标题角标 + 桌面通知 + 消息箱；左栏「我的通知」红点抄个人卡，不打开通知页 | read/storage/ui/events |
 | `live-feed` | **实时流**：免刷新获取新帖/新回复。同流序数判定（发布流看 id、回复流看时间戳）杜绝串台误报；**视口锚点补偿**让任意滚动位置都能无感插入；**写回复期间只暂存不打扰**，失焦/切回前台自动补上；老帖被顶起来时原地高亮而非重复插入（置灰行高亮期间拉回不透明并加左边线）；站点 AJAX 已插入的楼层不再复制到列表末尾（自己刚发出的回复也不会冲掉暂存的别人新楼）；帖子页回复顶到新页时当轮追补 | read/storage/ui/events |
 | `checkin-calendar` | **签到日历**：自动探测每日状态、月视图 + 连击统计 + 一键签今天（原生无补签，历史自安装日起） | read/storage/ui/events/**write** |
 | `points-ledger` | **积分趋势**：余额快照序列 → SVG 折线 + 每日增减清单；对外 RPC `points-ledger:series` | read/storage/ui/events |
-| `title-quotes` | **称号行情**：采集称号交易挂单最低/最高与中位数（跟交易页分页把挂单收全）；全场四锚点 + 各称号趋势；氧面板与 `/gacha_market` 共用 | read/storage/ui/events |
+| `title-quotes` | **称号行情**：采集挂单高低与中位；全场折线 + 各称号 K/折线；交易页折叠与全站浮层可切分析大盘；图可拖高、悬停详情竖排；氢壳开着走左栏，关壳才留右下「行情」钮；浮层打开时选主最多 10 秒一轮；氧面板为间隔设置 | read/storage/ui/events |
 | `forum-watch` | **机会监控**：监听指定版块新帖标题命中关键词即提醒；复用哨兵选主机制；「机会箱」面板 | read/storage/ui/events |
 | `local-bridge` | **本地联动**（独立插件，本版氧不收录）：对接本机 workbench(7788)——浏览预热缓存、主楼一键触发 /api/analyze、健康监视与服务端摘要面板；RPC 供其它插件复用 | read/storage/ui/events/**net** |
 | `data-migration` | **配置迁移**：全库数据导出/导入（JSON 文件/剪贴板），覆盖或合并模式；需要基座 ≥0.1.1 的 admin 权限 | read/storage/ui/events/**admin** |
@@ -141,7 +141,7 @@ AI 总结注意：首次请求新域名时 Tampermonkey 会弹跨域确认；API
 ### 解析器（纯函数，传 Document 即可用）
 
 `api.parse.topic(doc)` / `parse.list(doc)` / `parse.post(li)` / `parse.user(doc)` /
-`parse.likeTargets(doc)` / `parse.detectPage(url)` — 输出结构化对象（id/标题/作者/时间戳/楼层数组…）。
+`parse.notifications(doc)` / `parse.likeTargets(doc)` / `parse.detectPage(url)` — 输出结构化对象（id/标题/作者/时间戳/楼层数组…）。
 
 ### 网络与站点动作
 
@@ -235,13 +235,13 @@ POST 自动重发会造成重复回复、重复签到这类无法撤销的副作
 
 | 事实 | 值 |
 |---|---|
-| 程序 | bbs1org v8.6.5，PHP 服务端渲染，无 JSON API（`/index.php?a=api` 404） |
-| 路由 | `/topic/:id?p=` `/forum/:id?sort=&p=` `/user/:id?tab=` `/index.php?sort=` |
+| 程序 | bbs1org v8.6.5–v8.7.5，PHP 服务端渲染，无 JSON API（`/index.php?a=api` 404） |
+| 路由 | `/topic/:id?p=` `/forum/:id?sort=&p=` `/user/:id?tab=` `/index.php?sort=` `/topic_featured` `/invite_center` `/gacha` `/gacha_market` `/community_wallet` |
 | 写端点 | POST `/reply_edit` `/topic_favorite` `/lsb_like_coin` `/search` `/nb_editor_preview` … |
 | CSRF | 每个表单的 `input[name="_csrf"]`（64 位 hex），Cookie 名 `bbs_csrf` |
 | 登录态 | Cookie `bbs_auth`；页面内以抽屉「我的主页」链接最可靠 |
-| 时间戳 | `span[data-performance-time]`（Unix 秒） |
-| 楼层 | `li.post-entry#post-{replyId}` + `data-floor` |
+| 时间戳 | `span[data-performance-time]`（Unix 秒）；v8.7.5 帖内常只剩 `.post-time` 相对文案 |
+| 楼层 | `li.post-entry#post-{id}`；主楼可能没有 `data-floor`，回复仍带 |
 | 无限滚动 | 列表/帖子页原生无限加载。**插件禁止依赖启动快照的条数**：增量走 `dom:list-added` / `topic:posts-added`，URL 变化走 `route:changed`（基座轮询 + popstate 双保险，`api.page` 自动保持新鲜） |
 
 **推断项（未经真实写操作验证，使用前请自行确认）**：
@@ -254,7 +254,7 @@ POST 自动重发会造成重复回复、重复签到这类无法撤销的副作
 
 ```bash
 npm i            # jsdom + esbuild
-npm test         # 282 用例 ≈ 31s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
+npm test         # 291 用例 ≈ 31s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
 npm run build    # src/*.js → dist/linuxsb-base.user.js；plugins/* → dist/linuxsb-suite.user.js
 ```
 

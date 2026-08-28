@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LSB·界面精修
 // @namespace    https://linux.sb/
-// @version      1.1.37
-// @description  氢壳（左栏+顶栏+帖内时间轴）与排版层：正文行高、列表密度、代码块、OP 高亮、限宽阅读。只动结构与排版，不碰配色。需要 LINUX.SB 基座。
+// @version      1.1.43
+// @description  氢壳（左栏+顶栏+帖内时间轴）与排版层：正文行高、列表密度、代码块、楼层分隔、限宽阅读。只动结构与排版，不碰配色。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.37',
+    version: '1.1.43',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -31,7 +31,7 @@
         options: ['紧凑', '舒适'],
       },
       codeblock: { type: 'switch', label: '代码块样式强化', default: true },
-      floors: { type: 'switch', label: '楼层优化（分隔线 + OP 高亮）', default: true },
+      floors: { type: 'switch', label: '楼层优化（分隔线）', default: true },
       measure: { type: 'switch', label: '宽屏限宽阅读（≥1280px 生效）', default: false },
     },
   }
@@ -43,6 +43,7 @@
     const extrasHomes = new Map()
     const asideHomes = new Map()
     let themeToggleHome = null
+    let colorSchemeHome = null
     let onlineObs = null
     let extrasObs = null
     let timelineRaf = 0
@@ -87,8 +88,8 @@
         }
         html.lsb-skin-shell-topic{--lsb-shell-main-inset:var(--lsb-shell-gutter)}
         html.lsb-skin-shell-user{--lsb-shell-main-inset:calc(var(--lsb-shell-gutter) + 12px)}
-        html[data-themes-color-mode="dark"]{color-scheme:dark}
-        html[data-themes-color-mode="light"]{color-scheme:light}
+        html[data-themes-color-mode="dark"],html[data-dark-mode-theme="dark"]{color-scheme:dark}
+        html[data-themes-color-mode="light"],html[data-dark-mode-theme="light"]{color-scheme:light}
         #lsb-shell{
           display:none;position:fixed;inset:0;z-index:7999;pointer-events:none;
         }
@@ -145,6 +146,21 @@
           border-radius:var(--lsb-radius);overflow:hidden;
           background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
         }
+        .lsb-shell-search-host .search-page-link{
+          display:flex;align-items:center;margin:0;padding:0;width:100%;max-width:none;height:30px;
+          grid-area:auto;grid-column:auto;grid-row:auto;justify-self:stretch;
+          border:1px solid var(--line,#ddd);border-radius:var(--lsb-radius);
+          background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
+          color:var(--text-subtle,#888);text-decoration:none;overflow:hidden;
+        }
+        .lsb-shell-search-host .search-page-fake-input{
+          flex:1;min-width:0;padding:0 10px;font-size:13px;
+          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+        }
+        .lsb-shell-search-host .search-page-fake-icon{
+          display:inline-flex;align-items:center;justify-content:center;
+          flex:0 0 30px;width:30px;height:100%;
+        }
         .lsb-shell-search-host select{
           border:0;border-radius:var(--lsb-radius-sm);background:transparent;
           color:var(--text,#222);font-size:12px;height:26px;
@@ -169,12 +185,20 @@
           margin-left:16px;font-size:13px;font-weight:600;letter-spacing:-.01em;
           color:var(--text,#222);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:22vw;
         }
-        .lsb-shell-theme{margin-left:8px;display:flex;align-items:center}
+        .lsb-shell-theme{margin-left:8px;display:flex;align-items:center;gap:8px;overflow:visible;position:relative}
         .lsb-shell-theme [data-themes-mode-toggle]{
           border:0;background:transparent;color:var(--text,#222);cursor:pointer;
           width:32px;height:32px;padding:4px;border-radius:var(--lsb-radius-sm);
         }
         .lsb-shell-theme [data-themes-mode-toggle] svg{display:block;width:18px;height:18px}
+        .lsb-shell-theme .dark-mode-control{position:relative;flex:0 0 auto;grid-area:auto;justify-self:auto}
+        .lsb-shell-theme .dark-mode-menu{z-index:8003}
+        .lsb-shell-theme .color-scheme-top-link{
+          display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;
+          grid-area:auto;justify-self:auto;flex:0 0 30px;
+          color:var(--text-muted,#888);text-decoration:none;
+        }
+        .lsb-shell-theme .color-scheme-top-link svg{width:17px;height:17px;display:block}
         #lsb-shell-aside{
           display:none;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
           width:var(--lsb-shell-aside);z-index:7999;overflow:auto;padding:12px 10px 16px;
@@ -245,7 +269,7 @@
         html.lsb-skin-shell-on li.post-item .post-avatar img{
           width:32px!important;height:32px!important;border-radius:50%;
         }
-        html.lsb-skin-shell-on li.post-item .meta-icon{display:none}
+        html.lsb-skin-shell-on li.post-item:not(.post-entry) .meta-icon{display:none}
         html.lsb-skin-shell-on main.wrap{
           max-width:none!important;margin-left:0!important;margin-right:0!important;width:auto!important;
           padding-left:var(--lsb-shell-gutter)!important;
@@ -373,7 +397,6 @@
       if (cfg.floors) {
         parts.push(`
           html.lsb-skin-floors-on li.post-entry{border-bottom:1px solid var(--line-soft,#eee)}
-          html.lsb-skin-floors-on li.post-entry[data-floor='1']{border-left:3px solid var(--brand,#5eaaa0);border-radius:4px}
         `)
       }
 
@@ -463,16 +486,21 @@
         { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
         { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
         { plugin: 'points-ledger', panel: 'points-ledger', label: '积分趋势' },
-        { plugin: 'title-quotes', panel: 'title-quotes', label: '称号行情' },
+        { plugin: 'title-quotes', rpc: 'title-quotes:open', label: '称号行情' },
         { plugin: 'annual-report', panel: 'annual-report', label: '年度报告' },
       ]
         .filter((t) => active.has(t.plugin))
-        .map(({ panel, label }) => ({ panel, label }))
+        .map(({ panel, rpc, label }) => (rpc ? { rpc, label } : { panel, label }))
     }
 
     function locationText() {
       const p = api.page || {}
-      if (p.type === 'home') return '全部主题'
+      if (p.type === 'home') {
+        if (p.sort === 'lucky') return '抽奖'
+        if (p.sort === 'card') return '发卡'
+        if (p.sort === 'comment') return '新评论'
+        return '全部主题'
+      }
       if (p.type === 'forum') {
         const f = (api.forums || []).find((x) => x.id === p.id)
         return f?.name || '版块'
@@ -487,6 +515,13 @@
         return (document.querySelector('h1.post-content-title')?.textContent || '').trim() || '帖子'
       }
       if (p.type === 'user') return '用户'
+      if (p.type === 'featured') return '精华'
+      if (p.type === 'footprint') return '足迹'
+      if (p.type === 'gacha') return '称号抽取'
+      if (p.type === 'gacha_market') return '称号交易'
+      if (p.type === 'gacha_profile') return '我的称号'
+      if (p.type === 'wallet') return '我的烧饼'
+      if (p.type === 'invite') return '邀请中心'
       return 'LINUX SB'
     }
 
@@ -513,29 +548,21 @@
 
     function adoptSearch(host) {
       if (!(host instanceof Element)) return
-      const existing = host.querySelector('form')
-      if (existing) return
-      const form =
-        document.querySelector('body > .top .search-form') || document.querySelector('.search-form')
-      if (!(form instanceof HTMLFormElement) || host.contains(form)) return
-      searchHome = { parent: form.parentNode, next: form.nextSibling }
-      form.classList.add('lsb-shell-search')
-      host.append(form)
+      if (host.querySelector('form, .search-page-link')) return
+      const el =
+        document.querySelector('body > .top .search-form') ||
+        document.querySelector('body > .top .search-page-link') ||
+        document.querySelector('.search-form') ||
+        document.querySelector('a.search-page-link')
+      if (!(el instanceof Element) || host.contains(el)) return
+      searchHome = { parent: el.parentNode, next: el.nextSibling }
+      el.classList.add('lsb-shell-search')
+      host.append(el)
     }
 
     function restoreSearch() {
-      const form = document.querySelector('form.lsb-shell-search')
-      if (!form || !searchHome?.parent?.isConnected) {
-        form?.classList.remove('lsb-shell-search')
-        searchHome = null
-        return
-      }
-      if (searchHome.next?.parentNode === searchHome.parent) {
-        searchHome.parent.insertBefore(form, searchHome.next)
-      } else {
-        searchHome.parent.append(form)
-      }
-      form.classList.remove('lsb-shell-search')
+      const el = document.querySelector('.lsb-shell-search')
+      restoreNode(el, searchHome, 'lsb-shell-search')
       searchHome = null
     }
 
@@ -716,17 +743,34 @@
 
     function adoptThemeToggle(host) {
       if (!(host instanceof Element)) return
-      const btn = document.querySelector('[data-themes-mode-toggle]')
-      if (!btn || host.contains(btn)) return
-      if (!themeToggleHome) themeToggleHome = { parent: btn.parentNode, next: btn.nextSibling }
-      btn.classList.add('lsb-shell-theme-toggle')
-      host.append(btn)
+      if (!host.querySelector('.color-scheme-top-link')) {
+        const scheme =
+          document.querySelector('body > .top a.color-scheme-top-link') ||
+          document.querySelector('a.color-scheme-top-link')
+        if (scheme && !host.contains(scheme)) {
+          if (!colorSchemeHome) colorSchemeHome = { parent: scheme.parentNode, next: scheme.nextSibling }
+          scheme.classList.add('lsb-shell-theme-scheme')
+          host.append(scheme)
+        }
+      }
+      if (host.querySelector('.dark-mode-control, [data-themes-mode-toggle]')) return
+      const widget =
+        document.querySelector('body > .top .dark-mode-control') ||
+        document.querySelector('.dark-mode-control') ||
+        document.querySelector('[data-themes-mode-toggle]')
+      if (!widget || host.contains(widget)) return
+      if (!themeToggleHome) themeToggleHome = { parent: widget.parentNode, next: widget.nextSibling }
+      widget.classList.add('lsb-shell-theme-toggle')
+      host.append(widget)
     }
 
     function restoreThemeToggle() {
-      const btn = document.querySelector('[data-themes-mode-toggle]')
-      restoreNode(btn, themeToggleHome, 'lsb-shell-theme-toggle')
+      const widget = document.querySelector('.lsb-shell-theme-toggle')
+      restoreNode(widget, themeToggleHome, 'lsb-shell-theme-toggle')
       themeToggleHome = null
+      const scheme = document.querySelector('.lsb-shell-theme-scheme')
+      restoreNode(scheme, colorSchemeHome, 'lsb-shell-theme-scheme')
+      colorSchemeHome = null
     }
 
     function nativeCards() {
@@ -788,7 +832,7 @@
       let changed = false
       if (quick) {
         const node = quick.cloneNode(true)
-        node.querySelectorAll('[data-themes-mode-toggle]').forEach((n) => n.remove())
+        node.querySelectorAll('[data-themes-mode-toggle], .dark-mode-control').forEach((n) => n.remove())
         keep.quick = node.outerHTML
         changed = true
       }
@@ -886,6 +930,9 @@
     function renderLinks(links) {
       return links
         .map((link) => {
+          if (link.rpc) {
+            return `<button type="button" class="lsb-shell-link" data-lsb-rpc="${esc(link.rpc)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
+          }
           if (link.panel) {
             return `<button type="button" class="lsb-shell-link" data-lsb-panel="${esc(link.panel)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
           }
@@ -1012,7 +1059,7 @@
       timeline.style.setProperty('--lsb-timeline-progress', `${progress}%`)
       timeline.querySelector('[data-timeline-current]').textContent =
         Number.isFinite(floor) && floor > 1 ? `#${floor}` : '主帖'
-      const time = post?.querySelector('time, span[data-performance-time]')
+      const time = post?.querySelector('time, span[data-performance-time], .post-time')
       timeline.querySelector('[data-timeline-date]').textContent = (time?.textContent || '').trim().slice(0, 24)
       timeline.querySelector('[data-timeline-total]').textContent = `${Math.max(0, posts.length - 1)} 条回复`
       const track = timeline.querySelector('.lsb-shell-track')
@@ -1075,6 +1122,12 @@
         <aside id="lsb-shell-aside" aria-label="站点信息"></aside>`
       el.querySelector('[data-lsb-shell-settings]').addEventListener('click', () => api.ui.openPanel('skin'))
       el.querySelector('#lsb-shell-rail').addEventListener('click', (e) => {
+        const rpcBtn = e.target.closest('[data-lsb-rpc]')
+        if (rpcBtn) {
+          e.preventDefault()
+          api.request(rpcBtn.getAttribute('data-lsb-rpc'))
+          return
+        }
         const btn = e.target.closest('[data-lsb-panel]')
         if (!btn) return
         e.preventDefault()
@@ -1322,6 +1375,8 @@
         path === '/'
         || path === '/index.php'
         || path === '/latest'
+        || path === '/topic_featured'
+        || path === '/unread_topic_notice_footprint'
         || /^\/forum\/\d+/.test(path)
         || /^\/category\/\d+/.test(path)
       )
@@ -1634,10 +1689,14 @@
     api.on('plugin:activated', scheduleRefresh)
     api.on('plugin:disabled', scheduleRefresh)
     api.on('topic:posts-added', scheduleTimeline)
-    api.dom.each('[data-themes-mode-toggle]', () => {
-      if (!cfg.shell) return
-      adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
-    })
+    api.dom.each(
+      '.dark-mode-control, [data-themes-mode-toggle], a.color-scheme-top-link, a.search-page-link, form.search-form',
+      () => {
+        if (!cfg.shell) return
+        adoptSearch(document.querySelector('.lsb-shell-search-host'))
+        adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
+      },
+    )
 
     api.onDispose(() => {
       unregMenu()
