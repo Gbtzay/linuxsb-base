@@ -4,7 +4,7 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.96',
+    version: '1.0.105',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -33,27 +33,34 @@
             .reduce((s, e) => s + (e.n || 1), 0)
           return Promise.resolve(n + ' 条')
         }],
-        ['📖 阅读记录', () => api.request('resume-reading:debug').then((d) => Object.keys(d.all()).length + ' 帖')],
+        ['📖 阅读记录', () => api.request('resume-reading:debug').then((d) => Object.keys(d.all()).length + ' 帖'), 'resume-reading'],
         ['✅ 今日签到', () =>
           api.request('checkin-calendar:debug').then((d) => {
             const s = d.recs()[today()]?.s
             return s === 'ok' ? '已签 · 连击 ' + d.streak() : d.streak() + ' 天连击待续'
-          })],
+          }), 'checkin-calendar'],
         ['📈 积分快照', () =>
           api.request('points-ledger:series', { days: 7 }).then((s) =>
             s.length ? '最新 ' + s[s.length - 1].p + ' 分 / ' + s.length + ' 点' : '暂无',
-          )],
-        ['🔔 消息箱', () => api.request('unread-sentinel:debug').then((d) => d.inbox().length + ' 条动态')],
-        ['🎯 机会命中', () => api.request('forum-watch:debug').then((d) => d.hits().length + ' 条')],
+          ), 'points-ledger'],
+        ['🔔 消息箱', () => api.request('unread-sentinel:debug').then((d) => d.inbox().length + ' 条动态'), 'unread-sentinel'],
+        ['🎯 机会命中', () => api.request('forum-watch:debug').then((d) => d.hits().length + ' 条'), 'forum-watch'],
+        ['卡顿记录', () =>
+          api.request('perf-probe:debug').then((d) => {
+            const s = d.slowest()
+            return s ? `最慢 ${s.ms}ms ${s.name}` : '未开记录'
+          }).catch(() => '未开记录'), 'perf-probe'],
       ]
       return Promise.all(
-        jobs.map(async ([label, fn]) => {
-          try {
-            return { label, value: await fn() }
-          } catch {
-            return { label, value: '—' } // 模块被停用或尚无数据
-          }
-        }),
+        jobs
+          .filter((job) => !job[2] || MEMBERS.includes(job[2]))
+          .map(async ([label, fn]) => {
+            try {
+              return { label, value: await fn() }
+            } catch {
+              return { label, value: '—' } // 模块被停用或尚无数据
+            }
+          }),
       )
     }
 

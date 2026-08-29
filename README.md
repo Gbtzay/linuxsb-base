@@ -51,8 +51,10 @@
 
 ### 方式 A：一键全家桶（推荐）
 
-安装 `dist/linuxsb-base.user.js`（氢 · 基座，RC）+ `dist/linuxsb-suite.user.js`（氧 · 重型套件，RC，内含
-18 个模块）。当前冻新功能，只修阻断。套件额外提供「套件总览」仪表盘：模块状态卡片、快捷启停、跨模块关键指标聚合。每个模块仍是独立注册的插件——可单独停用、各自配置页保留。
+安装 `dist/linuxsb-base.user.js`（氢 · 基座）+ `dist/linuxsb-suite.user.js`（氧 · 重型套件，内含
+19 个模块）。套件额外提供「套件总览」仪表盘：模块状态卡片、快捷启停、跨模块关键指标聚合。每个模块仍是独立注册的插件——可单独停用、各自配置页保留。
+
+只要一份脚本、精简功能：装 LINUX.SB（LTS）https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts 。与氢+氧二选一；请先卸掉氢和氧。LTS 冻新功能，只修站点断裂。
 
 
 ### 方式 B：按需单装
@@ -110,6 +112,7 @@
 | `topic-preview` | **主楼预览**：列表标题旁「预览」按钮，点开蒙层浮窗用同源 iframe 嵌原帖并裁掉顶栏/侧栏/页脚；点标题仍整页进帖 | read/ui/events |
 | `unread-sentinel` | **未读哨兵**：低频巡检首页新动态；跨标签心跳选主（只有一个标签发请求）；标题角标 + 桌面通知 + 消息箱；左栏「我的通知」红点抄个人卡，不打开通知页 | read/storage/ui/events |
 | `live-feed` | **实时流**：免刷新获取新帖/新回复。同流序数判定（发布流看 id、回复流看时间戳）杜绝串台误报；**视口锚点补偿**让任意滚动位置都能无感插入；**写回复期间只暂存不打扰**，失焦/切回前台自动补上；老帖被顶起来时原地高亮而非重复插入（置灰行高亮期间拉回不透明并加左边线）；站点 AJAX 已插入的楼层不再复制到列表末尾（自己刚发出的回复也不会冲掉暂存的别人新楼）；帖子页回复顶到新页时当轮追补 | read/storage/ui/events |
+| `perf-probe` | **性能探针**：本机记录氢壳软跳各段、实时流巡检、时间轴慢帧耗时；默认关；面板可复制 JSON | ui/storage/events |
 | `checkin-calendar` | **签到日历**：自动探测每日状态、月视图 + 连击统计 + 一键签今天（原生无补签，历史自安装日起） | read/storage/ui/events/**write** |
 | `points-ledger` | **积分趋势**：余额快照序列 → SVG 折线 + 每日增减清单；对外 RPC `points-ledger:series` | read/storage/ui/events |
 | `title-quotes` | **称号行情**：采集挂单高低与中位；全场折线 + 各称号 K/折线；交易页折叠与全站浮层可切分析大盘；图可拖高、悬停详情竖排；氢壳开着走左栏，关壳才留右下「行情」钮；浮层打开时选主最多 10 秒一轮；氧面板为间隔设置 | read/storage/ui/events |
@@ -254,8 +257,8 @@ POST 自动重发会造成重复回复、重复签到这类无法撤销的副作
 
 ```bash
 npm i            # jsdom + esbuild
-npm test         # 291 用例 ≈ 31s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
-npm run build    # src/*.js → dist/linuxsb-base.user.js；plugins/* → dist/linuxsb-suite.user.js
+npm test         # 408 用例 ≈ 36s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
+npm run build    # src/*.js → dist/linuxsb-base.user.js；plugins/* → dist/linuxsb-suite.user.js；精简集 → dist/linuxsb-lts.user.js
 ```
 
 构建期强制校验（任一不过直接打包失败）：ORDER 与 `plugins/` 双向一致 ·

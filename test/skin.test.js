@@ -19,7 +19,21 @@ function makeDom(html, url, preload = {}) {
   w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
   for (const [k, v] of Object.entries(preload)) w.localStorage.setItem(k, JSON.stringify(v))
   const tick = (ms) => new Promise((r) => setTimeout(r, ms))
-  return { w, tick }
+  async function until(fn, ms = 2500, step = 20) {
+    const end = Date.now() + ms
+    for (;;) {
+      let ok = false
+      try {
+        ok = fn()
+      } catch {
+        /* keep polling */
+      }
+      if (ok) return true
+      if (Date.now() > end) return false
+      await tick(step)
+    }
+  }
+  return { w, tick, until }
 }
 
 function makeSite(preload = {}) {
@@ -211,6 +225,35 @@ test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块，无时间轴',
     '左栏不可滚，工具再多时再考虑要不要开滚动',
   )
   assert.doesNotMatch(railCss, /\.lsb-shell-rail-scroll\{[^}]*overflow:auto/)
+})
+
+test('氢壳：个人卡晚于壳出现时仍迁入左栏（LTS document-start 首屏竞态）', async () => {
+  const { w, tick, until } = makeHome()
+  const native = w.document.querySelector('aside.sidebar .sidebar-card.user-card')
+  assert.ok(native, '夹具要有原生个人卡')
+  const html = native.outerHTML
+  native.remove()
+  await loadBase(w, PLUG('skin.user.js'))
+  await tick(80)
+  assert.equal(
+    w.document.querySelector('#lsb-shell [data-lsb-shell-me] .sidebar-card.user-card'),
+    null,
+    '卡还没进 DOM 时左栏应空，50ms 刷新也救不了',
+  )
+  const side = [...w.document.querySelectorAll('aside.sidebar')].find(
+    (el) => el.id !== 'mobile-menu-drawer' && !el.classList.contains('mobile-menu-drawer'),
+  )
+  assert.ok(side, '原生侧栏还在，只是被壳藏着')
+  side.insertAdjacentHTML('afterbegin', html)
+  assert.ok(
+    await until(() => w.document.querySelector('#lsb-shell [data-lsb-shell-me] .sidebar-card.user-card'), 1500),
+    '个人卡晚出现后应迁入左栏，不能留在被藏掉的右栏',
+  )
+  assert.equal(
+    w.document.querySelectorAll('.sidebar-card.user-card').length,
+    1,
+    '晚出现的卡是迁入不是克隆',
+  )
 })
 
 test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 称号行情 / 年度报告', async () => {
@@ -970,6 +1013,76 @@ function stubHtmlFetch(w, htmlFor) {
   return calls
 }
 
+function homeGets(calls) {
+  return calls.filter((u) => {
+    try {
+      const x = new URL(String(u), 'https://linux.sb')
+      const path = x.pathname.replace(/\/{2,}/g, '/') || '/'
+      if (path !== '/' && path !== '/index.php') return false
+      return !x.searchParams.get('p')
+    } catch {
+      return false
+    }
+  })
+}
+
+function stubReload(w) {
+  let n = 0
+  const loc = w.location
+  const implSym = Object.getOwnPropertySymbols(loc).find((s) => {
+    try {
+      return loc[s] && typeof loc[s].reload === 'function'
+    } catch {
+      return false
+    }
+  })
+  if (implSym) {
+    loc[implSym].reload = () => {
+      n += 1
+    }
+    return () => n
+  }
+  Object.defineProperty(w.Location.prototype, 'reload', {
+    configurable: true,
+    writable: true,
+    value: () => {
+      n += 1
+    },
+  })
+  return () => n
+}
+
+function holdLongTimers(w) {
+  const nativeSet = w.setTimeout.bind(w)
+  const nativeClear = w.clearTimeout.bind(w)
+  const held = new Map()
+  let seq = 900000
+  w.setTimeout = (fn, ms, ...args) => {
+    const delay = Number(ms) || 0
+    if (delay >= 25000) {
+      const id = ++seq
+      held.set(id, { fn, args })
+      return id
+    }
+    return nativeSet(fn, ms, ...args)
+  }
+  w.clearTimeout = (id) => {
+    if (held.has(id)) {
+      held.delete(id)
+      return
+    }
+    return nativeClear(id)
+  }
+  return {
+    async flush() {
+      const jobs = [...held.values()]
+      held.clear()
+      for (const { fn, args } of jobs) fn(...args)
+      await new Promise((r) => nativeSet(r, 0))
+    },
+  }
+}
+
 test('壳内跳转：点帖子不软跳，讨论串留给站点脚本整页挂载', async () => {
   const { w, tick } = makeHome()
   const calls = stubHtmlFetch(w, topicHtml)
@@ -1295,4 +1408,188 @@ test('壳内跳转：精华页走软跳', async () => {
   await tick(80)
   assert.ok(calls.some((u) => /\/topic_featured/.test(u)), '精华拦点击去拉 HTML')
   assert.equal(w.location.pathname, '/topic_featured')
+})
+
+test('壳内跳转：软跳后超过 50ms 仍是同一颗壳，不因 route:changed 再拆', async () => {
+  const { w, tick } = makeHome()
+  stubHtmlFetch(w, (url) => (/\/forum\//.test(String(url)) ? homeHtml : homeHtml))
+  await loadBase(w, PLUG('skin.user.js'))
+  const shellNode = w.document.getElementById('lsb-shell')
+  const me = w.document.querySelector('[data-lsb-shell-me] .sidebar-card.user-card')
+  const link = w.document.createElement('a')
+  link.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(link)
+  link.click()
+  await tick(120)
+  assert.equal(w.location.pathname, '/forum/4')
+  assert.equal(w.document.getElementById('lsb-shell'), shellNode)
+  assert.equal(w.document.querySelector('[data-lsb-shell-me] .sidebar-card.user-card'), me)
+})
+
+test('壳内跳转：皮肤+实时流时版块 URL 只 GET 一次', async () => {
+  const { w, tick, until } = makeHome({
+    'lsb_base:live-feed:__config': { jitterMs: 0, pollSec: 30, autoInsert: false },
+  })
+  const calls = stubHtmlFetch(w, (url) => {
+    const href = String(url)
+    if (/\/forum\/4/.test(href)) return homeHtml
+    return homeHtml
+  })
+  await loadBase(w, PLUG('skin.user.js'), PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await tick(80)
+  const before = calls.filter((u) => /\/forum\/4/.test(u)).length
+  const link = w.document.createElement('a')
+  link.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(link)
+  link.click()
+  await tick(120)
+  assert.equal(w.location.pathname, '/forum/4')
+  const forumGets = calls.filter((u) => /\/forum\/4/.test(u)).length
+  assert.equal(forumGets, before + 1, `软跳后实时流不得再拉版块页，实际 ${forumGets} before=${before} ${JSON.stringify(calls)}`)
+})
+
+function spanNames(w) {
+  return w.LSB.bus.request('perf-probe:debug').then((d) => d.dump().map((x) => x.name))
+}
+
+test('壳内跳转：探针开着时软跳记下 fetch/parse/commit/fillShell/total/notify', async () => {
+  const { w, tick } = makeHome({ 'lsb_base:perf-probe:__config': { enabled: true } })
+  stubHtmlFetch(w, () => homeHtml)
+  await loadBase(w, PLUG('perf-probe.user.js'), PLUG('skin.user.js'))
+  const link = w.document.createElement('a')
+  link.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(link)
+  link.click()
+  await tick(40)
+  const beforeNotify = [...(await spanNames(w))]
+  for (const name of ['spa.fetch', 'spa.parse', 'spa.commit', 'spa.fillShell', 'spa.total']) {
+    assert.ok(beforeNotify.includes(name), `软跳同步段要有 ${name}，实际 ${beforeNotify.join(',')}`)
+  }
+  await tick(120)
+  const after = [...(await spanNames(w))]
+  assert.ok(after.includes('spa.notify'), `下一帧要有 spa.notify，实际 ${after.join(',')}`)
+})
+
+test('壳内跳转：探针关着时点版块不记 span', async () => {
+  const { w, tick } = makeHome()
+  stubHtmlFetch(w, () => homeHtml)
+  await loadBase(w, PLUG('perf-probe.user.js'), PLUG('skin.user.js'))
+  const dbg = await w.LSB.bus.request('perf-probe:debug')
+  assert.equal(dbg.recording(), false)
+  const link = w.document.createElement('a')
+  link.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(link)
+  link.click()
+  await tick(120)
+  assert.equal(dbg.dump().length, 0)
+  assert.equal(w.location.pathname, '/forum/4')
+})
+
+test('壳内跳转：版块再回首页不 GET，列表行是同一节点', async () => {
+  const { w, tick } = makeHome()
+  const calls = stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'))
+  const row = w.document.querySelector('ul.post-list > li.post-item')
+  assert.ok(row)
+  row.setAttribute('data-lsb-stash', '1')
+  const toForum = w.document.createElement('a')
+  toForum.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(toForum)
+  toForum.click()
+  await tick(80)
+  assert.equal(w.location.pathname, '/forum/4')
+  const n = homeGets(calls).length
+  w.document.querySelector('.lsb-shell-brand')?.click()
+  await tick(80)
+  assert.equal(w.location.pathname, '/')
+  assert.equal(homeGets(calls).length, n, '回首页不得再拉 /')
+  const same = w.document.querySelector('[data-lsb-stash="1"]')
+  assert.equal(same, row, '必须是挪回来的原节点，不能 importNode 一份新的')
+})
+
+test('壳内跳转：后退回首页也不 GET /', async () => {
+  const { w, tick } = makeHome()
+  const calls = stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'))
+  const toForum = w.document.createElement('a')
+  toForum.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(toForum)
+  toForum.click()
+  await tick(80)
+  const n = homeGets(calls).length
+  w.history.back()
+  await tick(80)
+  assert.equal(w.location.pathname, '/')
+  assert.equal(homeGets(calls).length, n)
+})
+
+test('壳内跳转：落在邀请中心时预取首页，点站名不再 GET', async () => {
+  const { w, tick } = makeDom(homeHtml, 'https://linux.sb/invite_center')
+  const calls = stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'))
+  await tick(80)
+  assert.ok(homeGets(calls).length >= 1, 'setup 后要预取 /')
+  const n = homeGets(calls).length
+  w.document.querySelector('.lsb-shell-brand')?.click()
+  await tick(80)
+  assert.equal(w.location.pathname, '/')
+  assert.equal(homeGets(calls).length, n, '点回首页用种子，不得再拉 /')
+})
+
+test('壳内跳转：离开首页后后台刷新存档，回来用新主栏且不再 GET', async () => {
+  const { w, tick } = makeHome()
+  const timers = holdLongTimers(w)
+  const refreshed = homeHtml.replace(
+    '<ul class="post-list">',
+    '<ul class="post-list"><li class="post-item"><div class="post-body"><a class="post-title" href="/topic/88001">存档后台刷新的帖</a></div></li>',
+  )
+  let homeBody = homeHtml
+  const calls = stubHtmlFetch(w, (url) => (/\/forum\/4/.test(String(url)) ? homeHtml : homeBody))
+  await loadBase(w, PLUG('skin.user.js'))
+  const toForum = w.document.createElement('a')
+  toForum.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(toForum)
+  toForum.click()
+  await tick(80)
+  assert.equal(w.location.pathname, '/forum/4')
+  const n = homeGets(calls).length
+  homeBody = refreshed
+  await timers.flush()
+  await tick(80)
+  assert.ok(homeGets(calls).length > n, '人在版块时要后台拉一次 / 刷新存档')
+  const afterRefresh = homeGets(calls).length
+  w.document.querySelector('.lsb-shell-brand')?.click()
+  await tick(80)
+  assert.equal(w.location.pathname, '/')
+  assert.equal(homeGets(calls).length, afterRefresh, '点站名用已刷新的存档，不得再拉 /')
+  assert.ok(w.document.body.textContent.includes('存档后台刷新的帖'))
+})
+
+test('壳内跳转：整页打开的称号交易遇到 popstate 不得 reload', async () => {
+  const { w, tick } = makeDom(homeHtml, 'https://linux.sb/gacha_market')
+  stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'))
+  const reloads = stubReload(w)
+  w.dispatchEvent(new w.Event('popstate'))
+  await tick(20)
+  assert.equal(reloads(), 0, '交易页是整页打开的，不能当成软跳失败去 reload')
+})
+
+test('壳内跳转：软跳文档被后退到非软跳地址才整页重开', async () => {
+  const { w, tick } = makeHome()
+  stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'))
+  const link = w.document.createElement('a')
+  link.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(link)
+  link.click()
+  await tick(80)
+  assert.equal(w.location.pathname, '/forum/4')
+  const reloads = stubReload(w)
+  w.history.pushState({ lsbShellSpa: true }, '', 'https://linux.sb/gacha_market')
+  w.dispatchEvent(new w.Event('popstate'))
+  await tick(20)
+  assert.equal(reloads(), 1, '软跳主栏还在、地址已是交易页时必须 reload 才能挂上站点脚本')
 })

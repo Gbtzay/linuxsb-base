@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         LINUX.SB 氢（RC）
-// @name:en      LINUX.SB Hydrogen (RC)
+// @name         LINUX.SB 氢
+// @name:en      LINUX.SB Hydrogen
 // @namespace    https://linux.sb/
-// @version      0.1.33
-// @description  【RC】冻新功能，只修阻断。linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧（RC）」一起使用。
-// @description:en  [RC] Feature-frozen. Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen (RC) for features.
+// @version      0.1.36
+// @description  linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧」一起使用。
+// @description:en  Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen for features.
 // @author       xB70sR71
 // @license      MIT
 // @match        https://linux.sb/*
@@ -1073,7 +1073,7 @@
     root.addEventListener("wheel", onWheel, { passive: false });
   }
   var UI = class {
-    constructor({ title = "LINUX.SB · 氢（RC）", version = "" } = {}) {
+    constructor({ title = "LINUX.SB · 氢", version = "" } = {}) {
       this.title = title;
       this.version = version;
       this._tabs = [];
@@ -1698,6 +1698,12 @@
       gfId: 592915,
       label: "氧",
       installUrl: "https://greasyfork.org/zh-CN/scripts/592915-linux-sb-%E6%B0%A7-beta"
+    },
+    {
+      id: "lts",
+      gfId: 593319,
+      label: "LTS",
+      installUrl: "https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts"
     }
   ];
   function gfJsonUrl(gfId) {
@@ -1724,9 +1730,21 @@
   function installHref(parsed, fallback) {
     return parsed && parsed.url || fallback;
   }
+  function hostWindow() {
+    if (typeof unsafeWindow !== "undefined") return unsafeWindow;
+    if (typeof window !== "undefined") return window;
+    return globalThis;
+  }
+  function isLtsChannel(win = hostWindow()) {
+    return !!win && win.__LSB_CHANNEL__ === "lts";
+  }
+  function ltsDisplayVersion(win = hostWindow()) {
+    const v = win && win.__LSB_LTS_VERSION__;
+    return typeof v === "string" && v.trim() ? v.trim() : "";
+  }
 
   // src/core.js
-  var VERSION = "0.1.33";
+  var VERSION = "0.1.36";
   var PERMISSIONS = {
     read: "读取页面结构与站内 GET 请求",
     write: "代表当前用户发起写操作（回复/点赞/收藏等）",
@@ -1776,7 +1794,10 @@
         gmRequest: typeof GM_xmlhttpRequest === "function" ? GM_xmlhttpRequest : null
       });
       this.actions = new Actions(this.net);
-      this.ui = new UI({ title: "LINUX.SB · 氢（RC）", version: VERSION });
+      this.ui = new UI({
+        title: isLtsChannel() ? "LINUX.SB · LTS" : "LINUX.SB · 氢",
+        version: isLtsChannel() ? ltsDisplayVersion() || VERSION : VERSION
+      });
       this.dom = new DomWatcher(this.bus);
       this.site = site_exports;
       this.channel = null;
@@ -2557,11 +2578,15 @@
       host.appendChild(wrap);
       let gen = 0;
       let inflight = null;
-      const scripts = {
+      const lts = isLtsChannel();
+      const scripts = lts ? { lts: SCRIPTS.find((s) => s.id === "lts") } : {
         hydrogen: SCRIPTS.find((s) => s.id === "hydrogen"),
         oxygen: SCRIPTS.find((s) => s.id === "oxygen")
       };
       const snapshot2 = () => {
+        if (lts) {
+          return { lts: { local: ltsDisplayVersion() || VERSION, missing: false } };
+        }
         const ox = localOxygenVersion([...this.plugins.values()]);
         return {
           hydrogen: { local: VERSION, missing: false },
@@ -2583,17 +2608,22 @@
             ahead: "比商店新",
             missing: "未安装",
             invalid: "版本号无效",
-            fail: "查询失败"
+            fail: "查询失败",
+            unlisted: ""
           }[st.status] || "";
         };
         const desc = (id, st) => {
           const local = loc[id].local;
           if (!st || !st.status) return local ? `本地 ${local}` : "";
           if (st.status === "missing") return "";
+          if (st.status === "unlisted") return "LTS 商店页公布后即可对照";
           if (st.status === "behind" || st.status === "ahead") return `本地 ${local} · 商店 ${st.store}`;
           if (st.status === "equal") return `本地与商店同为 ${local}`;
           if (st.status === "invalid") return [local, st.store].filter(Boolean).join(" · ");
-          if (st.status === "fail") return st.connect ? "氢需要允许 greasyfork.org 跨域" : "无法读取 Greasy Fork";
+          if (st.status === "fail") {
+            if (!st.connect) return "无法读取 Greasy Fork";
+            return id === "lts" ? "LTS 需要允许 greasyfork.org 跨域" : "氢需要允许 greasyfork.org 跨域";
+          }
           return "";
         };
         const install2 = (id, st) => {
@@ -2616,7 +2646,9 @@
             ${d ? `<div class="lsb-row-desc">${esc(d)}</div>` : ""}
           </div>${install2(id, st)}</div>`;
         };
-        wrap.innerHTML = `<div class="lsb-actions" style="border:0;padding:0 0 8px;justify-content:flex-start"><button class="lsb-btn is-primary" type="button" data-check${busy ? " disabled" : ""}>${busy ? "查询中…" : "对照 Greasy Fork"}</button></div>` + row("hydrogen") + row("oxygen") + '<div class="lsb-row-desc">安装仍由油猴接管；两个都要装，先氢后氧。</div>';
+        const rows = lts ? row("lts") : row("hydrogen") + row("oxygen");
+        const footer = lts ? "安装仍由油猴接管。请只留 LINUX.SB（LTS），不要同时开氢或氧。" : "安装仍由油猴接管；两个都要装，先氢后氧。";
+        wrap.innerHTML = `<div class="lsb-actions" style="border:0;padding:0 0 8px;justify-content:flex-start"><button class="lsb-btn is-primary" type="button" data-check${busy ? " disabled" : ""}>${busy ? "查询中…" : "对照 Greasy Fork"}</button></div>` + rows + `<div class="lsb-row-desc">${footer}</div>`;
         const btn = wrap.querySelector("[data-check]");
         if (btn && !busy) btn.onclick = () => run();
       };
@@ -2631,7 +2663,38 @@
           return { error: /域名未放行|跨域请求被拒绝/.test(msg) ? "connect" : "read" };
         }
       };
+      const fromLoad = (res, local) => {
+        if (res.status !== "fulfilled") {
+          return { status: "fail", connect: false };
+        }
+        const v = res.value;
+        if (v.error === "connect") return { status: "fail", connect: true };
+        if (v.error) return { status: "fail", connect: false };
+        const status = classifyVersion(local, v.parsed.version);
+        return { status, store: v.parsed.version, parsed: v.parsed };
+      };
       const run = () => {
+        if (lts) {
+          const script = scripts.lts;
+          if (!script.gfId) {
+            paint({ lts: { status: "unlisted" } });
+            return;
+          }
+          if (inflight) return inflight;
+          const my2 = ++gen;
+          inflight = (async () => {
+            paint({}, { busy: true });
+            const loc = snapshot2();
+            const settled = await Promise.allSettled([loadOne(script)]);
+            if (my2 !== gen || !wrap.isConnected) return;
+            const states = { lts: fromLoad(settled[0], loc.lts.local) };
+            if (states.lts.status === "fail") this.log("core", "检查更新查询失败");
+            paint(states);
+          })().finally(() => {
+            if (inflight && my2 === gen) inflight = null;
+          });
+          return inflight;
+        }
         if (inflight) return inflight;
         const my = ++gen;
         inflight = (async () => {
@@ -2641,16 +2704,6 @@
           if (!loc.oxygen.missing) jobs.push(loadOne(scripts.oxygen));
           const settled = await Promise.allSettled(jobs);
           if (my !== gen || !wrap.isConnected) return;
-          const fromLoad = (res, local) => {
-            if (res.status !== "fulfilled") {
-              return { status: "fail", connect: false };
-            }
-            const v = res.value;
-            if (v.error === "connect") return { status: "fail", connect: true };
-            if (v.error) return { status: "fail", connect: false };
-            const status = classifyVersion(local, v.parsed.version);
-            return { status, store: v.parsed.version, parsed: v.parsed };
-          };
           const hRes = settled[0];
           const states = { hydrogen: fromLoad(hRes, loc.hydrogen.local) };
           if (loc.oxygen.missing) states.oxygen = { status: "missing" };
@@ -2664,7 +2717,11 @@
         });
         return inflight;
       };
-      paint({ oxygen: snapshot2().oxygen.missing ? { status: "missing" } : null });
+      if (lts) {
+        paint(scripts.lts.gfId ? {} : { lts: { status: "unlisted" } });
+      } else {
+        paint({ oxygen: snapshot2().oxygen.missing ? { status: "missing" } : null });
+      }
     }
     _renderPluginList(host) {
       if (!this.plugins.size) {

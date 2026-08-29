@@ -40,6 +40,12 @@ before(async () => {
 
 beforeEach(() => {
   installDom()
+  delete globalThis.__LSB_CHANNEL__
+  delete globalThis.__LSB_LTS_VERSION__
+  if (globalThis.window) {
+    delete globalThis.window.__LSB_CHANNEL__
+    delete globalThis.window.__LSB_LTS_VERSION__
+  }
 })
 
 function boot() {
@@ -63,6 +69,16 @@ test('启动后 snapshot / csrf / 面板就绪', () => {
   assert.ok(launch, '右下角入口已挂载')
   assert.equal(launch.textContent, 'H')
   assert.match(launch.title, /氢/)
+})
+
+test('正式版氢号是 0.1.36，面板标题不带 RC', () => {
+  assert.equal(VERSION, '0.1.36')
+  const core = boot()
+  assert.equal(core.ui.title, 'LINUX.SB · 氢')
+  assert.doesNotMatch(core.ui.title, /RC/)
+  core.ui.openPanel()
+  assert.match(document.querySelector('.lsb-panel-head').textContent, /LINUX\.SB · 氢/)
+  assert.doesNotMatch(document.querySelector('.lsb-panel-head').textContent, /RC/)
 })
 
 test('插件激活并收到 sticky 的 site:ready', () => {
@@ -666,4 +682,47 @@ test('检查更新：连点不重复请求', async () => {
   release()
   await new Promise((r) => setTimeout(r, 0))
   await new Promise((r) => setTimeout(r, 0))
+})
+
+test('检查更新：LTS 频道只一行且对照 593319', async () => {
+  window.__LSB_CHANNEL__ = 'lts'
+  window.__LSB_LTS_VERSION__ = '1.0.100'
+  const core = boot()
+  const calls = []
+  core.net.json = async (url, opts) => {
+    calls.push({ url, external: opts?.external })
+    return { version: '1.0.100', url: 'https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts' }
+  }
+  assert.match(core.ui._launcher.title, /LTS/)
+  core.ui.openPanel()
+  assert.match(document.querySelector('.lsb-panel-head').textContent, /LINUX\.SB · LTS/)
+  assert.match(document.querySelector('.lsb-ver').textContent, /1\.0\.100/)
+  core.ui.openPanel('__core_updates')
+  const view = document.querySelector('.lsb-view')
+  assert.ok(view.querySelector('[data-script="lts"]'))
+  assert.equal(view.querySelector('[data-script="hydrogen"]'), null)
+  assert.equal(view.querySelector('[data-script="oxygen"]'), null)
+  assert.doesNotMatch(view.textContent, /两个都要装/)
+  assert.doesNotMatch(view.textContent, /LTS 商店页公布后即可对照/)
+  await view.querySelector('[data-check]').onclick()
+  assert.equal(calls.length, 1)
+  assert.match(String(calls[0].url), /593319\.json/)
+  assert.equal(calls[0].external, true)
+  assert.match(view.querySelector('[data-script="lts"]').textContent, /已是最新/)
+})
+
+test('检查更新：LTS connect 拒绝不得写氢', async () => {
+  window.__LSB_CHANNEL__ = 'lts'
+  window.__LSB_LTS_VERSION__ = '1.0.100'
+  const core = boot()
+  core.net.json = async () => {
+    throw new Error('status 0，多半是域名未放行')
+  }
+  core.ui.openPanel('__core_updates')
+  const view = document.querySelector('.lsb-view')
+  await view.querySelector('[data-check]').onclick()
+  const text = view.querySelector('[data-script="lts"]').textContent
+  assert.match(text, /查询失败/)
+  assert.match(text, /LTS 需要允许 greasyfork\.org 跨域/)
+  assert.doesNotMatch(text, /氢需要允许/)
 })

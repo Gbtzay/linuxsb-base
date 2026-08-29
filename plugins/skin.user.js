@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·界面精修
 // @namespace    https://linux.sb/
-// @version      1.1.43
+// @version      1.1.49
 // @description  氢壳（左栏+顶栏+帖内时间轴）与排版层：正文行高、列表密度、代码块、楼层分隔、限宽阅读。只动结构与排版，不碰配色。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.43',
+    version: '1.1.49',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -50,10 +50,20 @@
     let refreshTimer = 0
     let windowListening = false
     let spaSerial = 0
+    let spaFilledSerial = 0
+    let toolsCache = null
     let spaProgressTimer = 0
     let spaIgnorePop = false
     let spaBound = false
     let homeInf = null
+    let spaViewKey = ''
+    const VIEW_CACHE_MAX = 5
+    const HOME_STASH_REFRESH_MS = 30000
+    const viewCache = new Map()
+    let homeStashTimer = 0
+    let homeStashInflight = null
+    let homeStashGen = 0
+    let homeStashPending = false
 
     /* ── 共存检测：色彩主题已由其它脚本负责，本模块只做排版层，天然无冲突。
        若未来加入色彩子项，须在此让位。 ── */
@@ -478,11 +488,12 @@
     }
 
     function collectTools() {
+      if (toolsCache) return toolsCache
       const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
       const active = new Set(
         (w.LSB?.info?.().plugins || []).filter((p) => p.state === 'active').map((p) => p.id),
       )
-      return [
+      toolsCache = [
         { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
         { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
         { plugin: 'points-ledger', panel: 'points-ledger', label: '积分趋势' },
@@ -491,6 +502,11 @@
       ]
         .filter((t) => active.has(t.plugin))
         .map(({ panel, rpc, label }) => (rpc ? { rpc, label } : { panel, label }))
+      return toolsCache
+    }
+
+    function invalidateTools() {
+      toolsCache = null
     }
 
     function locationText() {
@@ -595,11 +611,19 @@
       return null
     }
 
+    function userCardKey(card) {
+      if (!(card instanceof Element)) return ''
+      return [...card.querySelectorAll('a[href]')]
+        .map((a) => a.getAttribute('href') || '')
+        .join('\n')
+    }
+
     function adoptUserCard(host) {
       if (!(host instanceof Element)) return
       const incoming = findIncomingSelfCard(host)
       const hosted = host.querySelector('.sidebar-card.user-card')
       if (incoming && incoming !== hosted) {
+        if (hosted && userCardKey(hosted) === userCardKey(incoming)) return
         if (hosted) restoreUserCard()
         userCardHome = { parent: incoming.parentNode, next: incoming.nextSibling }
         incoming.classList.add('lsb-shell-user-card')
@@ -1045,6 +1069,19 @@
 
     function updateTimeline() {
       timelineRaf = 0
+      if (!api.hasHandler('perf-probe:record')) {
+        updateTimelineBody()
+        return
+      }
+      const t0 = performance.now()
+      try {
+        updateTimelineBody()
+      } finally {
+        perfEmitTimeline(performance.now() - t0)
+      }
+    }
+
+    function updateTimelineBody() {
       const timeline = document.querySelector('#lsb-shell-timeline')
       if (!timeline || !cfg.shell) return
       const posts = topicPosts()
@@ -1137,6 +1174,22 @@
       return el
     }
 
+    function syncShellRoute(el = document.getElementById('lsb-shell')) {
+      applyMarkers()
+      if (!(el instanceof Element)) return
+      const where = el.querySelector('[data-lsb-shell-where]')
+      if (where) where.textContent = locationText()
+      paintActive(el.querySelector('[data-lsb-shell-section="home"]'))
+      paintActive(el.querySelector('[data-lsb-shell-section="boards"]'))
+      const timeline = ensureTimeline(el)
+      if (timeline) {
+        bindWindow()
+        scheduleTimeline()
+      } else {
+        unbindWindow()
+      }
+    }
+
     function fillShell() {
       const el = ensureShell()
       pruneDetachedAsideCards()
@@ -1147,20 +1200,12 @@
       adoptAsideCards(el.querySelector('#lsb-shell-aside'))
       watchOnlineCard()
       watchTopExtras()
-      const where = el.querySelector('[data-lsb-shell-where]')
-      if (where) where.textContent = locationText()
       setSection(el.querySelector('[data-lsb-shell-section="home"]'), '', [
         { href: '/', label: '全部主题' },
       ])
       setSection(el.querySelector('[data-lsb-shell-section="boards"]'), '版块', collectBoards())
       setSection(el.querySelector('[data-lsb-shell-section="tools"]'), '工具', collectTools())
-      const timeline = ensureTimeline(el)
-      if (timeline) {
-        bindWindow()
-        scheduleTimeline()
-      } else {
-        unbindWindow()
-      }
+      syncShellRoute(el)
       syncHomeInfiniteScroll()
     }
 
@@ -1214,6 +1259,7 @@
       if (!(pagination instanceof Element)) return
       pagination.classList.add('sb-infinite-scroll-pagination-hidden')
       pagination.setAttribute('aria-hidden', 'true')
+      pagination.setAttribute('data-lsb-shell-inf', '1')
     }
 
     function setHomeInfStatus(kind, text) {
@@ -1338,7 +1384,10 @@
       }
       if (homeInf?.list === list && homeInf.pagination === pagination) return
       unbindHomeInfiniteScroll()
-      if (pagination.classList.contains('sb-infinite-scroll-pagination-hidden')) return
+      if (
+        pagination.classList.contains('sb-infinite-scroll-pagination-hidden')
+        && !pagination.hasAttribute('data-lsb-shell-inf')
+      ) return
       bindHomeInfiniteScroll(list, pagination)
     }
 
@@ -1380,6 +1429,168 @@
         || /^\/forum\/\d+/.test(path)
         || /^\/category\/\d+/.test(path)
       )
+    }
+
+    function viewCacheKey(href) {
+      const u = new URL(href, location.href)
+      let path = u.pathname.replace(/\/{2,}/g, '/') || '/'
+      if (path === '/index.php') path = '/'
+      return path + u.search
+    }
+
+    function rememberView(key, entry) {
+      if (viewCache.has(key)) viewCache.delete(key)
+      viewCache.set(key, entry)
+      while (viewCache.size > VIEW_CACHE_MAX) {
+        const oldest = viewCache.keys().next().value
+        viewCache.delete(oldest)
+      }
+    }
+
+    function snapshotOutletAttrs(el) {
+      if (!(el instanceof Element)) return []
+      return [...el.attributes].map((a) => [a.name, a.value])
+    }
+
+    function stashView(key) {
+      if (!key) return
+      try {
+        if (!isSpaUrl(new URL(key, location.origin).href)) return
+      } catch {
+        return
+      }
+      const outlet = findRouteOutlet()
+      if (!outlet?.firstChild) return
+      const frag = document.createDocumentFragment()
+      while (outlet.firstChild) frag.appendChild(outlet.firstChild)
+      rememberView(key, {
+        frag,
+        title: document.title,
+        scrollY: window.scrollY || 0,
+        live: true,
+        attrs: snapshotOutletAttrs(outlet),
+      })
+    }
+
+    function takeView(key) {
+      const entry = viewCache.get(key)
+      if (!entry) return null
+      viewCache.delete(key)
+      return entry
+    }
+
+    function applyView(entry, outlet) {
+      if (!outlet || !entry?.frag) return
+      if (entry.attrs) {
+        for (const name of [...outlet.getAttributeNames()]) outlet.removeAttribute(name)
+        for (const [name, value] of entry.attrs) {
+          if (name.startsWith('data-lsb-')) continue
+          outlet.setAttribute(name, value)
+        }
+      }
+      outlet.replaceChildren()
+      outlet.append(entry.frag)
+      if (entry.title) document.title = entry.title
+      outlet.removeAttribute('aria-busy')
+      markNative(true)
+    }
+
+    function parseOutletFrag(html) {
+      const pageDoc = new DOMParser().parseFromString(html, 'text/html')
+      const remote = findRouteOutlet(pageDoc)
+      if (!remote) return null
+      remote.querySelectorAll('script').forEach((node) => node.remove())
+      hideNativeSidebars(remote)
+      const frag = document.createDocumentFragment()
+      for (const node of [...remote.childNodes]) frag.appendChild(document.importNode(node, true))
+      return { frag, title: pageDoc.title || '', attrs: snapshotOutletAttrs(remote) }
+    }
+
+    function wantsHomeStashRefresh() {
+      return spaBound && cfg.shell && spaViewKey !== '/' && viewCache.has('/')
+    }
+
+    function stopHomeStashRefresh() {
+      if (homeStashTimer) {
+        window.clearTimeout(homeStashTimer)
+        homeStashTimer = 0
+      }
+    }
+
+    function scheduleHomeStashRefresh() {
+      if (!wantsHomeStashRefresh()) {
+        stopHomeStashRefresh()
+        homeStashPending = false
+        homeStashGen += 1
+        return
+      }
+      if (homeStashTimer || homeStashInflight) return
+      homeStashTimer = window.setTimeout(() => {
+        homeStashTimer = 0
+        void refreshStashedHome()
+      }, HOME_STASH_REFRESH_MS)
+    }
+
+    async function refreshStashedHome() {
+      if (!wantsHomeStashRefresh()) return
+      if (document.visibilityState === 'hidden') {
+        homeStashPending = true
+        return
+      }
+      homeStashPending = false
+      if (homeStashInflight) return homeStashInflight
+      const gen = homeStashGen
+      homeStashInflight = (async () => {
+        try {
+          const res = await api.net.raw('/', { queue: false, timeout: 15000, retry: 0 })
+          if (gen !== homeStashGen) return
+          if (!res.ok || !wantsHomeStashRefresh()) return
+          const parsed = parseOutletFrag(res.text)
+          if (!parsed || gen !== homeStashGen || !wantsHomeStashRefresh()) return
+          rememberView('/', {
+            frag: parsed.frag,
+            title: parsed.title,
+            scrollY: 0,
+            live: false,
+            attrs: parsed.attrs,
+          })
+        } catch {
+          /* 后台刷新失败则还回仍用旧存档 */
+        } finally {
+          homeStashInflight = null
+          if (gen === homeStashGen) scheduleHomeStashRefresh()
+        }
+      })()
+      return homeStashInflight
+    }
+
+    function onHomeStashVisible() {
+      if (document.visibilityState !== 'visible' || !homeStashPending) return
+      homeStashPending = false
+      void refreshStashedHome()
+    }
+
+    function seedHomeView() {
+      const here = viewCacheKey(location.href)
+      if (here === '/' || viewCache.has('/')) return
+      void (async () => {
+        try {
+          const res = await api.net.raw('/', { queue: false, timeout: 15000, retry: 0 })
+          if (!res.ok || viewCache.has('/') || spaViewKey === '/') return
+          const parsed = parseOutletFrag(res.text)
+          if (!parsed || viewCache.has('/') || spaViewKey === '/') return
+          rememberView('/', {
+            frag: parsed.frag,
+            title: parsed.title,
+            scrollY: 0,
+            live: false,
+            attrs: parsed.attrs,
+          })
+          scheduleHomeStashRefresh()
+        } catch {
+          /* 预取失败则点首页仍 GET */
+        }
+      })()
     }
 
     function hasUnsavedEditor() {
@@ -1486,6 +1697,63 @@
       }
     }
 
+    function perfHref() {
+      try {
+        return location.pathname + location.search
+      } catch {
+        return ''
+      }
+    }
+
+    function perfEmit(name, ms) {
+      try {
+        if (!api.hasHandler('perf-probe:record')) return
+        api.emitGlobal('perf:span', {
+          name,
+          plugin: 'skin',
+          ms,
+          href: perfHref(),
+          t: Date.now(),
+        })
+      } catch {
+        /* 探针失败不得打断壳 */
+      }
+    }
+
+    function perfSpan(name, fn) {
+      if (!api.hasHandler('perf-probe:record')) return fn()
+      const t0 = performance.now()
+      try {
+        return fn()
+      } finally {
+        perfEmit(name, performance.now() - t0)
+      }
+    }
+
+    async function perfSpanAsync(name, fn) {
+      if (!api.hasHandler('perf-probe:record')) return fn()
+      const t0 = performance.now()
+      try {
+        return await fn()
+      } finally {
+        perfEmit(name, performance.now() - t0)
+      }
+    }
+
+    let timelineEmitSec = -1
+    let timelineEmitN = 0
+    function perfEmitTimeline(ms) {
+      if (ms < 8) return
+      const sec = Math.floor(Date.now() / 1000)
+      if (sec !== timelineEmitSec) {
+        timelineEmitSec = sec
+        timelineEmitN = 0
+      }
+      if (timelineEmitN >= 2) return
+      timelineEmitN += 1
+      perfEmit('timeline.update', ms)
+    }
+
     async function navigateSpa(href, options = {}) {
       const settings = { historyMode: 'push', force: false, ...options }
       let target
@@ -1507,17 +1775,60 @@
         return true
       }
 
+      const fromKey = spaViewKey
+      const destKey = viewCacheKey(target.href)
+      const cached = takeView(destKey)
       const serial = ++spaSerial
+      const tTotal = api.hasHandler('perf-probe:record') ? performance.now() : 0
       const outlet = findRouteOutlet()
       outlet?.setAttribute('aria-busy', 'true')
       startProgress(serial)
       let committed = false
       try {
-        const res = await api.net.raw(`${target.pathname}${target.search}`, {
-          queue: false,
-          timeout: 15000,
-          retry: 0,
-        })
+        if (cached) {
+          stashView(fromKey)
+          applyHistory(target, settings.historyMode)
+          perfSpan('spa.commit', () => applyView(cached, findRouteOutlet() || outlet))
+          committed = true
+          spaViewKey = destKey
+          scheduleHomeStashRefresh()
+          perfSpan('spa.fillShell', () => {
+            applyMarkers()
+            fillShell()
+          })
+          spaFilledSerial = serial
+          window.clearTimeout(refreshTimer)
+          refreshTimer = 0
+          finishProgress(serial)
+          try {
+            if (settings.historyMode === 'none') window.scrollTo(0, cached.scrollY || 0)
+            else window.scrollTo(0, 0)
+          } catch {
+            /* jsdom 没有视口 */
+          }
+          if (tTotal) perfEmit('spa.total', performance.now() - tTotal)
+          afterPaint(() => {
+            if (serial !== spaSerial) return
+            perfSpan('spa.notify', () => {
+              notifyRoute()
+              syncShellRoute()
+            })
+            try {
+              api.emitGlobal('spa:view-restored', { href: destKey, live: !!cached.live })
+            } catch {
+              /* 实时流缺席不得打断壳 */
+            }
+          })
+          return true
+        }
+
+        const res = await perfSpanAsync('spa.fetch', () =>
+          api.net.raw(`${target.pathname}${target.search}`, {
+            queue: false,
+            timeout: 15000,
+            retry: 0,
+          }),
+        )
         if (serial !== spaSerial) return false
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const finalUrl = new URL(res.url || target.href, target.href)
@@ -1525,23 +1836,38 @@
           location.assign(finalUrl.href)
           return false
         }
-        const pageDoc = new DOMParser().parseFromString(res.text, 'text/html')
+        const pageDoc = perfSpan('spa.parse', () => new DOMParser().parseFromString(res.text, 'text/html'))
         const remoteOutlet = findRouteOutlet(pageDoc)
         if (!remoteOutlet) throw new Error('no remote outlet')
+        stashView(fromKey)
         applyHistory(finalUrl, settings.historyMode)
-        commitRoute(pageDoc, remoteOutlet)
+        perfSpan('spa.commit', () => {
+          commitRoute(pageDoc, remoteOutlet)
+        })
         committed = true
-        notifyRoute()
-        finishProgress(serial)
-        applyMarkers()
-        fillShell()
+        spaViewKey = viewCacheKey(finalUrl.href)
+        scheduleHomeStashRefresh()
+        perfSpan('spa.fillShell', () => {
+          applyMarkers()
+          fillShell()
+        })
+        spaFilledSerial = serial
         window.clearTimeout(refreshTimer)
         refreshTimer = 0
+        finishProgress(serial)
         try {
           window.scrollTo(0, 0)
         } catch {
           /* jsdom 没有视口 */
         }
+        if (tTotal) perfEmit('spa.total', performance.now() - tTotal)
+        afterPaint(() => {
+          if (serial !== spaSerial) return
+          perfSpan('spa.notify', () => {
+            notifyRoute()
+            syncShellRoute()
+          })
+        })
         return true
       } catch (err) {
         if (serial !== spaSerial) return false
@@ -1592,7 +1918,15 @@
     function onSpaPop() {
       if (spaIgnorePop || !cfg.shell) return
       if (!isSpaUrl(location.href)) {
-        location.reload()
+        // 软跳文档被后退到交易页/帖子等整页地址时，主栏还是列表，必须重开。
+        // 交易页本身就是整页打开的，不能见 popstate 就 reload，否则会刷死。
+        let paintedSpa = false
+        try {
+          paintedSpa = isSpaUrl(new URL(spaViewKey || '/', location.origin).href)
+        } catch {
+          paintedSpa = false
+        }
+        if (paintedSpa) location.reload()
         return
       }
       void navigateSpa(location.href, { historyMode: 'none', force: true })
@@ -1609,6 +1943,10 @@
       document.addEventListener('click', onSpaClick, true)
       document.addEventListener('submit', onSpaSubmit, true)
       window.addEventListener('popstate', onSpaPop)
+      document.addEventListener('visibilitychange', onHomeStashVisible)
+      spaViewKey = viewCacheKey(location.href)
+      seedHomeView()
+      scheduleHomeStashRefresh()
     }
 
     function unbindSpa() {
@@ -1620,6 +1958,10 @@
       document.removeEventListener('click', onSpaClick, true)
       document.removeEventListener('submit', onSpaSubmit, true)
       window.removeEventListener('popstate', onSpaPop)
+      document.removeEventListener('visibilitychange', onHomeStashVisible)
+      stopHomeStashRefresh()
+      homeStashPending = false
+      homeStashGen += 1
       document.getElementById('lsb-shell-progress')?.remove()
     }
 
@@ -1640,6 +1982,8 @@
       restoreTopExtras()
       restoreThemeToggle()
       restoreSearch()
+      viewCache.clear()
+      spaViewKey = ''
       document.getElementById('lsb-shell')?.remove()
       markNative(false)
       document.documentElement.classList.remove('lsb-skin-shell-on', 'lsb-skin-shell-topic', 'lsb-skin-shell-user')
@@ -1658,7 +2002,14 @@
       bindSpa()
     }
 
-    function scheduleRefresh() {
+    function afterPaint(fn) {
+      const raf = window.requestAnimationFrame
+      if (typeof raf === 'function') raf(() => fn())
+      else setTimeout(fn, 0)
+    }
+
+    function scheduleRefresh(fromRoute) {
+      if (fromRoute && spaFilledSerial && spaFilledSerial === spaSerial) return
       window.clearTimeout(refreshTimer)
       refreshTimer = window.setTimeout(refreshShell, 50)
     }
@@ -1682,19 +2033,27 @@
 
     api.on('config:changed:skin', () => {
       cfg = api.config()
+      invalidateTools()
       applyAll()
       syncGmMenu()
     })
-    api.on('route:changed', scheduleRefresh)
-    api.on('plugin:activated', scheduleRefresh)
-    api.on('plugin:disabled', scheduleRefresh)
+    api.on('route:changed', () => scheduleRefresh(true))
+    api.on('plugin:activated', () => {
+      invalidateTools()
+      scheduleRefresh(false)
+    })
+    api.on('plugin:disabled', () => {
+      invalidateTools()
+      scheduleRefresh(false)
+    })
     api.on('topic:posts-added', scheduleTimeline)
     api.dom.each(
-      '.dark-mode-control, [data-themes-mode-toggle], a.color-scheme-top-link, a.search-page-link, form.search-form',
+      '.dark-mode-control, [data-themes-mode-toggle], a.color-scheme-top-link, a.search-page-link, form.search-form, .sidebar-card.user-card',
       () => {
         if (!cfg.shell) return
         adoptSearch(document.querySelector('.lsb-shell-search-host'))
         adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
+        adoptUserCard(document.querySelector('[data-lsb-shell-me]'))
       },
     )
 

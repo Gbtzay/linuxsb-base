@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·实时流
 // @namespace    https://linux.sb/
-// @version      1.2.12
+// @version      1.2.17
 // @description  免刷新获取新帖与新回复：前台短周期、后台长周期的自适应轮询（跨标签选主，只有一个标签发请求）；视口锚点补偿让任意滚动位置都能无感插入；打字期间只暂存不打扰；老帖有新回复原地高亮。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.12',
+    version: '1.2.17',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -129,7 +129,7 @@
           maxTs = Math.max(maxTs, it.lastActiveTs || 0)
         }
       }
-      ctx = { ul, seen, maxId, maxTs, sort: listSort() }
+      ctx = { ul, seen, maxId, maxTs, sort: listSort(), prime: listSort() === 'comment' }
       mode = 'list'
       return true
     }
@@ -428,6 +428,9 @@
       const doc = await liveDoc(listUrl())
       if (gen !== navGen || ctx.ul !== ul || ctx.seen !== seen) return 0
       const isPost = ctx.sort === 'post'
+      // 回复流首页每条评论都在转：存档还回后立刻 cycle 会把整页热帖当成「新的」。
+      // 第一轮只对齐水位，真正的增量留给之后的巡检。发布流不这么做——还回首页仍要立刻插入新 id。
+      const priming = !!ctx.prime && !isPost
       const bumped = []
       for (const li of doc.querySelectorAll('li.post-item')) {
         if (!isListRow(li)) continue
@@ -442,17 +445,22 @@
         if (prev === undefined) {
           // 序数守卫：发布流只认 id 创新高的真·新帖；回复流只认活跃时间创新的。
           // 对侧流的旧帖即便没见过也不算数——这是「1 个说成 40+」的根因。
-          if (isPost ? it.id > ctx.maxId : (it.lastActiveTs || 0) > ctx.maxTs) {
+          if (!priming && (isPost ? it.id > ctx.maxId : (it.lastActiveTs || 0) > ctx.maxTs)) {
             pending.push(it)
             if (pending.length > 200) pending.shift()
           }
           ctx.seen.set(it.id, fp) // 无论是否计入，见过的都不再当新帖
+          if (priming) {
+            ctx.maxTs = Math.max(ctx.maxTs, it.lastActiveTs || 0)
+            ctx.maxId = Math.max(ctx.maxId, it.id)
+          }
         } else if (prev !== fp) {
           // 已在列表里、但回复数/活跃时间变了 → 老帖有新动态：原地高亮而非重复插入
           bumped.push(it)
           ctx.seen.set(it.id, fp)
         }
       }
+      if (priming) ctx.prime = false
       markBumped(bumped)
 
       if (!pending.length) {
@@ -629,10 +637,35 @@
     let lastErr = null
     let lastFresh = 0
 
+    function perfHref() {
+      try {
+        return location.pathname + location.search
+      } catch {
+        return ''
+      }
+    }
+
+    function perfEmitCycle(ms) {
+      try {
+        if (!api.hasHandler('perf-probe:record')) return
+        api.emitGlobal('perf:span', {
+          name: 'cycle',
+          plugin: 'live-feed',
+          ms,
+          href: perfHref(),
+          t: Date.now(),
+        })
+      } catch {
+        /* 探针失败不得打断巡检 */
+      }
+    }
+
     async function cycle() {
       if (!mode) init()
       if (!mode) return 0
       if (inflight) return inflight
+      const timed = api.hasHandler('perf-probe:record')
+      const t0 = timed ? performance.now() : 0
       inflight = (async () => {
         try {
           lastFresh = mode === 'list' ? await cycleList() : await cycleTopic()
@@ -643,6 +676,7 @@
           return 0
         } finally {
           inflight = null
+          if (timed) perfEmitCycle(performance.now() - t0)
           if (mode && shouldPoll()) scheduleNext()
         }
       })()
@@ -703,7 +737,15 @@
     /* 软导航换页：立刻重建基线。旧实现延迟 80ms，换页窗口里巡检会写进已经卸掉的 ul。 */
     api.on('route:changed', () => {
       init()
-      if (shouldPoll()) cycle()
+      if (shouldPoll() && !timer) scheduleNext()
+    })
+    api.on('spa:view-restored', () => {
+      init()
+      void (async () => {
+        const wait = inflight
+        if (wait) await wait
+        void cycle()
+      })()
     })
     api.on('topic:posts-added', (posts) => {
       if (mode !== 'topic') return

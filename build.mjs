@@ -10,12 +10,12 @@ const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8'))
 const version = readFileSync(join(__dirname, 'src/core.js'), 'utf8').match(/VERSION = '([^']+)'/)[1]
 
 const banner = `// ==UserScript==
-// @name         LINUX.SB 氢（RC）
-// @name:en      LINUX.SB Hydrogen (RC)
+// @name         LINUX.SB 氢
+// @name:en      LINUX.SB Hydrogen
 // @namespace    https://linux.sb/
 // @version      ${version}
-// @description  【RC】冻新功能，只修阻断。linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧（RC）」一起使用。
-// @description:en  [RC] Feature-frozen. Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen (RC) for features.
+// @description  linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧」一起使用。
+// @description:en  Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen for features.
 // @author       xB70sR71
 // @license      MIT
 // @match        https://linux.sb/*
