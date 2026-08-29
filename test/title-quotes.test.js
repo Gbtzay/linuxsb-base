@@ -1188,3 +1188,65 @@ test('称号行情：停用后卸浮层和钮', async () => {
   assert.equal(w.document.querySelector('.lsb-title-quotes-float'), null)
 })
 
+test('称号行情：浮层和交易页同时画图时，不同宽度不得互相刷死', async () => {
+  const page1 = marketPage(card('打酱油的', 'N', 6, '1') + card('全站偶像', 'SSR', 260, '99'))
+  const htmlFor = (href) =>
+    String(href).includes('gacha_market')
+      ? `<html><body>${page1}</body></html>`
+      : '<html><body></body></html>'
+  const { w, tick, dbg } = await boot(
+    'https://linux.sb/gacha_market',
+    { 'lsb_base:title-quotes:floatOpen': true },
+    htmlFor,
+  )
+  const t0 = Date.now() - 864e5
+  const listings = dbg.parseCards(page1)
+  const titles = dbg.foldTitles(listings)
+  const anchors = dbg.pickAnchors(listings, titles)
+  dbg.pushSnap({ anchors, titles }, t0)
+  dbg.pushSnap({ anchors, titles }, t0 + 13 * 3600e3)
+
+  Object.defineProperty(w.HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    get() {
+      if (this.classList?.contains('lsb-title-quotes-host')) {
+        if (this.closest('.lsb-title-quotes-float')) return 480
+        if (this.closest('.lsb-title-quotes-embed')) return 900
+      }
+      return 0
+    },
+  })
+  Object.defineProperty(w.HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get() {
+      if (this.classList?.contains('lsb-title-quotes-host')) return 380
+      return 0
+    },
+  })
+
+  let paints = 0
+  const desc = Object.getOwnPropertyDescriptor(w.Element.prototype, 'innerHTML')
+  Object.defineProperty(w.Element.prototype, 'innerHTML', {
+    configurable: true,
+    get() {
+      return desc.get.call(this)
+    },
+    set(v) {
+      if (
+        this.classList?.contains('lsb-title-quotes-embed')
+        || this.classList?.contains('lsb-title-quotes-float-body')
+      ) {
+        paints += 1
+        if (paints > 40) throw new Error('称号行情图画陷入刷新死循环')
+      }
+      desc.set.call(this, v)
+    },
+  })
+
+  await dbg.snap()
+  for (let i = 0; i < 24; i++) await Promise.resolve()
+  await tick(20)
+  assert.ok(paints > 0, '采到快照后浮层或交易页应重画')
+  assert.ok(paints <= 12, `浮层与交易页不应互相刷图，实际 ${paints} 次`)
+})
+

@@ -11,7 +11,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const SUITE_VERSION = '1.0.96'
+const SUITE_VERSION = '1.0.105'
 
 import { ORDER, SUITE_EXCLUDE } from './suite/order.js'
 
@@ -94,12 +94,12 @@ const suiteCenter = readFileSync(join(__dirname, 'suite', 'suite-center.js'), 'u
 mkdirSync(join(__dirname, 'dist'), { recursive: true })
 
 const banner = `// ==UserScript==
-// @name         LINUX.SB 氧（RC）
-// @name:en      LINUX.SB Oxygen (RC)
+// @name         LINUX.SB 氧
+// @name:en      LINUX.SB Oxygen
 // @namespace    https://linux.sb/
 // @version      ${SUITE_VERSION}
-// @description  【RC】冻新功能，只修阻断。linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 ${mods.length} 个模块。必须先安装「LINUX.SB 氢（RC）」。
-// @description:en  [RC] Feature-frozen. Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen (RC).
+// @description  linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 ${mods.length} 个模块。必须先安装「LINUX.SB 氢」。
+// @description:en  Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen.
 // @author       xB70sR71
 // @license      MIT
 // @match        https://linux.sb/*

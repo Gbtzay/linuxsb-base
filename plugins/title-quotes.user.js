@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·称号行情
 // @namespace    https://linux.sb/
-// @version      1.0.17
+// @version      1.0.18
 // @description  采集称号交易挂单的最低/最高与中位数；全场锚点折线，各称号可切挂单合成K或高低折线；交易页与全站浮层可切分析大盘。氢壳开着时走左栏，关壳才留右下钮。打开浮层时巡检加快。纯读，不提交购买。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -21,7 +21,7 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.17',
+    version: '1.0.18',
     description: '称号交易挂单高低价、全场锚点折线；各称号可切挂单合成K或高低折线；全站浮层；氢壳开着走左栏，关壳才留右下钮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -579,6 +579,8 @@
     let drag = null
     let plotW = 800
     let plotH = 380
+    const plotByHost = new WeakMap()
+    let plotHost = null
     let sizeWatch = null
     let sizeTimer = 0
     let plotGen = 0
@@ -645,7 +647,8 @@
     }
 
     function plotGeom() {
-      return { W: plotW, H: plotH, P: { l: 52, r: 14, t: 12, b: 32 } }
+      const s = (plotHost && plotByHost.get(plotHost)) || { W: plotW, H: plotH }
+      return { W: s.W, H: s.H, P: { l: 52, r: 14, t: 12, b: 32 } }
     }
 
     function timeWindow(times, rangeDays, now, barMin) {
@@ -867,6 +870,7 @@
 
     function render(host) {
       if (!host) return
+      plotHost = host
       const all = get()
       const latest = all[all.length - 1]
       const cutoff = rangeCutoff(rangeDays)
@@ -1151,6 +1155,7 @@
       })
       bindCandleTips(host)
       bindChartSize(host)
+      plotHost = null
     }
 
     function bindChartSize(root) {
@@ -1162,15 +1167,16 @@
       const h = readChartH()
       for (const wrap of wraps) wrap.style.height = `${h}px`
       const sample = wraps[0]
+      const prev = plotByHost.get(root) || { W: plotW, H: plotH }
       if (sample && sample.clientWidth >= 40) {
-        const nw = Math.round(sample.clientWidth)
-        const nh = Math.round(sample.clientHeight || h)
-        if (Math.abs(nw - plotW) > 8 || Math.abs(nh - plotH) > 8) {
-          plotW = Math.max(320, nw)
-          plotH = Math.min(720, Math.max(240, nh || h))
+        const nw = Math.max(320, Math.round(sample.clientWidth))
+        const nh = Math.min(720, Math.max(240, Math.round(sample.clientHeight || h)))
+        if (Math.abs(nw - prev.W) > 8 || Math.abs(nh - prev.H) > 8) {
+          plotByHost.set(root, { W: nw, H: nh })
           queueMicrotask(() => render(root))
           return
         }
+        plotByHost.set(root, { W: nw, H: nh })
       }
       if (!sample || typeof ResizeObserver === 'undefined') return
       const gen = ++plotGen
@@ -1183,10 +1189,13 @@
           const nw = Math.round(el.clientWidth)
           const nh = Math.round(el.clientHeight)
           if (nw < 40 || nh < 40) return
-          if (Math.abs(nw - plotW) < 8 && Math.abs(nh - plotH) < 8) return
+          const last = plotByHost.get(root) || { W: plotW, H: plotH }
+          if (Math.abs(nw - last.W) < 8 && Math.abs(nh - last.H) < 8) return
           api.store.set('chartH', Math.min(720, Math.max(240, nh)))
-          plotW = Math.max(320, nw)
-          plotH = Math.min(720, Math.max(240, nh))
+          plotByHost.set(root, {
+            W: Math.max(320, nw),
+            H: Math.min(720, Math.max(240, nh)),
+          })
           render(root)
         }, 320)
       })

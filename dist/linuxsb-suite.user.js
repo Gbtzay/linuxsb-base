@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         LINUX.SB 氧（RC）
-// @name:en      LINUX.SB Oxygen (RC)
+// @name         LINUX.SB 氧
+// @name:en      LINUX.SB Oxygen
 // @namespace    https://linux.sb/
-// @version      1.0.96
-// @description  【RC】冻新功能，只修阻断。linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 18 个模块。必须先安装「LINUX.SB 氢（RC）」。
-// @description:en  [RC] Feature-frozen. Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen (RC).
+// @version      1.0.105
+// @description  linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 19 个模块。必须先安装「LINUX.SB 氢」。
+// @description:en  Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen.
 // @author       xB70sR71
 // @license      MIT
 // @match        https://linux.sb/*
@@ -26,13 +26,14 @@
 // · LSB·机会监控 v1.0.1
 // · LSB·签到日历 v1.0.3
 // · LSB·积分趋势 v1.0.2
-// · LSB·称号行情 v1.0.17
+// · LSB·称号行情 v1.0.18
 // · LSB·AI 总结 v1.1.5
 // · LSB·配置迁移 v1.0.0
 // · LSB·个人存档 v1.0.0
 // · LSB·年度报告 v1.0.1
-// · LSB·界面精修 v1.1.43
-// · LSB·实时流 v1.2.12
+// · LSB·界面精修 v1.1.49
+// · LSB·实时流 v1.2.17
+// · LSB·性能探针 v1.0.0
 //
 
 
@@ -2650,7 +2651,7 @@
 
 
 ;
-/* ══════════════ LSB·称号行情 v1.0.17 (title-quotes) ══════════════ */
+/* ══════════════ LSB·称号行情 v1.0.18 (title-quotes) ══════════════ */
 /**
  * 数据源：/gacha_market 在售卡片。站点按页展示（约 24 条/页），必须跟分页把挂单收全；
  * 只拉每个筛选的第一页会丢掉中间价，巡检高低价就会和交易页对不上。
@@ -2662,7 +2663,7 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.17',
+    version: '1.0.18',
     description: '称号交易挂单高低价、全场锚点折线；各称号可切挂单合成K或高低折线；全站浮层；氢壳开着走左栏，关壳才留右下钮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -3220,6 +3221,8 @@
     let drag = null
     let plotW = 800
     let plotH = 380
+    const plotByHost = new WeakMap()
+    let plotHost = null
     let sizeWatch = null
     let sizeTimer = 0
     let plotGen = 0
@@ -3286,7 +3289,8 @@
     }
 
     function plotGeom() {
-      return { W: plotW, H: plotH, P: { l: 52, r: 14, t: 12, b: 32 } }
+      const s = (plotHost && plotByHost.get(plotHost)) || { W: plotW, H: plotH }
+      return { W: s.W, H: s.H, P: { l: 52, r: 14, t: 12, b: 32 } }
     }
 
     function timeWindow(times, rangeDays, now, barMin) {
@@ -3508,6 +3512,7 @@
 
     function render(host) {
       if (!host) return
+      plotHost = host
       const all = get()
       const latest = all[all.length - 1]
       const cutoff = rangeCutoff(rangeDays)
@@ -3792,6 +3797,7 @@
       })
       bindCandleTips(host)
       bindChartSize(host)
+      plotHost = null
     }
 
     function bindChartSize(root) {
@@ -3803,15 +3809,16 @@
       const h = readChartH()
       for (const wrap of wraps) wrap.style.height = `${h}px`
       const sample = wraps[0]
+      const prev = plotByHost.get(root) || { W: plotW, H: plotH }
       if (sample && sample.clientWidth >= 40) {
-        const nw = Math.round(sample.clientWidth)
-        const nh = Math.round(sample.clientHeight || h)
-        if (Math.abs(nw - plotW) > 8 || Math.abs(nh - plotH) > 8) {
-          plotW = Math.max(320, nw)
-          plotH = Math.min(720, Math.max(240, nh || h))
+        const nw = Math.max(320, Math.round(sample.clientWidth))
+        const nh = Math.min(720, Math.max(240, Math.round(sample.clientHeight || h)))
+        if (Math.abs(nw - prev.W) > 8 || Math.abs(nh - prev.H) > 8) {
+          plotByHost.set(root, { W: nw, H: nh })
           queueMicrotask(() => render(root))
           return
         }
+        plotByHost.set(root, { W: nw, H: nh })
       }
       if (!sample || typeof ResizeObserver === 'undefined') return
       const gen = ++plotGen
@@ -3824,10 +3831,13 @@
           const nw = Math.round(el.clientWidth)
           const nh = Math.round(el.clientHeight)
           if (nw < 40 || nh < 40) return
-          if (Math.abs(nw - plotW) < 8 && Math.abs(nh - plotH) < 8) return
+          const last = plotByHost.get(root) || { W: plotW, H: plotH }
+          if (Math.abs(nw - last.W) < 8 && Math.abs(nh - last.H) < 8) return
           api.store.set('chartH', Math.min(720, Math.max(240, nh)))
-          plotW = Math.max(320, nw)
-          plotH = Math.min(720, Math.max(240, nh))
+          plotByHost.set(root, {
+            W: Math.max(320, nw),
+            H: Math.min(720, Math.max(240, nh)),
+          })
           render(root)
         }, 320)
       })
@@ -5848,14 +5858,14 @@
 
 
 ;
-/* ══════════════ LSB·界面精修 v1.1.43 (skin) ══════════════ */
+/* ══════════════ LSB·界面精修 v1.1.49 (skin) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.43',
+    version: '1.1.49',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -5889,10 +5899,20 @@
     let refreshTimer = 0
     let windowListening = false
     let spaSerial = 0
+    let spaFilledSerial = 0
+    let toolsCache = null
     let spaProgressTimer = 0
     let spaIgnorePop = false
     let spaBound = false
     let homeInf = null
+    let spaViewKey = ''
+    const VIEW_CACHE_MAX = 5
+    const HOME_STASH_REFRESH_MS = 30000
+    const viewCache = new Map()
+    let homeStashTimer = 0
+    let homeStashInflight = null
+    let homeStashGen = 0
+    let homeStashPending = false
 
     /* ── 共存检测：色彩主题已由其它脚本负责，本模块只做排版层，天然无冲突。
        若未来加入色彩子项，须在此让位。 ── */
@@ -6317,11 +6337,12 @@
     }
 
     function collectTools() {
+      if (toolsCache) return toolsCache
       const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
       const active = new Set(
         (w.LSB?.info?.().plugins || []).filter((p) => p.state === 'active').map((p) => p.id),
       )
-      return [
+      toolsCache = [
         { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
         { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
         { plugin: 'points-ledger', panel: 'points-ledger', label: '积分趋势' },
@@ -6330,6 +6351,11 @@
       ]
         .filter((t) => active.has(t.plugin))
         .map(({ panel, rpc, label }) => (rpc ? { rpc, label } : { panel, label }))
+      return toolsCache
+    }
+
+    function invalidateTools() {
+      toolsCache = null
     }
 
     function locationText() {
@@ -6434,11 +6460,19 @@
       return null
     }
 
+    function userCardKey(card) {
+      if (!(card instanceof Element)) return ''
+      return [...card.querySelectorAll('a[href]')]
+        .map((a) => a.getAttribute('href') || '')
+        .join('\n')
+    }
+
     function adoptUserCard(host) {
       if (!(host instanceof Element)) return
       const incoming = findIncomingSelfCard(host)
       const hosted = host.querySelector('.sidebar-card.user-card')
       if (incoming && incoming !== hosted) {
+        if (hosted && userCardKey(hosted) === userCardKey(incoming)) return
         if (hosted) restoreUserCard()
         userCardHome = { parent: incoming.parentNode, next: incoming.nextSibling }
         incoming.classList.add('lsb-shell-user-card')
@@ -6884,6 +6918,19 @@
 
     function updateTimeline() {
       timelineRaf = 0
+      if (!api.hasHandler('perf-probe:record')) {
+        updateTimelineBody()
+        return
+      }
+      const t0 = performance.now()
+      try {
+        updateTimelineBody()
+      } finally {
+        perfEmitTimeline(performance.now() - t0)
+      }
+    }
+
+    function updateTimelineBody() {
       const timeline = document.querySelector('#lsb-shell-timeline')
       if (!timeline || !cfg.shell) return
       const posts = topicPosts()
@@ -6976,6 +7023,22 @@
       return el
     }
 
+    function syncShellRoute(el = document.getElementById('lsb-shell')) {
+      applyMarkers()
+      if (!(el instanceof Element)) return
+      const where = el.querySelector('[data-lsb-shell-where]')
+      if (where) where.textContent = locationText()
+      paintActive(el.querySelector('[data-lsb-shell-section="home"]'))
+      paintActive(el.querySelector('[data-lsb-shell-section="boards"]'))
+      const timeline = ensureTimeline(el)
+      if (timeline) {
+        bindWindow()
+        scheduleTimeline()
+      } else {
+        unbindWindow()
+      }
+    }
+
     function fillShell() {
       const el = ensureShell()
       pruneDetachedAsideCards()
@@ -6986,20 +7049,12 @@
       adoptAsideCards(el.querySelector('#lsb-shell-aside'))
       watchOnlineCard()
       watchTopExtras()
-      const where = el.querySelector('[data-lsb-shell-where]')
-      if (where) where.textContent = locationText()
       setSection(el.querySelector('[data-lsb-shell-section="home"]'), '', [
         { href: '/', label: '全部主题' },
       ])
       setSection(el.querySelector('[data-lsb-shell-section="boards"]'), '版块', collectBoards())
       setSection(el.querySelector('[data-lsb-shell-section="tools"]'), '工具', collectTools())
-      const timeline = ensureTimeline(el)
-      if (timeline) {
-        bindWindow()
-        scheduleTimeline()
-      } else {
-        unbindWindow()
-      }
+      syncShellRoute(el)
       syncHomeInfiniteScroll()
     }
 
@@ -7053,6 +7108,7 @@
       if (!(pagination instanceof Element)) return
       pagination.classList.add('sb-infinite-scroll-pagination-hidden')
       pagination.setAttribute('aria-hidden', 'true')
+      pagination.setAttribute('data-lsb-shell-inf', '1')
     }
 
     function setHomeInfStatus(kind, text) {
@@ -7177,7 +7233,10 @@
       }
       if (homeInf?.list === list && homeInf.pagination === pagination) return
       unbindHomeInfiniteScroll()
-      if (pagination.classList.contains('sb-infinite-scroll-pagination-hidden')) return
+      if (
+        pagination.classList.contains('sb-infinite-scroll-pagination-hidden')
+        && !pagination.hasAttribute('data-lsb-shell-inf')
+      ) return
       bindHomeInfiniteScroll(list, pagination)
     }
 
@@ -7219,6 +7278,168 @@
         || /^\/forum\/\d+/.test(path)
         || /^\/category\/\d+/.test(path)
       )
+    }
+
+    function viewCacheKey(href) {
+      const u = new URL(href, location.href)
+      let path = u.pathname.replace(/\/{2,}/g, '/') || '/'
+      if (path === '/index.php') path = '/'
+      return path + u.search
+    }
+
+    function rememberView(key, entry) {
+      if (viewCache.has(key)) viewCache.delete(key)
+      viewCache.set(key, entry)
+      while (viewCache.size > VIEW_CACHE_MAX) {
+        const oldest = viewCache.keys().next().value
+        viewCache.delete(oldest)
+      }
+    }
+
+    function snapshotOutletAttrs(el) {
+      if (!(el instanceof Element)) return []
+      return [...el.attributes].map((a) => [a.name, a.value])
+    }
+
+    function stashView(key) {
+      if (!key) return
+      try {
+        if (!isSpaUrl(new URL(key, location.origin).href)) return
+      } catch {
+        return
+      }
+      const outlet = findRouteOutlet()
+      if (!outlet?.firstChild) return
+      const frag = document.createDocumentFragment()
+      while (outlet.firstChild) frag.appendChild(outlet.firstChild)
+      rememberView(key, {
+        frag,
+        title: document.title,
+        scrollY: window.scrollY || 0,
+        live: true,
+        attrs: snapshotOutletAttrs(outlet),
+      })
+    }
+
+    function takeView(key) {
+      const entry = viewCache.get(key)
+      if (!entry) return null
+      viewCache.delete(key)
+      return entry
+    }
+
+    function applyView(entry, outlet) {
+      if (!outlet || !entry?.frag) return
+      if (entry.attrs) {
+        for (const name of [...outlet.getAttributeNames()]) outlet.removeAttribute(name)
+        for (const [name, value] of entry.attrs) {
+          if (name.startsWith('data-lsb-')) continue
+          outlet.setAttribute(name, value)
+        }
+      }
+      outlet.replaceChildren()
+      outlet.append(entry.frag)
+      if (entry.title) document.title = entry.title
+      outlet.removeAttribute('aria-busy')
+      markNative(true)
+    }
+
+    function parseOutletFrag(html) {
+      const pageDoc = new DOMParser().parseFromString(html, 'text/html')
+      const remote = findRouteOutlet(pageDoc)
+      if (!remote) return null
+      remote.querySelectorAll('script').forEach((node) => node.remove())
+      hideNativeSidebars(remote)
+      const frag = document.createDocumentFragment()
+      for (const node of [...remote.childNodes]) frag.appendChild(document.importNode(node, true))
+      return { frag, title: pageDoc.title || '', attrs: snapshotOutletAttrs(remote) }
+    }
+
+    function wantsHomeStashRefresh() {
+      return spaBound && cfg.shell && spaViewKey !== '/' && viewCache.has('/')
+    }
+
+    function stopHomeStashRefresh() {
+      if (homeStashTimer) {
+        window.clearTimeout(homeStashTimer)
+        homeStashTimer = 0
+      }
+    }
+
+    function scheduleHomeStashRefresh() {
+      if (!wantsHomeStashRefresh()) {
+        stopHomeStashRefresh()
+        homeStashPending = false
+        homeStashGen += 1
+        return
+      }
+      if (homeStashTimer || homeStashInflight) return
+      homeStashTimer = window.setTimeout(() => {
+        homeStashTimer = 0
+        void refreshStashedHome()
+      }, HOME_STASH_REFRESH_MS)
+    }
+
+    async function refreshStashedHome() {
+      if (!wantsHomeStashRefresh()) return
+      if (document.visibilityState === 'hidden') {
+        homeStashPending = true
+        return
+      }
+      homeStashPending = false
+      if (homeStashInflight) return homeStashInflight
+      const gen = homeStashGen
+      homeStashInflight = (async () => {
+        try {
+          const res = await api.net.raw('/', { queue: false, timeout: 15000, retry: 0 })
+          if (gen !== homeStashGen) return
+          if (!res.ok || !wantsHomeStashRefresh()) return
+          const parsed = parseOutletFrag(res.text)
+          if (!parsed || gen !== homeStashGen || !wantsHomeStashRefresh()) return
+          rememberView('/', {
+            frag: parsed.frag,
+            title: parsed.title,
+            scrollY: 0,
+            live: false,
+            attrs: parsed.attrs,
+          })
+        } catch {
+          /* 后台刷新失败则还回仍用旧存档 */
+        } finally {
+          homeStashInflight = null
+          if (gen === homeStashGen) scheduleHomeStashRefresh()
+        }
+      })()
+      return homeStashInflight
+    }
+
+    function onHomeStashVisible() {
+      if (document.visibilityState !== 'visible' || !homeStashPending) return
+      homeStashPending = false
+      void refreshStashedHome()
+    }
+
+    function seedHomeView() {
+      const here = viewCacheKey(location.href)
+      if (here === '/' || viewCache.has('/')) return
+      void (async () => {
+        try {
+          const res = await api.net.raw('/', { queue: false, timeout: 15000, retry: 0 })
+          if (!res.ok || viewCache.has('/') || spaViewKey === '/') return
+          const parsed = parseOutletFrag(res.text)
+          if (!parsed || viewCache.has('/') || spaViewKey === '/') return
+          rememberView('/', {
+            frag: parsed.frag,
+            title: parsed.title,
+            scrollY: 0,
+            live: false,
+            attrs: parsed.attrs,
+          })
+          scheduleHomeStashRefresh()
+        } catch {
+          /* 预取失败则点首页仍 GET */
+        }
+      })()
     }
 
     function hasUnsavedEditor() {
@@ -7325,6 +7546,63 @@
       }
     }
 
+    function perfHref() {
+      try {
+        return location.pathname + location.search
+      } catch {
+        return ''
+      }
+    }
+
+    function perfEmit(name, ms) {
+      try {
+        if (!api.hasHandler('perf-probe:record')) return
+        api.emitGlobal('perf:span', {
+          name,
+          plugin: 'skin',
+          ms,
+          href: perfHref(),
+          t: Date.now(),
+        })
+      } catch {
+        /* 探针失败不得打断壳 */
+      }
+    }
+
+    function perfSpan(name, fn) {
+      if (!api.hasHandler('perf-probe:record')) return fn()
+      const t0 = performance.now()
+      try {
+        return fn()
+      } finally {
+        perfEmit(name, performance.now() - t0)
+      }
+    }
+
+    async function perfSpanAsync(name, fn) {
+      if (!api.hasHandler('perf-probe:record')) return fn()
+      const t0 = performance.now()
+      try {
+        return await fn()
+      } finally {
+        perfEmit(name, performance.now() - t0)
+      }
+    }
+
+    let timelineEmitSec = -1
+    let timelineEmitN = 0
+    function perfEmitTimeline(ms) {
+      if (ms < 8) return
+      const sec = Math.floor(Date.now() / 1000)
+      if (sec !== timelineEmitSec) {
+        timelineEmitSec = sec
+        timelineEmitN = 0
+      }
+      if (timelineEmitN >= 2) return
+      timelineEmitN += 1
+      perfEmit('timeline.update', ms)
+    }
+
     async function navigateSpa(href, options = {}) {
       const settings = { historyMode: 'push', force: false, ...options }
       let target
@@ -7346,17 +7624,60 @@
         return true
       }
 
+      const fromKey = spaViewKey
+      const destKey = viewCacheKey(target.href)
+      const cached = takeView(destKey)
       const serial = ++spaSerial
+      const tTotal = api.hasHandler('perf-probe:record') ? performance.now() : 0
       const outlet = findRouteOutlet()
       outlet?.setAttribute('aria-busy', 'true')
       startProgress(serial)
       let committed = false
       try {
-        const res = await api.net.raw(`${target.pathname}${target.search}`, {
-          queue: false,
-          timeout: 15000,
-          retry: 0,
-        })
+        if (cached) {
+          stashView(fromKey)
+          applyHistory(target, settings.historyMode)
+          perfSpan('spa.commit', () => applyView(cached, findRouteOutlet() || outlet))
+          committed = true
+          spaViewKey = destKey
+          scheduleHomeStashRefresh()
+          perfSpan('spa.fillShell', () => {
+            applyMarkers()
+            fillShell()
+          })
+          spaFilledSerial = serial
+          window.clearTimeout(refreshTimer)
+          refreshTimer = 0
+          finishProgress(serial)
+          try {
+            if (settings.historyMode === 'none') window.scrollTo(0, cached.scrollY || 0)
+            else window.scrollTo(0, 0)
+          } catch {
+            /* jsdom 没有视口 */
+          }
+          if (tTotal) perfEmit('spa.total', performance.now() - tTotal)
+          afterPaint(() => {
+            if (serial !== spaSerial) return
+            perfSpan('spa.notify', () => {
+              notifyRoute()
+              syncShellRoute()
+            })
+            try {
+              api.emitGlobal('spa:view-restored', { href: destKey, live: !!cached.live })
+            } catch {
+              /* 实时流缺席不得打断壳 */
+            }
+          })
+          return true
+        }
+
+        const res = await perfSpanAsync('spa.fetch', () =>
+          api.net.raw(`${target.pathname}${target.search}`, {
+            queue: false,
+            timeout: 15000,
+            retry: 0,
+          }),
+        )
         if (serial !== spaSerial) return false
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const finalUrl = new URL(res.url || target.href, target.href)
@@ -7364,23 +7685,38 @@
           location.assign(finalUrl.href)
           return false
         }
-        const pageDoc = new DOMParser().parseFromString(res.text, 'text/html')
+        const pageDoc = perfSpan('spa.parse', () => new DOMParser().parseFromString(res.text, 'text/html'))
         const remoteOutlet = findRouteOutlet(pageDoc)
         if (!remoteOutlet) throw new Error('no remote outlet')
+        stashView(fromKey)
         applyHistory(finalUrl, settings.historyMode)
-        commitRoute(pageDoc, remoteOutlet)
+        perfSpan('spa.commit', () => {
+          commitRoute(pageDoc, remoteOutlet)
+        })
         committed = true
-        notifyRoute()
-        finishProgress(serial)
-        applyMarkers()
-        fillShell()
+        spaViewKey = viewCacheKey(finalUrl.href)
+        scheduleHomeStashRefresh()
+        perfSpan('spa.fillShell', () => {
+          applyMarkers()
+          fillShell()
+        })
+        spaFilledSerial = serial
         window.clearTimeout(refreshTimer)
         refreshTimer = 0
+        finishProgress(serial)
         try {
           window.scrollTo(0, 0)
         } catch {
           /* jsdom 没有视口 */
         }
+        if (tTotal) perfEmit('spa.total', performance.now() - tTotal)
+        afterPaint(() => {
+          if (serial !== spaSerial) return
+          perfSpan('spa.notify', () => {
+            notifyRoute()
+            syncShellRoute()
+          })
+        })
         return true
       } catch (err) {
         if (serial !== spaSerial) return false
@@ -7431,7 +7767,15 @@
     function onSpaPop() {
       if (spaIgnorePop || !cfg.shell) return
       if (!isSpaUrl(location.href)) {
-        location.reload()
+        // 软跳文档被后退到交易页/帖子等整页地址时，主栏还是列表，必须重开。
+        // 交易页本身就是整页打开的，不能见 popstate 就 reload，否则会刷死。
+        let paintedSpa = false
+        try {
+          paintedSpa = isSpaUrl(new URL(spaViewKey || '/', location.origin).href)
+        } catch {
+          paintedSpa = false
+        }
+        if (paintedSpa) location.reload()
         return
       }
       void navigateSpa(location.href, { historyMode: 'none', force: true })
@@ -7448,6 +7792,10 @@
       document.addEventListener('click', onSpaClick, true)
       document.addEventListener('submit', onSpaSubmit, true)
       window.addEventListener('popstate', onSpaPop)
+      document.addEventListener('visibilitychange', onHomeStashVisible)
+      spaViewKey = viewCacheKey(location.href)
+      seedHomeView()
+      scheduleHomeStashRefresh()
     }
 
     function unbindSpa() {
@@ -7459,6 +7807,10 @@
       document.removeEventListener('click', onSpaClick, true)
       document.removeEventListener('submit', onSpaSubmit, true)
       window.removeEventListener('popstate', onSpaPop)
+      document.removeEventListener('visibilitychange', onHomeStashVisible)
+      stopHomeStashRefresh()
+      homeStashPending = false
+      homeStashGen += 1
       document.getElementById('lsb-shell-progress')?.remove()
     }
 
@@ -7479,6 +7831,8 @@
       restoreTopExtras()
       restoreThemeToggle()
       restoreSearch()
+      viewCache.clear()
+      spaViewKey = ''
       document.getElementById('lsb-shell')?.remove()
       markNative(false)
       document.documentElement.classList.remove('lsb-skin-shell-on', 'lsb-skin-shell-topic', 'lsb-skin-shell-user')
@@ -7497,7 +7851,14 @@
       bindSpa()
     }
 
-    function scheduleRefresh() {
+    function afterPaint(fn) {
+      const raf = window.requestAnimationFrame
+      if (typeof raf === 'function') raf(() => fn())
+      else setTimeout(fn, 0)
+    }
+
+    function scheduleRefresh(fromRoute) {
+      if (fromRoute && spaFilledSerial && spaFilledSerial === spaSerial) return
       window.clearTimeout(refreshTimer)
       refreshTimer = window.setTimeout(refreshShell, 50)
     }
@@ -7521,19 +7882,27 @@
 
     api.on('config:changed:skin', () => {
       cfg = api.config()
+      invalidateTools()
       applyAll()
       syncGmMenu()
     })
-    api.on('route:changed', scheduleRefresh)
-    api.on('plugin:activated', scheduleRefresh)
-    api.on('plugin:disabled', scheduleRefresh)
+    api.on('route:changed', () => scheduleRefresh(true))
+    api.on('plugin:activated', () => {
+      invalidateTools()
+      scheduleRefresh(false)
+    })
+    api.on('plugin:disabled', () => {
+      invalidateTools()
+      scheduleRefresh(false)
+    })
     api.on('topic:posts-added', scheduleTimeline)
     api.dom.each(
-      '.dark-mode-control, [data-themes-mode-toggle], a.color-scheme-top-link, a.search-page-link, form.search-form',
+      '.dark-mode-control, [data-themes-mode-toggle], a.color-scheme-top-link, a.search-page-link, form.search-form, .sidebar-card.user-card',
       () => {
         if (!cfg.shell) return
         adoptSearch(document.querySelector('.lsb-shell-search-host'))
         adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
+        adoptUserCard(document.querySelector('[data-lsb-shell-me]'))
       },
     )
 
@@ -7575,14 +7944,14 @@
 
 
 ;
-/* ══════════════ LSB·实时流 v1.2.12 (live-feed) ══════════════ */
+/* ══════════════ LSB·实时流 v1.2.17 (live-feed) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.12',
+    version: '1.2.17',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -7695,7 +8064,7 @@
           maxTs = Math.max(maxTs, it.lastActiveTs || 0)
         }
       }
-      ctx = { ul, seen, maxId, maxTs, sort: listSort() }
+      ctx = { ul, seen, maxId, maxTs, sort: listSort(), prime: listSort() === 'comment' }
       mode = 'list'
       return true
     }
@@ -7994,6 +8363,9 @@
       const doc = await liveDoc(listUrl())
       if (gen !== navGen || ctx.ul !== ul || ctx.seen !== seen) return 0
       const isPost = ctx.sort === 'post'
+      // 回复流首页每条评论都在转：存档还回后立刻 cycle 会把整页热帖当成「新的」。
+      // 第一轮只对齐水位，真正的增量留给之后的巡检。发布流不这么做——还回首页仍要立刻插入新 id。
+      const priming = !!ctx.prime && !isPost
       const bumped = []
       for (const li of doc.querySelectorAll('li.post-item')) {
         if (!isListRow(li)) continue
@@ -8008,17 +8380,22 @@
         if (prev === undefined) {
           // 序数守卫：发布流只认 id 创新高的真·新帖；回复流只认活跃时间创新的。
           // 对侧流的旧帖即便没见过也不算数——这是「1 个说成 40+」的根因。
-          if (isPost ? it.id > ctx.maxId : (it.lastActiveTs || 0) > ctx.maxTs) {
+          if (!priming && (isPost ? it.id > ctx.maxId : (it.lastActiveTs || 0) > ctx.maxTs)) {
             pending.push(it)
             if (pending.length > 200) pending.shift()
           }
           ctx.seen.set(it.id, fp) // 无论是否计入，见过的都不再当新帖
+          if (priming) {
+            ctx.maxTs = Math.max(ctx.maxTs, it.lastActiveTs || 0)
+            ctx.maxId = Math.max(ctx.maxId, it.id)
+          }
         } else if (prev !== fp) {
           // 已在列表里、但回复数/活跃时间变了 → 老帖有新动态：原地高亮而非重复插入
           bumped.push(it)
           ctx.seen.set(it.id, fp)
         }
       }
+      if (priming) ctx.prime = false
       markBumped(bumped)
 
       if (!pending.length) {
@@ -8195,10 +8572,35 @@
     let lastErr = null
     let lastFresh = 0
 
+    function perfHref() {
+      try {
+        return location.pathname + location.search
+      } catch {
+        return ''
+      }
+    }
+
+    function perfEmitCycle(ms) {
+      try {
+        if (!api.hasHandler('perf-probe:record')) return
+        api.emitGlobal('perf:span', {
+          name: 'cycle',
+          plugin: 'live-feed',
+          ms,
+          href: perfHref(),
+          t: Date.now(),
+        })
+      } catch {
+        /* 探针失败不得打断巡检 */
+      }
+    }
+
     async function cycle() {
       if (!mode) init()
       if (!mode) return 0
       if (inflight) return inflight
+      const timed = api.hasHandler('perf-probe:record')
+      const t0 = timed ? performance.now() : 0
       inflight = (async () => {
         try {
           lastFresh = mode === 'list' ? await cycleList() : await cycleTopic()
@@ -8209,6 +8611,7 @@
           return 0
         } finally {
           inflight = null
+          if (timed) perfEmitCycle(performance.now() - t0)
           if (mode && shouldPoll()) scheduleNext()
         }
       })()
@@ -8269,7 +8672,15 @@
     /* 软导航换页：立刻重建基线。旧实现延迟 80ms，换页窗口里巡检会写进已经卸掉的 ul。 */
     api.on('route:changed', () => {
       init()
-      if (shouldPoll()) cycle()
+      if (shouldPoll() && !timer) scheduleNext()
+    })
+    api.on('spa:view-restored', () => {
+      init()
+      void (async () => {
+        const wait = inflight
+        if (wait) await wait
+        void cycle()
+      })()
     })
     api.on('topic:posts-added', (posts) => {
       if (mode !== 'topic') return
@@ -8324,20 +8735,173 @@
   else ;(w.LSB_PLUGINS = w.LSB_PLUGINS || []).push({ manifest, setup })
 })()
 
+
+;
+/* ══════════════ LSB·性能探针 v1.0.0 (perf-probe) ══════════════ */
+(function () {
+  'use strict'
+
+  const manifest = {
+    id: 'perf-probe',
+    name: '性能探针',
+    version: '1.0.0',
+    description: '本机记录软跳 / 巡检 / 时间轴慢帧耗时，默认关闭',
+    author: 'you',
+    requires: { base: '^0.1.0' },
+    permissions: ['ui', 'storage', 'events'],
+    config: {
+      enabled: { type: 'switch', label: '记录卡顿', default: false },
+    },
+  }
+
+  function setup(api) {
+    const buf = []
+    let timelineSec = -1
+    let timelineN = 0
+    let offRecord = () => {}
+    let offSpan = () => {}
+
+    function acceptSpan(span) {
+      if (!span || typeof span.ms !== 'number' || !span.name) return false
+      if (span.name !== 'timeline.update') return true
+      if (span.ms < 8) return false
+      const sec = Math.floor(Number(span.t || Date.now()) / 1000)
+      if (sec !== timelineSec) {
+        timelineSec = sec
+        timelineN = 0
+      }
+      if (timelineN >= 2) return false
+      timelineN += 1
+      return true
+    }
+
+    function unbindRecording() {
+      offRecord()
+      offRecord = () => {}
+      offSpan()
+      offSpan = () => {}
+    }
+
+    function bindRecording() {
+      unbindRecording()
+      if (!api.config().enabled) return
+      offRecord = api.handle('perf-probe:record', () => {})
+      offSpan = api.on('perf:span', (span) => {
+        if (!acceptSpan(span)) return
+        buf.push({
+          name: span.name,
+          plugin: span.plugin,
+          ms: span.ms,
+          href: span.href,
+          t: span.t,
+        })
+        if (buf.length > 200) buf.shift()
+      })
+    }
+
+    function dump() {
+      return buf.map((x) => ({ ...x }))
+    }
+
+    bindRecording()
+    api.on('config:changed:perf-probe', () => {
+      bindRecording()
+    })
+    api.onDispose(() => unbindRecording())
+
+    api.ui.configTab({
+      name: '性能探针',
+      order: 90,
+      render(host) {
+        const on = !!api.config().enabled
+        const rows = dump().slice().reverse()
+        const slow = rows.reduce((a, b) => (!a || b.ms > a.ms ? b : a), null)
+        const summary = document.createElement('div')
+        summary.className = 'lsb-row-desc'
+        summary.style.margin = '10px 0'
+        if (!on) summary.textContent = '未开记录'
+        else if (!rows.length) summary.textContent = '暂无'
+        else summary.textContent = `最慢 ${slow.name} ${slow.ms}ms · 共 ${rows.length} 条`
+        host.appendChild(summary)
+
+        const table = document.createElement('div')
+        table.className = 'lsb-row-desc'
+        table.style.maxHeight = '240px'
+        table.style.overflow = 'auto'
+        for (const row of rows) {
+          const line = document.createElement('div')
+          line.className = 'lsb-row'
+          line.textContent = `${Math.round(row.ms)}ms  ${row.name}  ${row.plugin || ''}  ${row.href || ''}`
+          table.appendChild(line)
+        }
+        host.appendChild(table)
+
+        const copy = document.createElement('button')
+        copy.className = 'lsb-btn'
+        copy.style.marginTop = '8px'
+        copy.textContent = '复制 JSON'
+        copy.onclick = async () => {
+          const text = JSON.stringify(dump(), null, 2)
+          try {
+            if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text)
+            else {
+              const ta = document.createElement('textarea')
+              ta.value = text
+              document.body.append(ta)
+              ta.select()
+              document.execCommand('copy')
+              ta.remove()
+            }
+            api.ui.toast('已复制', { type: 'success' })
+          } catch (e) {
+            api.ui.toast('复制失败：' + ((e && e.message) || e), { type: 'error' })
+          }
+        }
+        host.appendChild(copy)
+
+        const clearBtn = document.createElement('button')
+        clearBtn.className = 'lsb-btn'
+        clearBtn.style.marginLeft = '8px'
+        clearBtn.textContent = '清空'
+        clearBtn.onclick = () => {
+          buf.length = 0
+          api.ui.showTab('perf-probe')
+        }
+        host.appendChild(clearBtn)
+      },
+    })
+
+    api.handle('perf-probe:debug', () => ({
+      dump,
+      clear: () => {
+        buf.length = 0
+      },
+      recording: () => api.hasHandler('perf-probe:record'),
+      slowest: () => buf.reduce((a, b) => (!a || b.ms > a.ms ? b : a), null),
+    }))
+
+    return {}
+  }
+
+  const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
+  if (w.LSB && w.LSB.register) w.LSB.register(manifest, setup)
+  else (w.LSB_PLUGINS = w.LSB_PLUGINS || []).push({ manifest, setup })
+})()
+
 /* ══════════════ 套件中心（suite-core） ══════════════ */
 ;(function () {
   'use strict'
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.96',
+    version: '1.0.105',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'ui', 'events'],
   }
 
-  const MEMBERS = ["floor-stats","hot-floor-badge","resume-reading","read-mark","home-return","hover-profile","topic-preview","unread-sentinel","forum-watch","checkin-calendar","points-ledger","title-quotes","ai-summary","data-migration","my-archive","annual-report","skin","live-feed"]
+  const MEMBERS = ["floor-stats","hot-floor-badge","resume-reading","read-mark","home-return","hover-profile","topic-preview","unread-sentinel","forum-watch","checkin-calendar","points-ledger","title-quotes","ai-summary","data-migration","my-archive","annual-report","skin","live-feed","perf-probe"]
 
   /** 基座错误日志的四类条目（module-error=主动上报，其余为自动捕获） */
   const ERROR_KINDS = ['module-error', 'plugin-error', 'uncaught', 'rejection']
@@ -8359,27 +8923,34 @@
             .reduce((s, e) => s + (e.n || 1), 0)
           return Promise.resolve(n + ' 条')
         }],
-        ['📖 阅读记录', () => api.request('resume-reading:debug').then((d) => Object.keys(d.all()).length + ' 帖')],
+        ['📖 阅读记录', () => api.request('resume-reading:debug').then((d) => Object.keys(d.all()).length + ' 帖'), 'resume-reading'],
         ['✅ 今日签到', () =>
           api.request('checkin-calendar:debug').then((d) => {
             const s = d.recs()[today()]?.s
             return s === 'ok' ? '已签 · 连击 ' + d.streak() : d.streak() + ' 天连击待续'
-          })],
+          }), 'checkin-calendar'],
         ['📈 积分快照', () =>
           api.request('points-ledger:series', { days: 7 }).then((s) =>
             s.length ? '最新 ' + s[s.length - 1].p + ' 分 / ' + s.length + ' 点' : '暂无',
-          )],
-        ['🔔 消息箱', () => api.request('unread-sentinel:debug').then((d) => d.inbox().length + ' 条动态')],
-        ['🎯 机会命中', () => api.request('forum-watch:debug').then((d) => d.hits().length + ' 条')],
+          ), 'points-ledger'],
+        ['🔔 消息箱', () => api.request('unread-sentinel:debug').then((d) => d.inbox().length + ' 条动态'), 'unread-sentinel'],
+        ['🎯 机会命中', () => api.request('forum-watch:debug').then((d) => d.hits().length + ' 条'), 'forum-watch'],
+        ['卡顿记录', () =>
+          api.request('perf-probe:debug').then((d) => {
+            const s = d.slowest()
+            return s ? `最慢 ${s.ms}ms ${s.name}` : '未开记录'
+          }).catch(() => '未开记录'), 'perf-probe'],
       ]
       return Promise.all(
-        jobs.map(async ([label, fn]) => {
-          try {
-            return { label, value: await fn() }
-          } catch {
-            return { label, value: '—' } // 模块被停用或尚无数据
-          }
-        }),
+        jobs
+          .filter((job) => !job[2] || MEMBERS.includes(job[2]))
+          .map(async ([label, fn]) => {
+            try {
+              return { label, value: await fn() }
+            } catch {
+              return { label, value: '—' } // 模块被停用或尚无数据
+            }
+          }),
       )
     }
 

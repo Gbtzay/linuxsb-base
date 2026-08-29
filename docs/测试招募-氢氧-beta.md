@@ -1,30 +1,33 @@
-# 【RC】LINUX.SB 氢 / 氧：冻新功能，只修阻断
+# LINUX.SB 氢 / 氧
 
-这是一套给 linux.sb 用的 Tampermonkey 脚本，现在是 **RC**，不是正式版。冻新功能，只修阻断。
-
-基座叫 **氢**，功能包叫 **氧**。两个都要装，**先氢后氧**。不是站点官方出品，数据只存在你自己浏览器里。
+这是一套给 linux.sb 用的 Tampermonkey 脚本，现在是正式版。基座叫 **氢**，功能包叫 **氧**。两个都要装，**先氢后氧**。不是站点官方出品，数据只存在你自己浏览器里。
 
 装之前建议先在氢面板里用「配置迁移」导出一份备份（第一次装可以忽略）。
 
-## 冻本
+## 版本
 
 | | 油猴名 | 版本 |
 |---|---|---|
-| 氢 | LINUX.SB 氢（RC） | **0.1.33** |
-| 氧 | LINUX.SB 氧（RC） | **1.0.96** |
+| 氢 | LINUX.SB 氢 | **0.1.36** |
+| 氧 | LINUX.SB 氧 | **1.0.105** |
+| LTS | LINUX.SB（LTS） | **1.0.105** |
 
-对不上就刷新 Greasy Fork / GitHub 再装一次。氢 **0.1.33** 跟了站点 v8.7.5，氧也要一起换（先氢后氧）。
+对不上就刷新 Greasy Fork 再装一次。氧也要一起换（先氢后氧）。
+
+**氢+氧** 和 **LTS** 二选一，不要同时开。开发线继续装氢再装氧。只要日常浏览、不想跟新功能，装 LTS：https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts （油猴名 LINUX.SB（LTS））。请先关掉或卸掉「LINUX.SB 氢」和「LINUX.SB 氧」，只留 LTS。LTS 不含称号行情、机会监控、AI 总结、个人存档、高频标记、性能探针、悬停画像。LTS 冻新功能，只修装不上、页面花、请求打爆、数据丢。
 
 ## 安装
 
 1. 浏览器装 [Tampermonkey](https://www.tampermonkey.net/)
-2. 安装氢（RC）：https://greasyfork.org/zh-CN/scripts/592914-linux-sb-%E6%B0%A2-beta
-3. 安装氧（RC）：https://greasyfork.org/zh-CN/scripts/592915-linux-sb-%E6%B0%A7-beta
+2. 安装氢：https://greasyfork.org/zh-CN/scripts/592914-linux-sb-%E6%B0%A2-beta
+3. 安装氧：https://greasyfork.org/zh-CN/scripts/592915-linux-sb-%E6%B0%A7-beta
 4. 打开 linux.sb，右下角出现 **H**，氢面板「插件」里能看到一串模块，就算装上了
+
+LTS 与上面二选一：不要同时开氢/氧和 LINUX.SB（LTS）。商店页：https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts
 
 作者页：https://greasyfork.org/zh-CN/users/1637325-xb70sr71
 
-GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.62
+GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.105
 
 Greasy Fork 地址里可能还带 `-beta`，以油猴里的脚本名和版本号为准。
 
@@ -50,7 +53,7 @@ Greasy Fork 地址里可能还带 `-beta`，以油猴里的脚本名和版本号
 - `@connect *` 是为了你自己填的模型地址
 - 进帖子先出空壳色块再填内容，是有意的
 - 称号行情：旧默认 1 分钟 / 30 分钟会改成 30 秒；自己改过的分钟间隔会换算成秒
-- RC 期间请以 Greasy Fork / GitHub 上的版本号为准，不要混装旧文件
+- 请以 Greasy Fork / GitHub 上的版本号为准，不要混装旧文件
 
 ## 怎么反馈
 
@@ -61,4 +64,4 @@ Greasy Fork 地址里可能还带 `-beta`，以油猴里的脚本名和版本号
 - 哪一页、哪一步、期望是什么、实际是什么
 - 能复现的话更好；氢面板「运行日志」可以一并带上
 
-这轮只收：装不上、页面花了、请求打爆、数据丢了、氢壳/回位/实时流/称号行情明显错。新功能许愿这轮不做。
+开发线可以提新功能。LTS 不收新模块。

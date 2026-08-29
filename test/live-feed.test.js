@@ -405,3 +405,132 @@ test('实时流：精华 / 抽奖按新帖序数巡检，不当成回复流', as
   await lucky.until(() => luckyDbg.role() === 'leader', 3000)
   assert.equal(luckyDbg.baseline().sort, 'post', '抽奖流按帖 id，不能因缺时间戳整页漏报')
 })
+
+test('实时流：route:changed 只重建基线，不立刻再 GET', async () => {
+  const { w, tick, until } = makeSite(homeHtml, '/', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, pollSec: 30, autoInsert: false },
+  })
+  const calls = feedStub(w, () => homeHtml)
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await tick(80)
+  const n = calls.length
+  assert.ok(n >= 1, '选主后首轮巡检至少 GET 一次')
+  w.LSB.bus.emit('route:changed', { href: w.location.href, page: { ...w.LSB.__core.snapshot.page } }, { source: 'core' })
+  await tick(80)
+  assert.equal(calls.length, n, '换页广播后不能马上再拉当前列表')
+  assert.equal(dbg.mode(), 'list')
+  await dbg.pollOnce()
+  assert.ok(calls.length > n, '手动 tick / 定时器仍要能巡检')
+})
+
+test('实时流：探针开着时 pollOnce 记一条 cycle', async () => {
+  const { w, tick, until } = makeSite(homeHtml, '/', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, pollSec: 30, autoInsert: false },
+    'lsb_base:perf-probe:__config': { enabled: true },
+  })
+  feedStub(w, () => homeHtml)
+  await loadBase(w, PLUG('perf-probe.user.js'), PLUG('live-feed.user.js'))
+  const feed = await w.LSB.bus.request('live-feed:debug')
+  await until(() => feed.role() === 'leader', 3000)
+  const probe = await w.LSB.bus.request('perf-probe:debug')
+  const before = probe.dump().filter((x) => x.name === 'cycle').length
+  await feed.pollOnce()
+  await tick(40)
+  const cycles = [...probe.dump()].filter((x) => x.name === 'cycle')
+  assert.ok(cycles.length > before, '手动巡检要记 cycle')
+  assert.equal(cycles.at(-1).plugin, 'live-feed')
+})
+
+const feedItem = (id, title, ts) =>
+  '<li class="post-item"><div class="post-body"><div class="post-title-row">' +
+  `<a class="post-title" href="/topic/${id}">${title}</a></div>` +
+  `<div class="post-meta"><span data-performance-time="${ts}"></span><span>0</span></div></div></li>`
+
+function pageWithItems(items) {
+  const next = homeHtml.replace(/<ul class="post-list">[\s\S]*?<\/ul>/, `<ul class="post-list">${items}</ul>`)
+  assert.notEqual(next, homeHtml, '夹具 ul.post-list 必须能被换成测试条目')
+  return next
+}
+
+test('实时流：切到新评论不得把回复流整页报成新帖', async () => {
+  const staleItems = [10, 11, 12, 13].map((id, i) => feedItem(id, `旧评论${id}`, 1700000000 + i)).join('')
+  const hotItems = Array.from({ length: 12 }, (_, i) => feedItem(200 + i, `热评论${200 + i}`, 1800000000 + i)).join('')
+  const hotPage = pageWithItems(hotItems)
+  let serve = homeHtml
+  const { w, tick, until } = makeSite(homeHtml, '/?sort=post', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, pollSec: 30, autoInsert: false },
+  })
+  const calls = feedStub(w, () => serve)
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+  assert.equal(dbg.baseline().sort, 'post')
+  assert.equal(dbg.pending(), 0)
+
+  // 存档还回：屏幕上是过期的新评论页，巡检却拉到已轮转的热页
+  w.document.querySelector('ul.post-list').innerHTML = staleItems
+  serve = hotPage
+  w.history.pushState({}, '', '/?sort=comment')
+  w.dispatchEvent(new w.PopStateEvent('popstate'))
+  await until(() => w.LSB.info().page.sort === 'comment', 800)
+  const n = calls.length
+  w.LSB.bus.emit('spa:view-restored', { href: '/?sort=comment', live: false })
+  await dbg.pollOnce()
+  assert.ok(calls.length > n, '还回新评论仍应立刻巡检一页')
+  assert.equal(dbg.baseline().sort, 'comment')
+  assert.equal(dbg.pending(), 0, `切到新评论不能把热页 ${dbg.pending()} 条整页报新`)
+  assert.equal(dbg.bannerVisible(), false)
+
+  serve = hotPage.replace('</ul>', feedItem(999, '真新评论', 1900000000) + '</ul>')
+  await dbg.pollOnce()
+  assert.equal(dbg.pending(), 1, '水位对齐后只报真正新于当前页的一条')
+})
+
+test('实时流：存档还回首页后立刻巡检', async () => {
+  const { w, tick, until } = makeSite(homeHtml, '/', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, pollSec: 30, autoInsert: false },
+  })
+  w.scrollTo = () => {}
+  const calls = feedStub(w, () => homeHtml)
+  await loadBase(w, PLUG('skin.user.js'), PLUG('live-feed.user.js'))
+  const feed = await w.LSB.bus.request('live-feed:debug')
+  await until(() => feed.role() === 'leader', 3000)
+  await tick(80)
+  const toForum = w.document.createElement('a')
+  toForum.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(toForum)
+  toForum.click()
+  await tick(120)
+  const n = calls.length
+  w.document.querySelector('.lsb-shell-brand')?.click()
+  await tick(120)
+  assert.equal(w.location.pathname, '/')
+  assert.ok(calls.length > n, '还回存档后要立刻 cycle 拉一页，不能干等到下一轮定时器')
+})
+
+test('实时流：非主标签还回存档也立刻巡检', async () => {
+  const { w, tick, until } = makeSite(homeHtml, '/', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, pollSec: 30, autoInsert: false },
+  })
+  w.scrollTo = () => {}
+  const calls = feedStub(w, () => homeHtml)
+  await loadBase(w, PLUG('skin.user.js'), PLUG('live-feed.user.js'))
+  const feed = await w.LSB.bus.request('live-feed:debug')
+  await until(() => feed.role() === 'leader', 3000)
+  await tick(80)
+  const toForum = w.document.createElement('a')
+  toForum.href = 'https://linux.sb/forum/4'
+  w.document.querySelector('main.wrap').append(toForum)
+  toForum.click()
+  await tick(120)
+  feed.demote()
+  assert.equal(feed.role(), 'follower')
+  const n = calls.length
+  w.document.querySelector('.lsb-shell-brand')?.click()
+  await tick(120)
+  assert.equal(w.location.pathname, '/')
+  assert.ok(calls.length > n, 'follower 还回存档也要立刻 cycle，不能因为 shouldPoll 为假而跳过')
+})

@@ -6,6 +6,7 @@ import { JSDOM } from 'jsdom'
 
 const suiteCode = readFileSync(new URL('../dist/linuxsb-suite.user.js', import.meta.url), 'utf8')
 const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const ltsCode = readFileSync(new URL('../dist/linuxsb-lts.user.js', import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
 
 import { ORDER as MEMBERS, SUITE_EXCLUDE } from '../suite/order.js'
@@ -102,6 +103,8 @@ test('套件总览：关键指标聚合各模块 RPC（含停用降级为 —）
   const view = w.document.querySelector('.lsb-view').textContent
   assert.match(view, /阅读记录/)
   assert.match(view, /消息箱/)
+  assert.match(view, /机会命中/)
+  assert.match(view, /卡顿记录/)
   assert.doesNotMatch(view, /本地工作台/)
 
   // 停用 points-ledger 后其指标降级为 — 而不是报错
@@ -205,15 +208,51 @@ test('Greasy Fork：氢/氧声明 license、作者、www 域', () => {
   assert.doesNotMatch(suiteCode, /@updateURL/)
 })
 
-test('Greasy Fork：氢/氧对外名称与简介标明 RC', () => {
-  assert.match(baseCode, /@name\s+LINUX\.SB 氢（RC）/)
-  assert.match(suiteCode, /@name\s+LINUX\.SB 氧（RC）/)
-  assert.match(baseCode, /@name:en\s+LINUX\.SB Hydrogen \(RC\)/)
-  assert.match(suiteCode, /@name:en\s+LINUX\.SB Oxygen \(RC\)/)
-  assert.match(baseCode, /@description\s+【RC】/)
-  assert.match(suiteCode, /@description\s+【RC】/)
-  assert.match(baseCode, /@description:en\s+\[RC\]/)
-  assert.match(suiteCode, /@description:en\s+\[RC\]/)
+test('Greasy Fork：氢/氧对外名称与简介不带 RC', () => {
+  assert.match(baseCode, /@name\s+LINUX\.SB 氢\s*$/m)
+  assert.match(suiteCode, /@name\s+LINUX\.SB 氧\s*$/m)
+  assert.match(baseCode, /@name:en\s+LINUX\.SB Hydrogen\s*$/m)
+  assert.match(suiteCode, /@name:en\s+LINUX\.SB Oxygen\s*$/m)
+  assert.match(baseCode, /@version\s+0\.1\.36/)
+  assert.match(suiteCode, /@version\s+1\.0\.105/)
+  assert.match(baseCode, /@description\s+linux\.sb 脚本基座/)
+  assert.match(suiteCode, /@description\s+linux\.sb 功能套件/)
+  assert.doesNotMatch(baseCode, /【RC】/)
+  assert.doesNotMatch(suiteCode, /【RC】/)
+  assert.doesNotMatch(baseCode, /@description:en\s+\[RC\]/)
+  assert.doesNotMatch(suiteCode, /@description:en\s+\[RC\]/)
+  assert.doesNotMatch(baseCode, /氢（RC）/)
+  assert.doesNotMatch(suiteCode, /氧（RC）/)
+  assert.doesNotMatch(baseCode, /Hydrogen \(RC\)/)
+  assert.doesNotMatch(suiteCode, /Oxygen \(RC\)/)
   assert.doesNotMatch(baseCode, /（Beta）/)
   assert.doesNotMatch(suiteCode, /@name\s+LINUX\.SB 氧（Beta）/)
+})
+
+const LTS_COLLISION =
+  '请先在油猴里关掉或卸掉「LINUX.SB 氢」和「LINUX.SB 氧」，只留 LINUX.SB（LTS）。'
+
+test('Greasy Fork：LTS 产物一段头、document-start、含氢 grant、不含 local-bridge', () => {
+  assert.equal([...ltsCode.matchAll(/\/\/ ==UserScript==/g)].length, 1)
+  assert.match(ltsCode, /@name\s+LINUX\.SB（LTS）/)
+  assert.match(ltsCode, /@name:en\s+LINUX\.SB \(LTS\)/)
+  assert.match(ltsCode, /@version\s+1\.0\.105/)
+  assert.match(ltsCode, /冻新功能/)
+  assert.doesNotMatch(ltsCode, /氢（RC）/)
+  assert.doesNotMatch(ltsCode, /【RC】/)
+  assert.match(ltsCode, /@run-at\s+document-start/)
+  assert.match(ltsCode, /@grant\s+unsafeWindow/)
+  assert.match(ltsCode, /@grant\s+GM_xmlhttpRequest/)
+  assert.doesNotMatch(ltsCode, /@updateURL/)
+  assert.match(ltsCode, /id: 'skin'/)
+  assert.match(ltsCode, /id: 'live-feed'/)
+  for (const id of ['local-bridge', 'title-quotes', 'forum-watch', 'ai-summary', 'my-archive', 'hot-floor-badge', 'perf-probe', 'hover-profile']) {
+    assert.doesNotMatch(ltsCode, new RegExp(`id: '${id}'`))
+  }
+  assert.match(ltsCode, /__LSB_CHANNEL__\s*=\s*'lts'/)
+  assert.match(ltsCode, new RegExp(LTS_COLLISION.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+})
+
+test('产物可解析：LTS 也是合法 JS', () => {
+  assert.doesNotThrow(() => new Function(ltsCode))
 })

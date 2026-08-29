@@ -7,6 +7,9 @@ import {
   classifyVersion,
   localOxygenVersion,
   installHref,
+  hostWindow,
+  isLtsChannel,
+  ltsDisplayVersion,
 } from '../src/check-update.js'
 
 test('检查更新：Greasy Fork JSON 地址与安装页', () => {
@@ -49,4 +52,30 @@ test('检查更新：installHref 空 url 回退', () => {
   assert.equal(installHref({ version: '1', url: 'https://store/h' }, 'https://fallback'), 'https://store/h')
   assert.equal(installHref({ version: '1', url: '' }, 'https://fallback'), 'https://fallback')
   assert.equal(installHref(null, 'https://fallback'), 'https://fallback')
+})
+
+test('检查更新：LTS 条目对照 593319', () => {
+  const l = SCRIPTS.find((s) => s.id === 'lts')
+  assert.equal(l.gfId, 593319)
+  assert.equal(l.label, 'LTS')
+  assert.equal(l.installUrl, 'https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts')
+})
+
+test('检查更新：isLtsChannel 只认 __LSB_CHANNEL__ === lts', () => {
+  const w = hostWindow()
+  const prevC = w.__LSB_CHANNEL__
+  const prevV = w.__LSB_LTS_VERSION__
+  try {
+    w.__LSB_CHANNEL__ = undefined
+    assert.equal(isLtsChannel(w), false)
+    w.__LSB_CHANNEL__ = 'lts'
+    w.__LSB_LTS_VERSION__ = '1.0.100'
+    assert.equal(isLtsChannel(w), true)
+    assert.equal(ltsDisplayVersion(w), '1.0.100')
+    w.__LSB_LTS_VERSION__ = ''
+    assert.equal(ltsDisplayVersion(w), '')
+  } finally {
+    w.__LSB_CHANNEL__ = prevC
+    w.__LSB_LTS_VERSION__ = prevV
+  }
 })

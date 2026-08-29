@@ -66,7 +66,7 @@ function trapOverscroll(root) {
 }
 
 export class UI {
-  constructor({ title = 'LINUX.SB · 氢（RC）', version = '' } = {}) {
+  constructor({ title = 'LINUX.SB · 氢', version = '' } = {}) {
     this.title = title
     this.version = version
     this._tabs = [] // 插件注册的面板分页

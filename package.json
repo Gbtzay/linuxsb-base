@@ -1,10 +1,10 @@
 {
   "name": "linuxsb-base",
-  "version": "0.1.33",
+  "version": "0.1.36",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build.mjs && node build-suite.mjs",
+    "build": "node build.mjs && node build-suite.mjs && node build-lts.mjs",
     "test": "node --test --test-force-exit --test-concurrency=4"
   },
   "devDependencies": {
