@@ -370,3 +370,80 @@ test('路由：旧主题请求完成后不覆盖新主题面板', async () => {
   await sleep(100)
   assert.equal(ctx.w.document.querySelector('.lsb-copilot-result'), null)
 })
+
+test('M2 提示词：观点分歧包含观点字段、引用和未知项约束', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const req = dbg.buildRequest('analyze', await dbg.collectContext({}), { preset: '观点分歧' })
+  assert.equal(req.meta.analysisKind, '观点分歧')
+  assert.equal(req.meta.analysisVersion, '1')
+  assert.match(req.system, /## 主要观点/)
+  assert.match(req.system, /反驳或限制/)
+  assert.match(req.system, /[#]N/)
+  assert.match(req.system, /未知|未验证/)
+  assert.match(req.user, /<forum-content>/)
+})
+
+test('M2 提示词：方案对比包含证据、风险、条件和选择建议', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const req = dbg.buildRequest('analyze', await dbg.collectContext({}), { preset: '方案对比' })
+  assert.equal(req.meta.analysisKind, '方案对比')
+  assert.match(req.system, /## 方案对比/)
+  assert.match(req.system, /已验证/)
+  assert.match(req.system, /风险或限制/)
+  assert.match(req.system, /适用条件/)
+  assert.match(req.system, /## 选择建议/)
+  assert.match(req.system, /无法判断|未知|未验证/)
+  assert.match(req.user, /<forum-content>/)
+})
+
+test('M2 缓存：分析预设与分析协议版本参与指纹', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const context = await dbg.collectContext({})
+  const a = dbg.buildRequest('analyze', context, { preset: '观点分歧' })
+  const b = dbg.buildRequest('analyze', context, { preset: '方案对比' })
+  assert.notEqual(a.fingerprint, b.fingerprint)
+  assert.equal(dbg.analysisVersion, '1')
+  assert.equal(a.meta.analysisVersion, '1')
+})
+
+test('M2 记录：保存分析类型、协议版本和引用数量', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: { choices: [{ message: { content: '## 结论\n依据 [#12]' } }] },
+  })
+  const dbg = await load(ctx)
+  const record = await dbg.run('analyze', { preset: '观点分歧' })
+  assert.equal(record.meta.analysisKind, '观点分歧')
+  assert.equal(record.meta.analysisVersion, '1')
+  assert.equal(record.meta.citationCount, 1)
+  assert.equal(record.meta.citations[0].floor, 12)
+})
+
+test('M2 UI：观点分歧和方案对比按钮存在并显示结构化结果', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: { choices: [{ message: { content: '## 结论\n采用方案 A，依据 [#12]' } }] },
+  })
+  await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="analyze"]').click()
+  assert.ok(panel.querySelector('[data-preset="观点分歧"]'))
+  assert.ok(panel.querySelector('[data-preset="方案对比"]'))
+  panel.querySelector('[data-preset="观点分歧"]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-result')))
+  assert.match(ctx.w.document.querySelector('.lsb-copilot-result').textContent, /采用方案 A/)
+  assert.match(ctx.w.document.querySelector('.lsb-copilot-facts').textContent, /观点分歧|引用 1/)
+  assert.ok(ctx.w.document.querySelector('[data-citation-floor="12"]'))
+})
+
+test('M2 UI：模型未遵循标题格式时仍显示原文和引用', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: { choices: [{ message: { content: '只有一句普通文本，依据 [#12]' } }] },
+  })
+  const dbg = await load(ctx)
+  const record = await dbg.run('analyze', { preset: '方案对比' })
+  assert.match(record.text, /只有一句普通文本/)
+  assert.equal(record.meta.citations[0].known, true)
+})

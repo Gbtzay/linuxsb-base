@@ -37,14 +37,53 @@
   const OP_BUDGET_RATIO = 0.5
   const MIN_TOTAL_CHARS = 500
   const CITATION_VERSION = '2'
+  const ANALYSIS_VERSION = '1'
   const DIGEST_MAX_PENDING = 100
   const ANALYZE_PRESETS = {
-    未解决问题: '列出仍未得到明确回答的问题，逐项标注相关楼层；无法确认时明确写出未知。',
-    观点与分歧: '按立场、代表楼层和核心理由归纳各方观点，指出真正的分歧。',
-    讨论时间线: '按楼层和时间整理讨论转折，只保留影响结论的事件。',
-    方案优缺点: '提取具体方案、证据和限制，分别列出已验证与未验证部分。',
-    新手版解释: '把帖子改写成刚接触 Linux 的读者能理解的说明，保留必要楼层引用。',
-    '代码和命令提取': '只整理可执行命令、配置片段和代码相关结论，并标注出处楼层。',
+    未解决问题: {
+      instruction: '列出仍未得到明确回答的问题，逐项标注相关楼层；无法确认时明确写出未知。',
+    },
+    观点分歧: {
+      instruction: '归纳不同立场、代表楼层、核心理由、支持证据和反驳或限制；不足两种立场时明确写出未形成明确分歧。',
+      format:
+        '依次输出以下 Markdown 标题和字段：\n' +
+        '## 结论\n' +
+        '## 主要观点\n' +
+        '### 观点 1：<简短名称>\n' +
+        '- 主张：\n' +
+        '- 代表楼层：[#N]\n' +
+        '- 核心理由：\n' +
+        '- 支持证据：\n' +
+        '- 反驳或限制：\n' +
+        '## 核心分歧\n' +
+        '## 未验证项\n' +
+        '引用只使用论坛材料中真实存在的 [#N]；没有依据写未知或未验证。',
+    },
+    讨论时间线: {
+      instruction: '按楼层和时间整理讨论转折，只保留影响结论的事件。',
+    },
+    方案对比: {
+      instruction: '提取候选方案、目标、依据楼层、已验证部分、风险或限制和适用条件；材料不足时明确说明无法判断。',
+      format:
+        '依次输出以下 Markdown 标题和字段：\n' +
+        '## 结论\n' +
+        '## 方案对比\n' +
+        '### 方案 A：<简短名称>\n' +
+        '- 目标：\n' +
+        '- 依据楼层：[#N]\n' +
+        '- 已验证：\n' +
+        '- 风险或限制：\n' +
+        '- 适用条件：\n' +
+        '## 选择建议\n' +
+        '## 未验证项\n' +
+        '选择建议必须区分已有证据支持的结论和需要用户自行判断的建议；没有足够材料时写无法判断。',
+    },
+    新手版解释: {
+      instruction: '把帖子改写成刚接触 Linux 的读者能理解的说明，保留必要楼层引用。',
+    },
+    '代码和命令提取': {
+      instruction: '只整理可执行命令、配置片段和代码相关结论，并标注出处楼层。',
+    },
   }
 
   function asNumber(value, fallback = 0) {
@@ -340,8 +379,10 @@
         system = `你是 linux.sb 帖子副驾。${guard} 用中文直接回答用户问题，先给结论，再给依据。`
         task = question || '请概括当前主题。'
       } else if (kind === 'analyze') {
-        const instruction = ANALYZE_PRESETS[preset] || ANALYZE_PRESETS['未解决问题']
-        system = `你是 linux.sb 讨论分析助手。${guard} ${instruction} 输出清晰的 Markdown。`
+        const presetConfig = ANALYZE_PRESETS[preset] || ANALYZE_PRESETS['未解决问题']
+        const instruction = presetConfig.instruction
+        const format = presetConfig.format ? `\n${presetConfig.format}` : ''
+        system = `你是 linux.sb 讨论分析助手。${guard} ${instruction} 输出清晰的 Markdown。${format}`
         task = `分析预设：${preset || '未解决问题'}\n${instruction}`
       } else if (kind === 'draft') {
         system =
@@ -401,6 +442,7 @@
           maxPages,
           maxChars,
           citationVersion: CITATION_VERSION,
+          analysisVersion: kind === 'analyze' ? ANALYSIS_VERSION : '',
           newReplies: newPosts.map((post) => `${post.postId}:${post.floor}:${post.content}`).join('|'),
         }),
       )
@@ -415,6 +457,8 @@
           targetFloor,
           tone,
           length,
+          analysisKind: kind === 'analyze' ? preset || '未解决问题' : '',
+          analysisVersion: kind === 'analyze' ? ANALYSIS_VERSION : '',
           model,
           newCount: newPosts.length,
           newFloors: newPosts.map((post) => post.floor),
@@ -456,6 +500,11 @@
       const promise = (async () => {
         const result = await provider.generate({ system: request.system, user: request.user })
         if (!result?.text) throw new Error('模型没有返回文本')
+        const citations = citationRecords(
+          result.text,
+          mode === 'digest' ? [...context.posts, ...newPosts] : context.posts,
+          context.topicId,
+        )
         const record = {
           text: result.text,
           meta: {
@@ -464,7 +513,8 @@
             ...result.meta,
             title: context.title,
             topicId: context.topicId,
-            citations: citationRecords(result.text, mode === 'digest' ? [...context.posts, ...newPosts] : context.posts, context.topicId),
+            citations,
+            citationCount: citations.length,
             pagesFetched: context.meta.pagesFetched,
             pagesTotal: context.meta.pagesTotal,
             ts: Date.now(),
@@ -724,6 +774,11 @@
         record.meta?.chars != null ? `送入 ${record.meta.chars} 字` : null,
         record.meta?.truncated ? '已截断' : null,
         record.meta?.ms != null ? `${(record.meta.ms / 1000).toFixed(1)}s` : null,
+        record.meta?.analysisKind || null,
+        record.meta?.analysisVersion ? `分析协议 ${record.meta.analysisVersion}` : null,
+        record.meta?.analysisKind && record.meta?.citationCount != null
+          ? `引用 ${record.meta.citationCount} 条`
+          : null,
       ].filter(Boolean)
       body.innerHTML = `
         <div class="lsb-row-desc lsb-copilot-facts">${esc(facts.join(' · '))}</div>
@@ -891,6 +946,7 @@
       pendingReplies: (topicId = api.page.id, posts = null) => pendingReplies(topicId, posts),
       markDigestRead: (topicId = api.page.id, posts = []) => markDigestRead(topicId, posts),
       buildRequest,
+      analysisVersion: ANALYSIS_VERSION,
       run,
       sessionFor,
       openPanel,
