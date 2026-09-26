@@ -86,6 +86,33 @@ async function load(ctx) {
   return ctx.w.LSB.bus.request('ai-summary:debug')
 }
 
+test('provider export：公开 configured 和 generate，但不附加总结风格', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    style: '立场地图',
+    customPrompt: '只总结旧功能',
+  })
+  await load(ctx)
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  assert.equal(provider.configured(), true)
+  const out = await provider.generate({
+    system: '你是帖子副驾。',
+    user: '<forum-content>正文</forum-content>',
+    timeout: 45000,
+  })
+  assert.equal(out.text, '【模型输出】')
+  const body = JSON.parse(ctx.lastLlm().body)
+  assert.equal(body.messages[0].content, '你是帖子副驾。')
+  assert.equal(body.messages[1].content, '<forum-content>正文</forum-content>')
+  assert.doesNotMatch(body.messages[0].content, /立场地图|旧功能/)
+})
+
+test('provider export：未配置端点或 Key 时 configured 返回 false', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', { apiUrl: '', apiKey: '' })
+  await load(ctx)
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  assert.equal(provider.configured(), false)
+})
+
 /** 造一个主楼超长的帖子页 */
 function hugeOpHtml(len = 30000) {
   return topicHtml.replace(/<div class="post-content">/, `<div class="post-content"><p>${'啊'.repeat(len)}</p>`)

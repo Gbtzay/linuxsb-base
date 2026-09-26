@@ -376,10 +376,13 @@
     }
 
     /* ── 调用 LLM ── */
-    async function callLLM(content) {
-      const sys = SYSTEM[cfg.style] || SYSTEM['要点速览']
-      const user = cfg.customPrompt ? `${content}\n\n用户附加要求：${cfg.customPrompt}` : content
-      const timeout = Math.max(5, Number(cfg.timeoutSec) || 120) * 1000
+    async function generateModel({ system, user, timeout } = {}) {
+      const sys = String(system || '')
+      const usr = String(user || '')
+      const timeoutMs =
+        timeout == null
+          ? Math.max(5, Number(cfg.timeoutSec) || 120) * 1000
+          : Math.max(5000, Number(timeout) || 0)
       const anthropic = isAnthropic()
       const headers = { 'content-type': 'application/json' }
       let body
@@ -392,7 +395,7 @@
           temperature: 0.4,
           stream: false,
           system: sys,
-          messages: [{ role: 'user', content: user }],
+          messages: [{ role: 'user', content: usr }],
         }
       } else {
         headers.authorization = `Bearer ${cfg.apiKey}`
@@ -402,17 +405,18 @@
           stream: false,
           messages: [
             { role: 'system', content: sys },
-            { role: 'user', content: user },
+            { role: 'user', content: usr },
           ],
         }
       }
+      const startedAt = Date.now()
       const res = await api.net.raw(cfg.apiUrl, {
         method: 'POST',
         external: true,
         // queue:false —— 不占用基座的站内限速队列。一次 LLM 调用可能挂 60s+，
         // 排队会让实时流/悬浮卡/哨兵的站内请求全部饿死。
         queue: false,
-        timeout,
+        timeout: timeoutMs,
         headers,
         body: JSON.stringify(body),
       })
@@ -434,7 +438,14 @@
       }
       const text = extractText(j)
       if (!text) throw new Error('响应里没有找到文本：' + JSON.stringify(j).slice(0, 200))
-      return text
+      return { text, meta: { model: cfg.model, ms: Date.now() - startedAt } }
+    }
+
+    async function callLLM(content) {
+      const sys = SYSTEM[cfg.style] || SYSTEM['要点速览']
+      const user = cfg.customPrompt ? `${content}\n\n用户附加要求：${cfg.customPrompt}` : content
+      const result = await generateModel({ system: sys, user })
+      return result.text
     }
 
     /* ── 结果 / 进度展示 ── */
@@ -802,7 +813,11 @@
       buttons: () => [...document.querySelectorAll('.lsb-op')].map((b) => b.textContent),
     }))
 
-    return {}
+    return {
+      configured: () => Boolean(String(cfg.apiUrl || '').trim() && String(cfg.apiKey || '').trim()),
+      generate: ({ system, user, timeout } = {}) =>
+        generateModel({ system: String(system || ''), user: String(user || ''), timeout }),
+    }
   }
 
   const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
