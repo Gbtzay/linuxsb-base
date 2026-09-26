@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·AI 总结
 // @namespace    https://linux.sb/
-// @version      1.1.5
+// @version      1.2.0
 // @description  帖子页一键调用 OpenAI 或 Anthropic 接口总结全帖（可选汇总所有分页，结果按风格/范围分槽缓存）。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -24,7 +24,7 @@
   const manifest = {
     id: 'ai-summary',
     name: 'AI 总结',
-    version: '1.1.5',
+    version: '1.2.0',
     description: '调用 OpenAI 或 Anthropic 接口总结当前帖子；氢面板「AI 历史」可回看全部记录',
     author: 'you',
     requires: { base: '^0.1.0' },
