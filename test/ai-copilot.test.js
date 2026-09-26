@@ -70,15 +70,27 @@ function makeSite(html, url, cfg = {}) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+async function until(fn, ms = 2000) {
+  const end = Date.now() + ms
+  for (;;) {
+    try {
+      if (fn()) return true
+    } catch {
+      /* keep polling */
+    }
+    if (Date.now() > end) return false
+    await sleep(15)
+  }
+}
 
-async function load(ctx) {
+async function load(ctx, { active = true } = {}) {
   ctx.w.eval(baseCode)
   ctx.w.eval(summaryCode)
   if (copilotCode) ctx.w.eval(copilotCode)
   await sleep(80)
   const rec = ctx.w.LSB.info().plugins.find((p) => p.id === 'ai-copilot')
-  assert.equal(rec?.state, 'active', 'ai-copilot 应在测试页面激活')
-  return ctx.w.LSB.bus.request('ai-copilot:debug')
+  if (active) assert.equal(rec?.state, 'active', 'ai-copilot 应在测试页面激活')
+  return active ? ctx.w.LSB.bus.request('ai-copilot:debug') : rec
 }
 
 function hugeOpHtml(len = 30000) {
@@ -177,4 +189,37 @@ test('请求：相同指纹的在途请求复用同一个 Promise', async () => 
   release()
   assert.equal((await first).text, '【模型输出】')
   assert.equal((await second).text, '【模型输出】')
+})
+
+test('UI：帖子页显示副驾入口，首页不显示', async () => {
+  const topic = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(topic)
+  assert.ok(topic.w.document.querySelector('.lsb-ai-copilot-top'))
+  assert.ok([...topic.w.document.querySelectorAll('.lsb-op')].some((b) => /AI 副驾/.test(b.textContent)))
+
+  const home = makeSite(homeHtml, 'https://linux.sb/')
+  await load(home, { active: false })
+  assert.equal(home.w.document.querySelector('.lsb-ai-copilot-top'), null)
+})
+
+test('UI：问答发送后显示结果并保留复制按钮', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="ask"]').click()
+  panel.querySelector('[data-question]').value = '核心争议是什么？'
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-result')))
+  assert.ok(ctx.w.document.querySelector('[data-copy]'))
+})
+
+test('UI：草稿模式只提供复制，不提供发送站内回复动作', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="draft"]').click()
+  assert.ok(panel.querySelector('[data-target-floor]'))
+  assert.equal([...panel.querySelectorAll('button')].some((b) => /发送回复|提交回复/.test(b.textContent)), false)
 })

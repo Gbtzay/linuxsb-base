@@ -95,6 +95,7 @@ test('provider export：公开 configured 和 generate，但不附加总结风�
   const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
   assert.equal(provider.configured(), true)
   assert.equal(provider.model(), 'deepseek-chat')
+  assert.match(provider.renderMarkdown('<img src=x>'), /&lt;img/)
   const out = await provider.generate({
     system: '你是帖子副驾。',
     user: '<forum-content>正文</forum-content>',

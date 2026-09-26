@@ -337,12 +337,297 @@
       }
     }
 
+    let panel = null
+    let mask = null
+    let waitTimer = null
+    let waitStarted = 0
+    let currentMode = 'ask'
+    const buttons = new Set()
+
+    function esc(value) {
+      return api.util.esc(String(value ?? ''))
+    }
+
+    function currentPosts() {
+      try {
+        const live = normalizeTopic(api.parse.topic(document))
+        if (live?.posts?.length) return live.posts
+      } catch {
+        /* fall through to the boot snapshot */
+      }
+      return normalizeTopic(api.snapshot?.topic)?.posts || []
+    }
+
+    function stopWaitClock() {
+      if (waitTimer) {
+        clearInterval(waitTimer)
+        waitTimer = null
+      }
+    }
+
+    function closePanel() {
+      stopWaitClock()
+      mask?.remove()
+      panel?.remove()
+      mask = null
+      panel = null
+    }
+
+    function ensurePanel() {
+      if (panel && mask) return { panel, mask }
+      closePanel()
+      mask = document.createElement('div')
+      mask.className = 'lsb-mask lsb-copilot-mask'
+      panel = document.createElement('div')
+      panel.className = 'lsb-panel lsb-copilot-panel'
+      document.body.append(mask, panel)
+      return { panel, mask }
+    }
+
+    function panelFrame(mode) {
+      const { panel: host, mask: backdrop } = ensurePanel()
+      currentMode = mode
+      host.innerHTML = `
+        <div class="lsb-panel-head lsb-copilot-head">
+          <strong>✨ AI 帖子副驾</strong>
+          <span class="lsb-ver">${esc(api.page.id ? `主题 #${api.page.id}` : '')}</span>
+          <button class="lsb-panel-close" data-close title="关闭">×</button>
+        </div>
+        <div class="lsb-copilot-tabs">
+          <button class="lsb-btn ${mode === 'ask' ? 'is-primary' : ''}" data-mode="ask">问答</button>
+          <button class="lsb-btn ${mode === 'analyze' ? 'is-primary' : ''}" data-mode="analyze">讨论分析</button>
+          <button class="lsb-btn ${mode === 'draft' ? 'is-primary' : ''}" data-mode="draft">回复草稿</button>
+        </div>
+        <div class="lsb-view" data-body></div>`
+      host.querySelector('[data-close]').onclick = closePanel
+      backdrop.onclick = (event) => {
+        if (event.target === backdrop) closePanel()
+      }
+      host.querySelectorAll('[data-mode]').forEach((tab) => {
+        tab.onclick = () => renderMode(tab.getAttribute('data-mode'))
+      })
+      return host.querySelector('[data-body]')
+    }
+
+    function renderMode(mode = 'ask') {
+      stopWaitClock()
+      const body = panelFrame(mode)
+      if (mode === 'analyze') renderAnalyze(body)
+      else if (mode === 'draft') renderDraft(body)
+      else renderAsk(body)
+    }
+
+    function renderAsk(body) {
+      body.innerHTML = `
+        <div class="lsb-row-desc">可以直接提问，也可以使用下面的快捷问题。回答只基于当前主题采集内容。</div>
+        <div class="lsb-copilot-quick">
+          <button class="lsb-btn" data-quick="核心争议是什么？">核心争议</button>
+          <button class="lsb-btn" data-quick="第 N 楼之后发生了什么？">后续变化</button>
+          <button class="lsb-btn" data-quick="哪些方案已经被验证？">已验证方案</button>
+          <button class="lsb-btn" data-quick="请向刚接触 Linux 的人解释这篇帖子。">新手解释</button>
+        </div>
+        <textarea class="lsb-copilot-question" data-question rows="4" placeholder="问问这篇帖子……"></textarea>
+        <div class="lsb-actions">
+          <button class="lsb-btn is-primary" data-send>询问</button>
+          <button class="lsb-btn" data-clear-session>清空本帖会话</button>
+        </div>`
+      body.querySelectorAll('[data-quick]').forEach((button) => {
+        button.onclick = () => {
+          body.querySelector('[data-question]').value = button.getAttribute('data-quick') || ''
+          body.querySelector('[data-question]').focus()
+        }
+      })
+      body.querySelector('[data-send]').onclick = () => {
+        const question = body.querySelector('[data-question]').value.trim()
+        void runAndShow('ask', { question })
+      }
+      body.querySelector('[data-clear-session]').onclick = () => {
+        api.store.del(sessionKey(api.page.id))
+        api.ui.toast('已清空本帖会话', { type: 'success' })
+      }
+    }
+
+    function renderAnalyze(body) {
+      body.innerHTML = `
+        <div class="lsb-row-desc">选择一种观察角度，副驾会在结果中保留楼层依据。</div>
+        <div class="lsb-copilot-presets">
+          ${Object.keys(ANALYZE_PRESETS)
+            .map((name) => `<button class="lsb-btn" data-preset="${esc(name)}">${esc(name)}</button>`)
+            .join('')}
+        </div>`
+      body.querySelectorAll('[data-preset]').forEach((button) => {
+        button.onclick = () => void runAndShow('analyze', { preset: button.getAttribute('data-preset') || '' })
+      })
+    }
+
+    function renderDraft(body) {
+      const posts = currentPosts().filter((post) => post.content || post.floor === 0)
+      const floorOptions = posts
+        .sort((a, b) => a.floor - b.floor)
+        .map((post) => `<option value="${esc(post.floor)}">${post.floor === 0 ? '主楼' : `#${post.floor}`} · ${esc(post.authorName)}</option>`)
+        .join('')
+      body.innerHTML = `
+        <div class="lsb-row-desc">选择要回应的楼层。副驾只生成草稿，复制后由你决定是否使用。</div>
+        <label class="lsb-copilot-field">目标楼层<select data-target-floor>${floorOptions}</select></label>
+        <label class="lsb-copilot-field">语气<select data-tone>
+          <option>客观</option><option>简洁</option><option>友好</option><option>技术向</option>
+        </select></label>
+        <label class="lsb-copilot-field">长度<select data-length>
+          <option>短</option><option selected>中</option><option>长</option>
+        </select></label>
+        <div class="lsb-actions">
+          <button class="lsb-btn is-primary" data-draft-send>生成草稿</button>
+        </div>`
+      body.querySelector('[data-draft-send]').onclick = () =>
+        void runAndShow('draft', {
+          targetFloor: asNumber(body.querySelector('[data-target-floor]').value, 0),
+          tone: body.querySelector('[data-tone]').value,
+          length: body.querySelector('[data-length]').value,
+        })
+    }
+
+    function showWait(status) {
+      const body = panelFrame(currentMode)
+      waitStarted = Date.now()
+      body.innerHTML = `
+        <div class="lsb-copilot-wait">
+          <div class="lsb-copilot-status"></div>
+          <div class="lsb-row-desc" data-clock></div>
+          <div class="lsb-row-desc">正在采集主题并请求模型；关闭窗口不会取消请求。</div>
+        </div>`
+      body.querySelector('.lsb-copilot-status').textContent = status
+      const clock = body.querySelector('[data-clock]')
+      stopWaitClock()
+      const tick = () => {
+        clock.textContent = `已等待 ${Math.max(0, Math.round((Date.now() - waitStarted) / 1000))}s`
+      }
+      waitTimer = setInterval(tick, 250)
+      tick()
+    }
+
+    function showResult(record) {
+      stopWaitClock()
+      const body = panelFrame(record.meta?.mode || currentMode)
+      const facts = [
+        record.meta?.model,
+        record.meta?.floors != null ? `${record.meta.floors} 楼` : null,
+        record.meta?.pagesFetched != null ? `${record.meta.pagesFetched}/${record.meta.pagesTotal} 页` : null,
+        record.meta?.chars != null ? `送入 ${record.meta.chars} 字` : null,
+        record.meta?.truncated ? '已截断' : null,
+        record.meta?.ms != null ? `${(record.meta.ms / 1000).toFixed(1)}s` : null,
+      ].filter(Boolean)
+      body.innerHTML = `
+        <div class="lsb-row-desc lsb-copilot-facts">${esc(facts.join(' · '))}</div>
+        <div class="lsb-copilot-result lsb-md"></div>
+        <div class="lsb-actions">
+          <button class="lsb-btn" data-again>重新生成</button>
+          <button class="lsb-btn" data-copy>复制</button>
+          <button class="lsb-btn is-primary" data-close>关闭</button>
+        </div>`
+      const result = body.querySelector('.lsb-copilot-result')
+      try {
+        result.innerHTML = provider.renderMarkdown(record.text)
+      } catch {
+        result.textContent = record.text
+      }
+      body.querySelector('[data-copy]').onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(record.text)
+          api.ui.toast('草稿/结果已复制', { type: 'success' })
+        } catch {
+          api.ui.toast('复制失败，请手动选择文本', { type: 'error' })
+        }
+      }
+      body.querySelector('[data-close]').onclick = closePanel
+      body.querySelector('[data-again]').onclick = () => {
+        closePanel()
+        renderMode(record.meta?.mode || currentMode)
+      }
+    }
+
+    function showError(error) {
+      stopWaitClock()
+      const body = panelFrame(currentMode)
+      const message = String(error?.message || error || 'AI 请求失败')
+      body.innerHTML = `
+        <div class="lsb-empty lsb-copilot-error"></div>
+        <div class="lsb-actions">
+          <button class="lsb-btn" data-retry>重试</button>
+          <button class="lsb-btn is-primary" data-close>关闭</button>
+        </div>`
+      body.querySelector('.lsb-copilot-error').textContent = message
+      body.querySelector('[data-close]').onclick = closePanel
+      body.querySelector('[data-retry]').onclick = () => renderMode(currentMode)
+    }
+
+    async function runAndShow(mode, options) {
+      showWait('正在采集本帖…')
+      try {
+        const record = await run(mode, options)
+        showResult(record)
+        api.ui.toast('AI 副驾完成', { type: 'success' })
+      } catch (error) {
+        api.ui.toast(String(error?.message || error), { type: 'error', title: 'AI 副驾失败' })
+        showError(error)
+      }
+    }
+
+    function openPanel() {
+      renderMode(currentMode)
+    }
+
+    function injectOpButton(li) {
+      if (api.page.type !== 'topic') return
+      if (li.id !== `post-${api.page.id}`) return
+      const button = api.ui.postAction(li, {
+        label: '✨ AI 副驾',
+        title: '打开帖子副驾，提问、分析讨论或生成回复草稿',
+        onClick: openPanel,
+      })
+      if (button) buttons.add(button)
+    }
+
+    function syncTopLink() {
+      const existing = document.querySelector('a.lsb-ai-copilot-top')
+      if (api.page.type !== 'topic') {
+        existing?.remove()
+        return
+      }
+      if (existing) return
+      const link = api.ui.topLink({
+        label: '✨ AI 副驾',
+        title: '打开 AI 帖子副驾',
+        onClick: openPanel,
+      })
+      link?.classList.add('lsb-ai-copilot-top')
+    }
+
+    api.dom.each('li.post-entry', injectOpButton)
+    syncTopLink()
+    api.on('route:changed', () => setTimeout(syncTopLink, 50))
+    api.ui.configTab({ name: 'AI 副驾', order: 54 })
+    api.ui.style(
+      '.lsb-copilot-panel{width:min(760px,94vw)}' +
+        '.lsb-copilot-tabs{display:flex;gap:6px;padding:10px 12px 0;border-bottom:1px solid var(--line-soft,#eee)}' +
+        '.lsb-copilot-tabs .lsb-btn{border-radius:7px 7px 0 0}' +
+        '.lsb-copilot-quick,.lsb-copilot-presets{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}' +
+        '.lsb-copilot-question{display:block;width:100%;box-sizing:border-box;resize:vertical;min-height:92px;margin-top:10px;padding:8px;border:1px solid var(--line,#ddd);border-radius:7px;background:var(--panel,#fff);color:inherit;font:inherit}' +
+        '.lsb-copilot-field{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0}' +
+        '.lsb-copilot-field select{min-width:180px;padding:5px 7px;border:1px solid var(--line,#ddd);border-radius:6px;background:var(--panel,#fff);color:inherit}' +
+        '.lsb-copilot-result{line-height:1.7;max-height:52vh;overflow:auto}' +
+        '.lsb-copilot-facts{margin-bottom:8px}.lsb-copilot-wait{padding:8px 0}' +
+        '.lsb-copilot-status{font-weight:600;margin-bottom:8px}',
+    )
+
     api.handle('ai-copilot:debug', () => ({
       collectContext,
       normalize: normalizeTopic,
       buildRequest,
       run,
       sessionFor,
+      openPanel,
+      renderMode,
+      buttons: () => [...document.querySelectorAll('.lsb-op')].map((button) => button.textContent),
       cacheKey,
       state: () => ({ topicId: api.page.id, page: api.page.type }),
     }))

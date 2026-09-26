@@ -816,6 +816,7 @@
     return {
       configured: () => Boolean(String(cfg.apiUrl || '').trim() && String(cfg.apiKey || '').trim()),
       model: () => String(cfg.model || ''),
+      renderMarkdown,
       generate: ({ system, user, timeout } = {}) =>
         generateModel({ system: String(system || ''), user: String(user || ''), timeout }),
     }
