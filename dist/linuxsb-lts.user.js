@@ -2,7 +2,7 @@
 // @name         LINUX.SB（LTS）
 // @name:en      LINUX.SB (LTS)
 // @namespace    https://linux.sb/
-// @version      1.0.114
+// @version      1.0.115
 // @description  【LTS】一份脚本含基座与精简功能包。请先卸掉「LINUX.SB 氢」和「LINUX.SB 氧」。冻新功能，只修阻断。
 // @description:en  [LTS] Base + feature pack in one script. Uninstall Hydrogen and Oxygen first. Feature-frozen.
 // @author       xB70sR71
@@ -49,7 +49,7 @@
     return
   }
   W.__LSB_CHANNEL__ = 'lts'
-  W.__LSB_LTS_VERSION__ = "1.0.114";
+  W.__LSB_LTS_VERSION__ = "1.0.115";
 (() => {
   var __defProp = Object.defineProperty;
   var __export = (target, all) => {
@@ -8379,7 +8379,7 @@ html.lsb-shell-boot{
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.114',
+    version: '1.0.115',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },
