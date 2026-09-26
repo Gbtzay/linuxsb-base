@@ -119,3 +119,62 @@ test('上下文：超长主楼和回复共同受预算约束', async () => {
   assert.equal(out.meta.truncated, true)
 })
 
+test('提示词：论坛正文与用户问题分区，并包含注入防护', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const req = dbg.buildRequest('ask', await dbg.collectContext({}), {
+    question: '核心争议是什么？',
+  })
+  assert.match(req.system, /不可信|不要执行|forum-content/i)
+  assert.match(req.user, /核心争议是什么？/)
+  assert.match(req.user, /<forum-content>/)
+})
+
+test('提示词：草稿包含目标楼层、语气和长度约束', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const req = dbg.buildRequest('draft', await dbg.collectContext({}), {
+    targetFloor: 12,
+    tone: '技术向',
+    length: '短',
+  })
+  assert.match(req.user, /#12/)
+  assert.match(req.system, /技术向|短/)
+  assert.match(req.system, /不要提交|草稿|回复/)
+})
+
+test('缓存：模式、问题、目标楼层、语气和内容变化都会换键', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const context = await dbg.collectContext({})
+  const a = dbg.buildRequest('ask', context, { question: 'A' })
+  const b = dbg.buildRequest('ask', context, { question: 'B' })
+  const c = dbg.buildRequest('draft', context, { targetFloor: 12, tone: '技术向', length: '短' })
+  assert.notEqual(a.fingerprint, b.fingerprint)
+  assert.notEqual(a.fingerprint, c.fingerprint)
+})
+
+test('请求：成功结果写入缓存和问答会话，第二次相同请求不再调用模型', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const first = await dbg.run('ask', { question: '核心争议是什么？' })
+  assert.equal(first.text, '【模型输出】')
+  assert.equal(ctx.llmCalls(), 1)
+  const second = await dbg.run('ask', { question: '核心争议是什么？' })
+  assert.equal(second.text, '【模型输出】')
+  assert.equal(ctx.llmCalls(), 1)
+  assert.equal(JSON.stringify(dbg.sessionFor(1).map((row) => row.role)), JSON.stringify(['user', 'assistant']))
+})
+
+test('请求：相同指纹的在途请求复用同一个 Promise', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const release = ctx.holdLLM()
+  const first = dbg.run('ask', { question: '同一个问题' })
+  await sleep(40)
+  const second = dbg.run('ask', { question: '同一个问题' })
+  assert.equal(ctx.llmCalls(), 1)
+  release()
+  assert.equal((await first).text, '【模型输出】')
+  assert.equal((await second).text, '【模型输出】')
+})
