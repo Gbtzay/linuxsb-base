@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氢
 // @name:en      LINUX.SB Hydrogen
 // @namespace    https://linux.sb/
-// @version      0.1.36
+// @version      0.1.41
 // @description  linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧」一起使用。
 // @description:en  Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen for features.
 // @author       xB70sR71
@@ -329,8 +329,15 @@
     wallet: "/community_wallet",
     featured: "/topic_featured",
     footprint: "/unread_topic_notice_footprint",
+    collections: "/topic_collections",
+    collection: (id) => `/topic_collection/${id}`,
+    identity: "/identity_center",
+    promotions: "/promotions",
+    essenceReview: "/topic_essence_review_list",
     colorScheme: "/color_scheme",
     keywordFilter: "/home_keyword_filter_settings",
+    messages: "/direct_messages",
+    userBlock: "/user_block",
     donate: (topicId) => `/donate${topicId ? `?topic_id=${topicId}` : ""}`,
     donateFeed: "/donate_feed",
     notify: (id) => `/notify/${id}`,
@@ -347,11 +354,11 @@
       search: "/search"
     }
   };
-  var USER_TABS = ["topics", "replies", "notifications", "points_rewards", "favorites"];
+  var USER_TABS = ["topics", "replies", "attachments", "notifications", "points_rewards", "favorites"];
   var SEL = {
-    topicPosts: "ul.topic-post-list > li.post-entry, ul.post-list > li.post-entry",
+    topicPosts: "ul.topic-post-list > li.post-entry:not(.reply-pin-duplicate), ul.post-list > li.post-entry:not(.reply-pin-duplicate)",
     topicUl: "ul.topic-post-list, ul.post-list",
-    listItems: "ul.post-list > li.post-item:not(.post-entry)",
+    listItems: "ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)",
     listUl: "ul.post-list",
     postEntry: "li.post-entry"
   };
@@ -360,6 +367,8 @@
     const q = new URLSearchParams(loc.search);
     const mTopic = path.match(/^\/topic\/(\d+)$/);
     if (mTopic) return { type: "topic", id: Number(mTopic[1]), page: Number(q.get("p") || 1) };
+    const mCollection = path.match(/^\/topic_collection\/(\d+)$/);
+    if (mCollection) return { type: "collection", id: Number(mCollection[1]) };
     const mForum = path.match(/^\/forum\/(\d+)$/);
     if (mForum) {
       return {
@@ -374,6 +383,7 @@
     if (path === "/" || path === "/index.php") {
       return { type: "home", page: Number(q.get("p") || 1), sort: q.get("sort") || "post" };
     }
+    if (path === "/topic_collections") return { type: "collections", tab: q.get("tab") || "mine" };
     const known = {
       "/profile": "profile",
       "/topic_edit": "topic_edit",
@@ -393,8 +403,13 @@
       "/community_wallet": "wallet",
       "/topic_featured": "featured",
       "/unread_topic_notice_footprint": "footprint",
+      "/identity_center": "identity",
+      "/promotions": "promotions",
+      "/topic_essence_review_list": "essence_review",
       "/color_scheme": "color_scheme",
-      "/home_keyword_filter_settings": "keyword_filter"
+      "/home_keyword_filter_settings": "keyword_filter",
+      "/direct_messages": "messages",
+      "/user_block": "user_block"
     };
     if (known[path]) return { type: known[path] };
     if (/^\/notify\/\d+$/.test(path)) return { type: "notify", id: num(path) };
@@ -474,12 +489,20 @@
   }
   function parseListItem(li) {
     if (li.classList.contains("post-entry")) return null;
+    if (li.classList.contains("topic-collections-collection-row")) return null;
     const titleA = li.querySelector("a.post-title:not(.post-author)");
     if (!titleA) return null;
+    if (/\/topic_collection\//.test(titleA.getAttribute("href") || "")) return null;
     const authorA = li.querySelector('.post-avatar a[href^="/user/"]') || li.querySelector('.post-meta a[href^="/user/"]');
     const forumA = li.querySelector('.post-forum-meta a[href^="/forum/"], .post-meta a[href^="/forum/"]');
     const stamp = li.querySelector("span[data-performance-time]");
     const counts = [...li.querySelectorAll(".post-meta span")].map((s) => text(s)).filter((t) => /^\d[\d,]*$/.test(t)).map(num);
+    const redEl = li.querySelector(".red-packet-title-status");
+    const cardEl = li.querySelector(".virtual-card-title-status");
+    const blob = (el) => el ? `${el.className} ${text(el)}` : "";
+    const redPacket = !redEl ? null : /结束|已抢|抢完|已领|ended|expired/i.test(blob(redEl)) ? "ended" : "live";
+    const cardBlob = blob(cardEl);
+    const virtualCard = !cardEl ? null : cardEl.classList.contains("finished") || /结束|已结束|已发完|ended|expired/i.test(cardBlob) ? "ended" : cardEl.classList.contains("active") || /发卡中|发放中/.test(text(cardEl)) ? "live" : "ended";
     return {
       id: idFrom(titleA.getAttribute("href"), "topic"),
       title: text(titleA),
@@ -491,7 +514,10 @@
       replies: counts.length ? counts[counts.length - 1] : null,
       lastActiveTs: stamp ? num(stamp.getAttribute("data-performance-time")) : null,
       pinned: li.classList.contains("topic-pinned") || !!li.querySelector(".topic-badge.pinned"),
-      badges: [...li.querySelectorAll(".topic-stamp-badge")].map((b) => text(b)),
+      badges: [...li.querySelectorAll(".topic-stamp-badge, .red-packet-title-status, .virtual-card-title-status")].map(
+        (b) => text(b)
+      ),
+      marks: { redPacket, virtualCard },
       el: li
     };
   }
@@ -1425,10 +1451,14 @@
       for (const rec of records) {
         for (const node of rec.addedNodes) {
           if (node.nodeType !== 1) continue;
-          if (node.matches?.("li.post-entry")) posts.add(node);
-          else if (node.matches?.("li.post-item")) items.add(node);
-          for (const el of node.querySelectorAll?.("li.post-entry") || []) posts.add(el);
-          for (const el of node.querySelectorAll?.("li.post-item:not(.post-entry)") || []) items.add(el);
+          if (node.matches?.("li.post-entry") && !node.classList.contains("reply-pin-duplicate")) posts.add(node);
+          else if (node.matches?.("li.post-item") && !node.classList.contains("post-entry") && !node.classList.contains("topic-collections-collection-row")) {
+            items.add(node);
+          }
+          for (const el of node.querySelectorAll?.("li.post-entry:not(.reply-pin-duplicate)") || []) posts.add(el);
+          for (const el of node.querySelectorAll?.("li.post-item:not(.post-entry):not(.topic-collections-collection-row)") || []) {
+            items.add(el);
+          }
           added.push(node);
         }
       }
@@ -1744,7 +1774,7 @@
   }
 
   // src/core.js
-  var VERSION = "0.1.36";
+  var VERSION = "0.1.41";
   var PERMISSIONS = {
     read: "读取页面结构与站内 GET 请求",
     write: "代表当前用户发起写操作（回复/点赞/收藏等）",

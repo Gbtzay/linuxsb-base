@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·界面精修
 // @namespace    https://linux.sb/
-// @version      1.1.49
+// @version      1.1.56
 // @description  氢壳（左栏+顶栏+帖内时间轴）与排版层：正文行高、列表密度、代码块、楼层分隔、限宽阅读。只动结构与排版，不碰配色。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.49',
+    version: '1.1.56',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -122,7 +122,10 @@
           border-right:1px solid var(--line-soft,#e8e8e8);
           font-family:${FONT_SANS};
         }
-        .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:hidden;padding:56px 12px 12px}
+        .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:hidden;padding:56px 12px 12px;display:flex;flex-direction:column}
+        .lsb-shell-rail-scroll [data-lsb-shell-section="home"]{flex:0 0 auto}
+        .lsb-shell-rail-scroll [data-lsb-shell-section="boards"]{flex:1 1 auto;min-height:0;overflow:auto}
+        .lsb-shell-rail-scroll [data-lsb-shell-section="tools"]{flex:0 0 auto}
         .lsb-shell-me{margin:0 0 14px}
         .lsb-shell-me .sidebar-card.user-card{
           margin:0;padding:10px 10px;border:0;box-shadow:none;
@@ -203,6 +206,7 @@
         .lsb-shell-theme [data-themes-mode-toggle] svg{display:block;width:18px;height:18px}
         .lsb-shell-theme .dark-mode-control{position:relative;flex:0 0 auto;grid-area:auto;justify-self:auto}
         .lsb-shell-theme .dark-mode-menu{z-index:8003}
+        html.lsb-skin-shell-on #color-scheme-modal{z-index:8003}
         .lsb-shell-theme .color-scheme-top-link{
           display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;
           grid-area:auto;justify-self:auto;flex:0 0 30px;
@@ -509,19 +513,52 @@
       toolsCache = null
     }
 
+    function pagePath() {
+      try {
+        return location.pathname.replace(/\/+$/, '') || '/'
+      } catch {
+        return ''
+      }
+    }
+
     function locationText() {
       const p = api.page || {}
-      if (p.type === 'home') {
-        if (p.sort === 'lucky') return '抽奖'
-        if (p.sort === 'card') return '发卡'
-        if (p.sort === 'comment') return '新评论'
-        return '全部主题'
+      const path = pagePath()
+      const type = p.type
+      if (type === 'collections' || path === '/topic_collections') {
+        let tab = type === 'collections' ? p.tab : null
+        if (tab == null) {
+          try {
+            tab = new URL(location.href).searchParams.get('tab')
+          } catch {
+            tab = null
+          }
+        }
+        return tab === 'mine' || !tab ? '我的淘帖' : '淘帖中心'
       }
-      if (p.type === 'forum') {
+      if (type === 'collection' || /^\/topic_collection\/\d+$/.test(path)) {
+        const title = (document.querySelector('h1.post-content-title, h1')?.textContent || '').trim()
+        return title || '淘帖'
+      }
+      if (type === 'identity' || path === '/identity_center') return '认证中心'
+      if (type === 'promotions' || path === '/promotions') return '我的广告'
+      if (type === 'messages' || path === '/direct_messages') return '我的私信'
+      if (type === 'user_block' || path === '/user_block') return '屏蔽名单'
+      if (type === 'essence_review' || path === '/topic_essence_review_list') return '申精'
+      if (type === 'home' || path === '/' || path === '/index.php') {
+        if (path === '/' || path === '/index.php') {
+          if (p.sort === 'lucky') return '抽奖'
+          if (p.sort === 'card') return '发卡'
+          if (p.sort === 'red_packet') return '红包'
+          if (p.sort === 'comment') return '新评论'
+          return '新帖子'
+        }
+      }
+      if (type === 'forum') {
         const f = (api.forums || []).find((x) => x.id === p.id)
         return f?.name || '版块'
       }
-      if (p.type === 'topic') {
+      if (type === 'topic') {
         try {
           const title = api.parse.topic(document)?.title
           if (title) return title
@@ -530,14 +567,14 @@
         }
         return (document.querySelector('h1.post-content-title')?.textContent || '').trim() || '帖子'
       }
-      if (p.type === 'user') return '用户'
-      if (p.type === 'featured') return '精华'
-      if (p.type === 'footprint') return '足迹'
-      if (p.type === 'gacha') return '称号抽取'
-      if (p.type === 'gacha_market') return '称号交易'
-      if (p.type === 'gacha_profile') return '我的称号'
-      if (p.type === 'wallet') return '我的烧饼'
-      if (p.type === 'invite') return '邀请中心'
+      if (type === 'user') return '用户'
+      if (type === 'featured') return '精华'
+      if (type === 'footprint') return '足迹'
+      if (type === 'gacha') return '称号抽取'
+      if (type === 'gacha_market') return '称号交易'
+      if (type === 'gacha_profile') return '我的称号'
+      if (type === 'wallet') return '我的烧饼'
+      if (type === 'invite') return '邀请中心'
       return 'LINUX SB'
     }
 
@@ -674,9 +711,25 @@
     function collectTopExtras() {
       const top = document.querySelector('body > .top')
       if (!top) return []
-      return [...top.querySelectorAll('a.forum-enhancements-custom-top-link')].filter(
-        (a) => a instanceof HTMLAnchorElement && extraLabel(a) && !isJunkExtra(a.href, extraLabel(a)),
-      )
+      const seen = new Set()
+      const out = []
+      const take = (a) => {
+        if (!(a instanceof HTMLAnchorElement)) return
+        const label = extraLabel(a)
+        if (!label || isJunkExtra(a.href, label)) return
+        let abs
+        try {
+          abs = new URL(a.href, location.href).href
+        } catch {
+          return
+        }
+        if (seen.has(abs)) return
+        seen.add(abs)
+        out.push(a)
+      }
+      for (const a of top.querySelectorAll('a.forum-enhancements-custom-top-link')) take(a)
+      for (const a of top.querySelectorAll('a.plugin-top-menu-link')) take(a)
+      return out
     }
 
     function adoptTopExtras(host) {
@@ -821,11 +874,15 @@
           )
         : null
       const bio = onUser ? uniq.find((c) => c.classList.contains('bio-card')) : null
+      const promo = uniq.find((c) => c.classList.contains('sidebar-promotions-card'))
+      const announce = uniq.find(
+        (c) => c.classList.contains('forum-enhancements-left-announcements') || text(c).startsWith('站务公告'),
+      )
       const quick = uniq.find((c) => text(c).startsWith('快捷功能'))
       const hot = uniq.find((c) => c.classList.contains('daily-hot-topics-card'))
       const stats = uniq.find((c) => c.classList.contains('stats-card'))
       const online = uniq.find((c) => c.classList.contains('online-users-card'))
-      return [profile, bio, quick, hot, stats, online].filter(Boolean)
+      return [profile, bio, promo, announce, quick, hot, stats, online].filter(Boolean)
     }
 
     function adoptAsideCards(host) {
@@ -1418,14 +1475,16 @@
       }
       if (url.origin !== location.origin) return false
       const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
-      // 帖子页的讨论串靠站点脚本在整页生命周期里挂载；软跳进帖子会剥脚本，刷新才出现。
-      if (/^\/topic\/\d+/.test(path)) return false
+      // 帖子 / 淘帖详情靠站点脚本在整页生命周期里挂载；软跳会剥脚本，刷新才出现。
+      if (/^\/topic\/\d+/.test(path) || /^\/topic_collection\/\d+/.test(path)) return false
       return (
         path === '/'
         || path === '/index.php'
         || path === '/latest'
         || path === '/topic_featured'
         || path === '/unread_topic_notice_footprint'
+        || path === '/topic_collections'
+        || path === '/topic_essence_review_list'
         || /^\/forum\/\d+/.test(path)
         || /^\/category\/\d+/.test(path)
       )
@@ -2003,9 +2062,7 @@
     }
 
     function afterPaint(fn) {
-      const raf = window.requestAnimationFrame
-      if (typeof raf === 'function') raf(() => fn())
-      else setTimeout(fn, 0)
+      queueMicrotask(fn)
     }
 
     function scheduleRefresh(fromRoute) {

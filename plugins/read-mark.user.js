@@ -126,13 +126,13 @@
     }
 
     function paintAll() {
-      for (const li of document.querySelectorAll(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)')) {
+      for (const li of document.querySelectorAll(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)')) {
         paint(li)
       }
     }
 
     // 现有 + 无限滚动新增的条目各回调一次（幂等）
-    api.dom.each(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)', paint)
+    api.dom.each(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)', paint)
     // 软导航后 DOM 可能被整段换掉：记账 + 全量重涂
     api.on('route:changed', () => {
       markOpenTopic()

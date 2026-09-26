@@ -71,8 +71,8 @@ test('启动后 snapshot / csrf / 面板就绪', () => {
   assert.match(launch.title, /氢/)
 })
 
-test('正式版氢号是 0.1.36，面板标题不带 RC', () => {
-  assert.equal(VERSION, '0.1.36')
+test('正式版氢号是 0.1.41，面板标题不带 RC', () => {
+  assert.equal(VERSION, '0.1.41')
   const core = boot()
   assert.equal(core.ui.title, 'LINUX.SB · 氢')
   assert.doesNotMatch(core.ui.title, /RC/)

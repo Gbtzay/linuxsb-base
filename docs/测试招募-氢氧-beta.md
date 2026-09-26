@@ -8,13 +8,13 @@
 
 | | 油猴名 | 版本 |
 |---|---|---|
-| 氢 | LINUX.SB 氢 | **0.1.36** |
-| 氧 | LINUX.SB 氧 | **1.0.105** |
-| LTS | LINUX.SB（LTS） | **1.0.105** |
+| 氢 | LINUX.SB 氢 | **0.1.41** |
+| 氧 | LINUX.SB 氧 | **1.0.114** |
+| LTS | LINUX.SB（LTS） | **1.0.114** |
 
 对不上就刷新 Greasy Fork 再装一次。氧也要一起换（先氢后氧）。
 
-**氢+氧** 和 **LTS** 二选一，不要同时开。开发线继续装氢再装氧。只要日常浏览、不想跟新功能，装 LTS：https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts （油猴名 LINUX.SB（LTS））。请先关掉或卸掉「LINUX.SB 氢」和「LINUX.SB 氧」，只留 LTS。LTS 不含称号行情、机会监控、AI 总结、个人存档、高频标记、性能探针、悬停画像。LTS 冻新功能，只修装不上、页面花、请求打爆、数据丢。
+**氢+氧** 和 **LTS** 二选一，不要同时开。开发线继续装氢再装氧。只要日常浏览、不想跟新功能，装 LTS：https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts （油猴名 LINUX.SB（LTS））。请先关掉或卸掉「LINUX.SB 氢」和「LINUX.SB 氧」，只留 LTS。LTS 不含称号行情、机会监控、AI 总结、AI 帖子副驾、个人存档、高频标记、性能探针、悬停画像。LTS 冻新功能，只修装不上、页面花、请求打爆、数据丢。
 
 ## 安装
 
@@ -27,7 +27,7 @@ LTS 与上面二选一：不要同时开氢/氧和 LINUX.SB（LTS）。商店页
 
 作者页：https://greasyfork.org/zh-CN/users/1637325-xb70sr71
 
-GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.105
+GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.114
 
 Greasy Fork 地址里可能还带 `-beta`，以油猴里的脚本名和版本号为准。
 

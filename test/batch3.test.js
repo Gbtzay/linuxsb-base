@@ -273,3 +273,71 @@ test('机会监控：forget 在未见过的版块键上不抛错', async () => {
   const dbg = await w.LSB.bus.request('forum-watch:debug')
   assert.doesNotThrow(() => dbg.forget(99999))
 })
+
+const FORUM_HTML_MARKS =
+  '<html><body><ul class="post-list">' +
+  '<li class="post-item"><a class="post-title" href="/topic/8001">发红包啦</a>' +
+  '<span class="red-packet-title-status">红包帖</span>' +
+  '<span data-performance-time="1787216186"></span></li>' +
+  '<li class="post-item"><a class="post-title" href="/topic/8002">发卡结束</a>' +
+  '<span class="virtual-card-title-status">结束</span>' +
+  '<span data-performance-time="1787216000"></span></li>' +
+  '<li class="post-item"><a class="post-title" href="/topic/8003">普通帖</a>' +
+  '<span data-performance-time="1787215900"></span></li>' +
+  '</ul></body></html>'
+
+test('机会监控：开关关时红包标记不入箱', async () => {
+  const calls = []
+  const { w, until } = makeSite({
+    'lsb_base:forum-watch:__config': {
+      forums: '5',
+      keywords: 'k8s',
+      intervalMin: 5,
+      jitterMs: 0,
+      notifyDesktop: false,
+      watchRedPacket: false,
+      watchVirtualCard: false,
+    },
+  })
+  w.fetch = async (url) => {
+    calls.push(String(url))
+    return { status: 200, ok: true, url: String(url), text: async () => FORUM_HTML_MARKS }
+  }
+  await loadBase(w, PLUG('forum-watch.user.js'))
+  const dbg = await w.LSB.bus.request('forum-watch:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal(dbg.hits().length, 0, '标题没有 k8s，标记开关关着')
+  assert.ok(calls.some((u) => u.includes('/forum/5')))
+})
+
+test('机会监控：只开盯红包则 live 入箱，ended 不入；水位去重', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:forum-watch:__config': {
+      forums: '5',
+      keywords: '',
+      intervalMin: 5,
+      jitterMs: 0,
+      notifyDesktop: false,
+      watchRedPacket: true,
+      watchVirtualCard: false,
+    },
+  })
+  w.fetch = async (url) => ({
+    status: 200,
+    ok: true,
+    url: String(url),
+    text: async () => FORUM_HTML_MARKS,
+  })
+  await loadBase(w, PLUG('forum-watch.user.js'))
+  const dbg = await w.LSB.bus.request('forum-watch:debug')
+  assert.equal(dbg.probe().watchRedPacket, true)
+  assert.equal(dbg.probe().watchVirtualCard, false)
+  await until(() => dbg.role() === 'leader', 3000)
+  await until(() => dbg.hits().length === 1, 2000)
+  assert.equal(dbg.hits()[0].tid, 8001)
+  assert.equal(dbg.hits()[0].kw, '红包')
+  assert.deepEqual([...dbg.hits()[0].reasons], ['红包'])
+  await dbg.tick()
+  assert.equal(dbg.hits().length, 1)
+})

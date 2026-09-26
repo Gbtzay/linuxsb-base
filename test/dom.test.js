@@ -32,3 +32,22 @@ test('DomWatcher：一次插入多条兄弟时只对父节点扫一遍 onEach', 
   await new Promise((r) => setTimeout(r, 30))
   assert.equal(watcher.scanCount - before, 1, '20 条兄弟插入只扫父节点一次，而不是 20 次')
 })
+
+test('DomWatcher：置顶回帖副本不进 posts-added', async () => {
+  const bus = new Bus()
+  const watcher = new DomWatcher(bus)
+  watcher.start(document.body)
+  const added = []
+  bus.on('dom:posts-added', (posts) => added.push(...posts))
+  const ul = document.querySelector('ul.post-list')
+  const clone = document.createElement('li')
+  clone.className = 'post-entry reply-pin-duplicate'
+  clone.id = 'reply-pin-top-1'
+  const real = document.createElement('li')
+  real.className = 'post-item post-entry'
+  real.id = 'post-1'
+  ul.append(clone, real)
+  await new Promise((r) => setTimeout(r, 30))
+  assert.equal(added.length, 1)
+  assert.equal(added[0].id, 'post-1')
+})

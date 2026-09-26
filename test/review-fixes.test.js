@@ -68,8 +68,9 @@ function boot() {
 test('SEL 覆盖帖子楼层的两种 ul 类名', () => {
   assert.match(SEL.topicPosts, /topic-post-list/)
   assert.match(SEL.topicPosts, /post-list/)
+  assert.match(SEL.topicPosts, /reply-pin-duplicate/, '置顶回帖副本不是真楼层')
   assert.match(SEL.topicUl, /topic-post-list/)
-  assert.equal(SEL.listItems, 'ul.post-list > li.post-item:not(.post-entry)')
+  assert.equal(SEL.listItems, 'ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)')
 })
 
 test('软导航后 snapshot 与 CSRF 跟随当前文档，不再残留旧帖', async () => {

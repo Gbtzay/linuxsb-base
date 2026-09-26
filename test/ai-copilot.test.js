@@ -214,6 +214,134 @@ test('UI：问答发送后显示结果并保留复制按钮', async () => {
   assert.ok(ctx.w.document.querySelector('[data-copy]'))
 })
 
+test('UI：重新生成会绕过相同缓存再次请求模型', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  let panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-question]').value = '核心争议是什么？'
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-result')))
+  assert.equal(ctx.llmCalls(), 1)
+
+  ctx.w.document.querySelector('[data-again]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-wait')))
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-result')))
+  assert.equal(ctx.llmCalls(), 2)
+})
+
+test('UI：错误面板的重试会再次发起模型请求', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', { _llmReply: { choices: [] } })
+  await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-question]').value = '核心争议是什么？'
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-error')))
+  assert.equal(ctx.llmCalls(), 1)
+
+  ctx.w.document.querySelector('[data-retry]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-wait')))
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-error') && ctx.llmCalls() === 2))
+})
+
+test('证据：模型引用的已知楼层渲染为站内链接，并保留原文复制', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: { choices: [{ message: { content: '结论来自 [#12]。' } }] },
+  })
+  const dbg = await load(ctx)
+  const context = await dbg.collectContext({})
+  const floor12 = context.posts.find((post) => post.floor === 12)
+  assert.ok(floor12, '夹具应包含 #12 楼')
+  const record = await dbg.run('ask', { question: '依据是什么？' })
+  assert.equal(record.meta.citations[0].floor, 12)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-question]').value = '依据是什么？'
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-result')))
+  const citation = ctx.w.document.querySelector('[data-citation-floor="12"]')
+  assert.equal(citation?.tagName, 'A')
+  assert.match(citation.getAttribute('href'), new RegExp(`#post-${floor12.postId}$`))
+  assert.match(ctx.w.document.querySelector('.lsb-copilot-result').textContent, /结论来自/)
+})
+
+test('证据：未知楼层显示范围外提示，不信任模型提供的链接', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: { choices: [{ message: { content: '请看 [#999]。' } }] },
+  })
+  const dbg = await load(ctx)
+  await dbg.run('ask', { question: '有没有引用？' })
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-question]').value = '有没有引用？'
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('[data-citation-floor="999"]')))
+  const citation = ctx.w.document.querySelector('[data-citation-floor="999"]')
+  assert.notEqual(citation.tagName, 'A')
+  assert.match(citation.textContent, /当前采集范围没有此楼层/)
+  assert.equal(citation.querySelector('a'), null)
+})
+
+test('新回复：首次建立当前楼层起点，实时新增楼层进入待摘要队列', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  assert.equal(JSON.stringify(dbg.digestState(1).pending), '[]')
+  ctx.w.LSB.bus.emit(
+    'topic:posts-added',
+    [{ postId: 9999, floor: 51, authorName: '新用户', content: '最新回复', ts: 1787000000 }],
+    { source: 'test', raw: true },
+  )
+  assert.deepEqual([...dbg.digestState(1).pending.map((post) => post.floor)], [51])
+  const context = await dbg.collectContext({})
+  const req = dbg.buildRequest('digest', context, { newPosts: dbg.digestState(1).pending })
+  assert.match(req.user, /<new-replies>/)
+  assert.match(req.user, /最新回复/)
+  assert.doesNotMatch(req.user, /打造更新的理想型社区/)
+})
+
+test('新回复：成功摘要后清空队列，模型失败则保留队列', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: { choices: [{ message: { content: '新回复已处理 [#51]' } }] },
+  })
+  const dbg = await load(ctx)
+  ctx.w.LSB.bus.emit(
+    'topic:posts-added',
+    [{ postId: 9999, floor: 51, authorName: '新用户', content: '最新回复', ts: 1787000000 }],
+    { source: 'test', raw: true },
+  )
+  const record = await dbg.run('digest')
+  assert.match(record.text, /新回复已处理/)
+  assert.equal(JSON.stringify(dbg.digestState(1).pending), '[]')
+
+  const bad = makeSite(topicHtml, 'https://linux.sb/topic/1', { _llmReply: { choices: [] } })
+  const badDbg = await load(bad)
+  bad.w.LSB.bus.emit(
+    'topic:posts-added',
+    [{ postId: 9999, floor: 51, authorName: '新用户', content: '最新回复', ts: 1787000000 }],
+    { source: 'test', raw: true },
+  )
+  await assert.rejects(() => badDbg.run('digest'))
+  assert.deepEqual([...badDbg.digestState(1).pending.map((post) => post.floor)], [51])
+})
+
+test('UI：新回复模式显示待处理数量，可手动设为新起点', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  ctx.w.LSB.bus.emit(
+    'topic:posts-added',
+    [{ postId: 9999, floor: 51, authorName: '新用户', content: '最新回复', ts: 1787000000 }],
+    { source: 'test', raw: true },
+  )
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="digest"]').click()
+  assert.match(panel.textContent, /待处理 1 条|1 条新回复/)
+  panel.querySelector('[data-new-mark]').click()
+  assert.equal(JSON.stringify(dbg.digestState(1).pending), '[]')
+  assert.equal(ctx.llmCalls(), 0)
+})
+
 test('UI：草稿模式只提供复制，不提供发送站内回复动作', async () => {
   const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
   await load(ctx)

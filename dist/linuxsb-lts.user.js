@@ -2,7 +2,7 @@
 // @name         LINUX.SB（LTS）
 // @name:en      LINUX.SB (LTS)
 // @namespace    https://linux.sb/
-// @version      1.0.105
+// @version      1.0.114
 // @description  【LTS】一份脚本含基座与精简功能包。请先卸掉「LINUX.SB 氢」和「LINUX.SB 氧」。冻新功能，只修阻断。
 // @description:en  [LTS] Base + feature pack in one script. Uninstall Hydrogen and Oxygen first. Feature-frozen.
 // @author       xB70sR71
@@ -49,7 +49,7 @@
     return
   }
   W.__LSB_CHANNEL__ = 'lts'
-  W.__LSB_LTS_VERSION__ = "1.0.105";
+  W.__LSB_LTS_VERSION__ = "1.0.114";
 (() => {
   var __defProp = Object.defineProperty;
   var __export = (target, all) => {
@@ -352,8 +352,15 @@
     wallet: "/community_wallet",
     featured: "/topic_featured",
     footprint: "/unread_topic_notice_footprint",
+    collections: "/topic_collections",
+    collection: (id) => `/topic_collection/${id}`,
+    identity: "/identity_center",
+    promotions: "/promotions",
+    essenceReview: "/topic_essence_review_list",
     colorScheme: "/color_scheme",
     keywordFilter: "/home_keyword_filter_settings",
+    messages: "/direct_messages",
+    userBlock: "/user_block",
     donate: (topicId) => `/donate${topicId ? `?topic_id=${topicId}` : ""}`,
     donateFeed: "/donate_feed",
     notify: (id) => `/notify/${id}`,
@@ -370,11 +377,11 @@
       search: "/search"
     }
   };
-  var USER_TABS = ["topics", "replies", "notifications", "points_rewards", "favorites"];
+  var USER_TABS = ["topics", "replies", "attachments", "notifications", "points_rewards", "favorites"];
   var SEL = {
-    topicPosts: "ul.topic-post-list > li.post-entry, ul.post-list > li.post-entry",
+    topicPosts: "ul.topic-post-list > li.post-entry:not(.reply-pin-duplicate), ul.post-list > li.post-entry:not(.reply-pin-duplicate)",
     topicUl: "ul.topic-post-list, ul.post-list",
-    listItems: "ul.post-list > li.post-item:not(.post-entry)",
+    listItems: "ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)",
     listUl: "ul.post-list",
     postEntry: "li.post-entry"
   };
@@ -383,6 +390,8 @@
     const q = new URLSearchParams(loc.search);
     const mTopic = path.match(/^\/topic\/(\d+)$/);
     if (mTopic) return { type: "topic", id: Number(mTopic[1]), page: Number(q.get("p") || 1) };
+    const mCollection = path.match(/^\/topic_collection\/(\d+)$/);
+    if (mCollection) return { type: "collection", id: Number(mCollection[1]) };
     const mForum = path.match(/^\/forum\/(\d+)$/);
     if (mForum) {
       return {
@@ -397,6 +406,7 @@
     if (path === "/" || path === "/index.php") {
       return { type: "home", page: Number(q.get("p") || 1), sort: q.get("sort") || "post" };
     }
+    if (path === "/topic_collections") return { type: "collections", tab: q.get("tab") || "mine" };
     const known = {
       "/profile": "profile",
       "/topic_edit": "topic_edit",
@@ -416,8 +426,13 @@
       "/community_wallet": "wallet",
       "/topic_featured": "featured",
       "/unread_topic_notice_footprint": "footprint",
+      "/identity_center": "identity",
+      "/promotions": "promotions",
+      "/topic_essence_review_list": "essence_review",
       "/color_scheme": "color_scheme",
-      "/home_keyword_filter_settings": "keyword_filter"
+      "/home_keyword_filter_settings": "keyword_filter",
+      "/direct_messages": "messages",
+      "/user_block": "user_block"
     };
     if (known[path]) return { type: known[path] };
     if (/^\/notify\/\d+$/.test(path)) return { type: "notify", id: num(path) };
@@ -497,12 +512,20 @@
   }
   function parseListItem(li) {
     if (li.classList.contains("post-entry")) return null;
+    if (li.classList.contains("topic-collections-collection-row")) return null;
     const titleA = li.querySelector("a.post-title:not(.post-author)");
     if (!titleA) return null;
+    if (/\/topic_collection\//.test(titleA.getAttribute("href") || "")) return null;
     const authorA = li.querySelector('.post-avatar a[href^="/user/"]') || li.querySelector('.post-meta a[href^="/user/"]');
     const forumA = li.querySelector('.post-forum-meta a[href^="/forum/"], .post-meta a[href^="/forum/"]');
     const stamp = li.querySelector("span[data-performance-time]");
     const counts = [...li.querySelectorAll(".post-meta span")].map((s) => text(s)).filter((t) => /^\d[\d,]*$/.test(t)).map(num);
+    const redEl = li.querySelector(".red-packet-title-status");
+    const cardEl = li.querySelector(".virtual-card-title-status");
+    const blob = (el) => el ? `${el.className} ${text(el)}` : "";
+    const redPacket = !redEl ? null : /结束|已抢|抢完|已领|ended|expired/i.test(blob(redEl)) ? "ended" : "live";
+    const cardBlob = blob(cardEl);
+    const virtualCard = !cardEl ? null : cardEl.classList.contains("finished") || /结束|已结束|已发完|ended|expired/i.test(cardBlob) ? "ended" : cardEl.classList.contains("active") || /发卡中|发放中/.test(text(cardEl)) ? "live" : "ended";
     return {
       id: idFrom(titleA.getAttribute("href"), "topic"),
       title: text(titleA),
@@ -514,7 +537,10 @@
       replies: counts.length ? counts[counts.length - 1] : null,
       lastActiveTs: stamp ? num(stamp.getAttribute("data-performance-time")) : null,
       pinned: li.classList.contains("topic-pinned") || !!li.querySelector(".topic-badge.pinned"),
-      badges: [...li.querySelectorAll(".topic-stamp-badge")].map((b) => text(b)),
+      badges: [...li.querySelectorAll(".topic-stamp-badge, .red-packet-title-status, .virtual-card-title-status")].map(
+        (b) => text(b)
+      ),
+      marks: { redPacket, virtualCard },
       el: li
     };
   }
@@ -1448,10 +1474,14 @@
       for (const rec of records) {
         for (const node of rec.addedNodes) {
           if (node.nodeType !== 1) continue;
-          if (node.matches?.("li.post-entry")) posts.add(node);
-          else if (node.matches?.("li.post-item")) items.add(node);
-          for (const el of node.querySelectorAll?.("li.post-entry") || []) posts.add(el);
-          for (const el of node.querySelectorAll?.("li.post-item:not(.post-entry)") || []) items.add(el);
+          if (node.matches?.("li.post-entry") && !node.classList.contains("reply-pin-duplicate")) posts.add(node);
+          else if (node.matches?.("li.post-item") && !node.classList.contains("post-entry") && !node.classList.contains("topic-collections-collection-row")) {
+            items.add(node);
+          }
+          for (const el of node.querySelectorAll?.("li.post-entry:not(.reply-pin-duplicate)") || []) posts.add(el);
+          for (const el of node.querySelectorAll?.("li.post-item:not(.post-entry):not(.topic-collections-collection-row)") || []) {
+            items.add(el);
+          }
           added.push(node);
         }
       }
@@ -1767,7 +1797,7 @@
   }
 
   // src/core.js
-  var VERSION = "0.1.36";
+  var VERSION = "0.1.41";
   var PERMISSIONS = {
     read: "读取页面结构与站内 GET 请求",
     write: "代表当前用户发起写操作（回复/点赞/收藏等）",
@@ -3551,13 +3581,13 @@ html.lsb-shell-boot{
     }
 
     function paintAll() {
-      for (const li of document.querySelectorAll(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)')) {
+      for (const li of document.querySelectorAll(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)')) {
         paint(li)
       }
     }
 
     // 现有 + 无限滚动新增的条目各回调一次（幂等）
-    api.dom.each(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry)', paint)
+    api.dom.each(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)', paint)
     // 软导航后 DOM 可能被整段换掉：记账 + 全量重涂
     api.on('route:changed', () => {
       markOpenTopic()
@@ -5408,7 +5438,7 @@ html.lsb-shell-boot{
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.49',
+    version: '1.1.56',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -5514,7 +5544,10 @@ html.lsb-shell-boot{
           border-right:1px solid var(--line-soft,#e8e8e8);
           font-family:${FONT_SANS};
         }
-        .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:hidden;padding:56px 12px 12px}
+        .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:hidden;padding:56px 12px 12px;display:flex;flex-direction:column}
+        .lsb-shell-rail-scroll [data-lsb-shell-section="home"]{flex:0 0 auto}
+        .lsb-shell-rail-scroll [data-lsb-shell-section="boards"]{flex:1 1 auto;min-height:0;overflow:auto}
+        .lsb-shell-rail-scroll [data-lsb-shell-section="tools"]{flex:0 0 auto}
         .lsb-shell-me{margin:0 0 14px}
         .lsb-shell-me .sidebar-card.user-card{
           margin:0;padding:10px 10px;border:0;box-shadow:none;
@@ -5595,6 +5628,7 @@ html.lsb-shell-boot{
         .lsb-shell-theme [data-themes-mode-toggle] svg{display:block;width:18px;height:18px}
         .lsb-shell-theme .dark-mode-control{position:relative;flex:0 0 auto;grid-area:auto;justify-self:auto}
         .lsb-shell-theme .dark-mode-menu{z-index:8003}
+        html.lsb-skin-shell-on #color-scheme-modal{z-index:8003}
         .lsb-shell-theme .color-scheme-top-link{
           display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;
           grid-area:auto;justify-self:auto;flex:0 0 30px;
@@ -5901,19 +5935,52 @@ html.lsb-shell-boot{
       toolsCache = null
     }
 
+    function pagePath() {
+      try {
+        return location.pathname.replace(/\/+$/, '') || '/'
+      } catch {
+        return ''
+      }
+    }
+
     function locationText() {
       const p = api.page || {}
-      if (p.type === 'home') {
-        if (p.sort === 'lucky') return '抽奖'
-        if (p.sort === 'card') return '发卡'
-        if (p.sort === 'comment') return '新评论'
-        return '全部主题'
+      const path = pagePath()
+      const type = p.type
+      if (type === 'collections' || path === '/topic_collections') {
+        let tab = type === 'collections' ? p.tab : null
+        if (tab == null) {
+          try {
+            tab = new URL(location.href).searchParams.get('tab')
+          } catch {
+            tab = null
+          }
+        }
+        return tab === 'mine' || !tab ? '我的淘帖' : '淘帖中心'
       }
-      if (p.type === 'forum') {
+      if (type === 'collection' || /^\/topic_collection\/\d+$/.test(path)) {
+        const title = (document.querySelector('h1.post-content-title, h1')?.textContent || '').trim()
+        return title || '淘帖'
+      }
+      if (type === 'identity' || path === '/identity_center') return '认证中心'
+      if (type === 'promotions' || path === '/promotions') return '我的广告'
+      if (type === 'messages' || path === '/direct_messages') return '我的私信'
+      if (type === 'user_block' || path === '/user_block') return '屏蔽名单'
+      if (type === 'essence_review' || path === '/topic_essence_review_list') return '申精'
+      if (type === 'home' || path === '/' || path === '/index.php') {
+        if (path === '/' || path === '/index.php') {
+          if (p.sort === 'lucky') return '抽奖'
+          if (p.sort === 'card') return '发卡'
+          if (p.sort === 'red_packet') return '红包'
+          if (p.sort === 'comment') return '新评论'
+          return '新帖子'
+        }
+      }
+      if (type === 'forum') {
         const f = (api.forums || []).find((x) => x.id === p.id)
         return f?.name || '版块'
       }
-      if (p.type === 'topic') {
+      if (type === 'topic') {
         try {
           const title = api.parse.topic(document)?.title
           if (title) return title
@@ -5922,14 +5989,14 @@ html.lsb-shell-boot{
         }
         return (document.querySelector('h1.post-content-title')?.textContent || '').trim() || '帖子'
       }
-      if (p.type === 'user') return '用户'
-      if (p.type === 'featured') return '精华'
-      if (p.type === 'footprint') return '足迹'
-      if (p.type === 'gacha') return '称号抽取'
-      if (p.type === 'gacha_market') return '称号交易'
-      if (p.type === 'gacha_profile') return '我的称号'
-      if (p.type === 'wallet') return '我的烧饼'
-      if (p.type === 'invite') return '邀请中心'
+      if (type === 'user') return '用户'
+      if (type === 'featured') return '精华'
+      if (type === 'footprint') return '足迹'
+      if (type === 'gacha') return '称号抽取'
+      if (type === 'gacha_market') return '称号交易'
+      if (type === 'gacha_profile') return '我的称号'
+      if (type === 'wallet') return '我的烧饼'
+      if (type === 'invite') return '邀请中心'
       return 'LINUX SB'
     }
 
@@ -6066,9 +6133,25 @@ html.lsb-shell-boot{
     function collectTopExtras() {
       const top = document.querySelector('body > .top')
       if (!top) return []
-      return [...top.querySelectorAll('a.forum-enhancements-custom-top-link')].filter(
-        (a) => a instanceof HTMLAnchorElement && extraLabel(a) && !isJunkExtra(a.href, extraLabel(a)),
-      )
+      const seen = new Set()
+      const out = []
+      const take = (a) => {
+        if (!(a instanceof HTMLAnchorElement)) return
+        const label = extraLabel(a)
+        if (!label || isJunkExtra(a.href, label)) return
+        let abs
+        try {
+          abs = new URL(a.href, location.href).href
+        } catch {
+          return
+        }
+        if (seen.has(abs)) return
+        seen.add(abs)
+        out.push(a)
+      }
+      for (const a of top.querySelectorAll('a.forum-enhancements-custom-top-link')) take(a)
+      for (const a of top.querySelectorAll('a.plugin-top-menu-link')) take(a)
+      return out
     }
 
     function adoptTopExtras(host) {
@@ -6213,11 +6296,15 @@ html.lsb-shell-boot{
           )
         : null
       const bio = onUser ? uniq.find((c) => c.classList.contains('bio-card')) : null
+      const promo = uniq.find((c) => c.classList.contains('sidebar-promotions-card'))
+      const announce = uniq.find(
+        (c) => c.classList.contains('forum-enhancements-left-announcements') || text(c).startsWith('站务公告'),
+      )
       const quick = uniq.find((c) => text(c).startsWith('快捷功能'))
       const hot = uniq.find((c) => c.classList.contains('daily-hot-topics-card'))
       const stats = uniq.find((c) => c.classList.contains('stats-card'))
       const online = uniq.find((c) => c.classList.contains('online-users-card'))
-      return [profile, bio, quick, hot, stats, online].filter(Boolean)
+      return [profile, bio, promo, announce, quick, hot, stats, online].filter(Boolean)
     }
 
     function adoptAsideCards(host) {
@@ -6810,14 +6897,16 @@ html.lsb-shell-boot{
       }
       if (url.origin !== location.origin) return false
       const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
-      // 帖子页的讨论串靠站点脚本在整页生命周期里挂载；软跳进帖子会剥脚本，刷新才出现。
-      if (/^\/topic\/\d+/.test(path)) return false
+      // 帖子 / 淘帖详情靠站点脚本在整页生命周期里挂载；软跳会剥脚本，刷新才出现。
+      if (/^\/topic\/\d+/.test(path) || /^\/topic_collection\/\d+/.test(path)) return false
       return (
         path === '/'
         || path === '/index.php'
         || path === '/latest'
         || path === '/topic_featured'
         || path === '/unread_topic_notice_footprint'
+        || path === '/topic_collections'
+        || path === '/topic_essence_review_list'
         || /^\/forum\/\d+/.test(path)
         || /^\/category\/\d+/.test(path)
       )
@@ -7395,9 +7484,7 @@ html.lsb-shell-boot{
     }
 
     function afterPaint(fn) {
-      const raf = window.requestAnimationFrame
-      if (typeof raf === 'function') raf(() => fn())
-      else setTimeout(fn, 0)
+      queueMicrotask(fn)
     }
 
     function scheduleRefresh(fromRoute) {
@@ -7492,7 +7579,7 @@ html.lsb-shell-boot{
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.17',
+    version: '1.2.18',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -7589,6 +7676,12 @@ html.lsb-shell-boot{
       return election.isLeader || isUserTopicList()
     }
 
+    function isTopicListPage() {
+      const t = api.page?.type
+      if (t === 'home' || t === 'forum' || t === 'featured' || t === 'footprint') return true
+      return isUserTopicList()
+    }
+
     function captureList() {
       const ul = document.querySelector(api.sel?.listUl || 'ul.post-list')
       if (!ul) return false
@@ -7645,12 +7738,15 @@ html.lsb-shell-boot{
     function init() {
       teardown()
       navGen += 1
-      if (api.page.type === 'user' && !isUserTopicList()) {
+      if (api.page.type === 'topic' && cfg.trackTopicReplies) {
+        if (!captureTopic()) mode = null
+        return
+      }
+      if (!isTopicListPage()) {
         mode = null
         return
       }
-      const ok = api.page.type === 'topic' && cfg.trackTopicReplies ? captureTopic() : captureList()
-      if (!ok) mode = null
+      if (!captureList()) mode = null
     }
 
     function teardown() {
@@ -8283,7 +8379,7 @@ html.lsb-shell-boot{
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.105',
+    version: '1.0.114',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },

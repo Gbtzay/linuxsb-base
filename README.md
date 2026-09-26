@@ -52,7 +52,7 @@
 ### 方式 A：一键全家桶（推荐）
 
 安装 `dist/linuxsb-base.user.js`（氢 · 基座）+ `dist/linuxsb-suite.user.js`（氧 · 重型套件，内含
-19 个模块）。套件额外提供「套件总览」仪表盘：模块状态卡片、快捷启停、跨模块关键指标聚合。每个模块仍是独立注册的插件——可单独停用、各自配置页保留。
+21 个模块）。套件额外提供「套件总览」仪表盘：模块状态卡片、快捷启停、跨模块关键指标聚合。每个模块仍是独立注册的插件——可单独停用、各自配置页保留。
 
 只要一份脚本、精简功能：装 LINUX.SB（LTS）https://greasyfork.org/zh-CN/scripts/593319-linux-sb-lts 。与氢+氧二选一；请先卸掉氢和氧。LTS 冻新功能，只修站点断裂。
 
@@ -107,6 +107,7 @@
 |---|---|---|
 | `resume-reading` | **断点续读**：记住每帖读到哪层，回来弹「接着看」，未读楼层标 NEW；面板含阅读历史与容量管理 | read/storage/ui/events |
 | `read-mark` | **已读置灰**：看过的帖子在列表中整行变灰；未读仍用站点自己的标记，不再另挂角标；无限滚动新增条目同样生效 | read/storage/ui/events |
+| `topic-marks` | **红包发卡**：列表左侧色条标出还活着的红包 / 发卡；结束态不画；关掉模块即关高亮 | read/ui/events |
 | `home-return` | **首页回位**：首页点进帖子时记下位置；后退、点站名或「全部主题」等回到首页时滚回那条；成功一次后丢掉记录，刷新不再跳；不在第一页则继续加载直到找到 | read/storage/ui/events |
 | `hover-profile` | **用户画像悬浮卡**：悬停用户链接显示等级/积分/最近主题；TTL 缓存 + 失败负缓存，绝不重复请求 | read/storage/ui/events |
 | `topic-preview` | **主楼预览**：列表标题旁「预览」按钮，点开蒙层浮窗用同源 iframe 嵌原帖并裁掉顶栏/侧栏/页脚；点标题仍整页进帖 | read/ui/events |
@@ -116,19 +117,22 @@
 | `checkin-calendar` | **签到日历**：自动探测每日状态、月视图 + 连击统计 + 一键签今天（原生无补签，历史自安装日起） | read/storage/ui/events/**write** |
 | `points-ledger` | **积分趋势**：余额快照序列 → SVG 折线 + 每日增减清单；对外 RPC `points-ledger:series` | read/storage/ui/events |
 | `title-quotes` | **称号行情**：采集挂单高低与中位；全场折线 + 各称号 K/折线；交易页折叠与全站浮层可切分析大盘；图可拖高、悬停详情竖排；氢壳开着走左栏，关壳才留右下「行情」钮；浮层打开时选主最多 10 秒一轮；氧面板为间隔设置 | read/storage/ui/events |
-| `forum-watch` | **机会监控**：监听指定版块新帖标题命中关键词即提醒；复用哨兵选主机制；「机会箱」面板 | read/storage/ui/events |
+| `forum-watch` | **机会监控**：监听指定版块新帖标题命中关键词即提醒；也可按列表上还活着的红包 / 发卡盯（默认关）；复用哨兵选主；「机会箱」面板 | read/storage/ui/events |
 | `local-bridge` | **本地联动**（独立插件，本版氧不收录）：对接本机 workbench(7788)——浏览预热缓存、主楼一键触发 /api/analyze、健康监视与服务端摘要面板；RPC 供其它插件复用 | read/storage/ui/events/**net** |
 | `data-migration` | **配置迁移**：全库数据导出/导入（JSON 文件/剪贴板），覆盖或合并模式；需要基座 ≥0.1.1 的 admin 权限 | read/storage/ui/events/**admin** |
 | `my-archive` | **个人存档**：抓自己的全部主题/回帖本地累积（分页参数自动发现），导出 JSON/Markdown | read/storage/ui/events |
 | `annual-report` | **年度报告**：聚合积分/签到/阅读/消息箱等 RPC 出图文报告，可导出 Markdown；模块缺失自动降级 | read/storage/ui/events |
 | `skin` | **界面精修**：氢壳（左栏导航 + 顶栏 + 个人卡迁入左栏 + 帖内时间轴，默认可关；氢面板开关 + 油猴图标菜单均可切换）与排版层——正文行高/中文字体栈、列表密度、代码块、楼层分隔 + OP 左边线高亮、宽屏限宽阅读；只动结构与排版，不碰配色。进帖子走整页，避免软跳剥脚本导致讨论串不出现。站点明暗切换钮迁入壳顶栏 | ui/storage/events |
 | `ai-summary` | **AI 总结**：调用 OpenAI 兼容端点总结全帖（实时采集 DOM，兼容无限滚动），三种风格提示词；主楼与回复共同受 `maxChars` 约束，按「风格×附加要求×模型×采集范围」分槽缓存，长请求不占用站内限速队列（默认 120s 超时） | read/storage/ui/events/**net** |
+| `ai-copilot` | **AI 帖子副驾**：依赖 `ai-summary`，在帖子页提供问答、讨论分析、指定楼层回复草稿和新回复摘要；回答会标出可跳转的楼层证据，待处理的新回复保存在本地队列；只生成并复制草稿，不自动填充或提交站内回复 | read/storage/ui/events |
 | `floor-stats` | 示例：楼层统计 + 只看TA，对外提供 RPC | read/storage/ui/events |
 | `hot-floor-badge` | 示例：依赖 floor-stats 的高频发言标记 | read/storage/ui/events |
 
 AI 总结注意：首次请求新域名时 Tampermonkey 会弹跨域确认；API Key 明文存在本机脚本存储里，公用电脑慎用。
 成本可控性：`maxChars` 同时约束主楼与回复（主楼最多占一半份额），结果面板会显示实际送入字符数、
 是否截断、是否包含主楼与耗时。分页视图（`?p=2`）里没有主楼时不会拿 #1 楼冒充，而是如实告知模型。
+AI 帖子副驾复用 AI 总结的端点、Key 和模型设置；它不申请 `write` 或 `net` 权限，回复草稿必须由用户自行复制、修改和提交。
+副驾要求模型用 `[#N]` 标记依据，已采集的楼层会渲染为站内锚点；超出当前采集范围的引用只显示提示，不采信模型提供的外部链接。「新回复」模式监听当前主题的新楼层，使用本地待处理队列只摘要尚未处理的内容；模型失败或超时不会丢失队列。
 
 ## API 一览（`setup(api)` 的 `api`）
 
@@ -257,7 +261,7 @@ POST 自动重发会造成重复回复、重复签到这类无法撤销的副作
 
 ```bash
 npm i            # jsdom + esbuild
-npm test         # 408 用例 ≈ 36s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
+npm test         # 451 用例 ≈ 49s（真实页面夹具 + e2e 加载 dist 产物 + 加固回归）
 npm run build    # src/*.js → dist/linuxsb-base.user.js；plugins/* → dist/linuxsb-suite.user.js；精简集 → dist/linuxsb-lts.user.js
 ```
 

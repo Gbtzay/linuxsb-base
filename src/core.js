@@ -18,7 +18,7 @@ import {
   ltsDisplayVersion,
 } from './check-update.js'
 
-export const VERSION = '0.1.36'
+export const VERSION = '0.1.41'
 
 /** 权限清单：插件在 manifest.permissions 里声明，未声明即调用会抛错 */
 export const PERMISSIONS = {

@@ -1,11 +1,14 @@
 import { num, text, idFrom } from './util.js'
 
 /**
- * 站点适配层：把 bbs1org（linux.sb v8.6.x / v8.7.5）的 HTML 结构收敛成结构化对象。
+ * 站点适配层：把 bbs1org（linux.sb v8.6.x / v8.7.5 / v8.9.2 / v9.0）的 HTML 结构收敛成结构化对象。
  *
  * 只有这一个文件知道选择器。站点改版时只改这里，依附插件不受影响。
  * 选择器依据 linux.sb 实测页面（/topic/:id、/、/user/:id）；v8.7.5 帖内楼层也是
- * li.post-item.post-entry，列表选择器必须把它们排除。
+ * li.post-item.post-entry，列表选择器必须把它们排除。v8.9.2 淘帖专辑行
+ * `.topic-collections-collection-row` 也要排除；并增加淘帖 / 认证 / 申精 / 广告路由。
+ * v9.0 列表标题旁还有红包帖 / 发卡状态，不算主题 id。置顶回帖会在主楼后插一份
+ * `.reply-pin-duplicate`，不是真楼层。
  */
 
 export const ROUTES = {
@@ -36,8 +39,15 @@ export const ROUTES = {
   wallet: '/community_wallet',
   featured: '/topic_featured',
   footprint: '/unread_topic_notice_footprint',
+  collections: '/topic_collections',
+  collection: (id) => `/topic_collection/${id}`,
+  identity: '/identity_center',
+  promotions: '/promotions',
+  essenceReview: '/topic_essence_review_list',
   colorScheme: '/color_scheme',
   keywordFilter: '/home_keyword_filter_settings',
+  messages: '/direct_messages',
+  userBlock: '/user_block',
   donate: (topicId) => `/donate${topicId ? `?topic_id=${topicId}` : ''}`,
   donateFeed: '/donate_feed',
   notify: (id) => `/notify/${id}`,
@@ -55,13 +65,13 @@ export const ROUTES = {
   },
 }
 
-export const USER_TABS = ['topics', 'replies', 'notifications', 'points_rewards', 'favorites']
+export const USER_TABS = ['topics', 'replies', 'attachments', 'notifications', 'points_rewards', 'favorites']
 
 /** 站点 DOM 选择器单点。插件通过 api.sel 使用，禁止再手写 ul.post-list / topic-post-list。 */
 export const SEL = {
-  topicPosts: 'ul.topic-post-list > li.post-entry, ul.post-list > li.post-entry',
+  topicPosts: 'ul.topic-post-list > li.post-entry:not(.reply-pin-duplicate), ul.post-list > li.post-entry:not(.reply-pin-duplicate)',
   topicUl: 'ul.topic-post-list, ul.post-list',
-  listItems: 'ul.post-list > li.post-item:not(.post-entry)',
+  listItems: 'ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)',
   listUl: 'ul.post-list',
   postEntry: 'li.post-entry',
 }
@@ -72,6 +82,8 @@ export function detectPage(loc = location) {
   const q = new URLSearchParams(loc.search)
   const mTopic = path.match(/^\/topic\/(\d+)$/)
   if (mTopic) return { type: 'topic', id: Number(mTopic[1]), page: Number(q.get('p') || 1) }
+  const mCollection = path.match(/^\/topic_collection\/(\d+)$/)
+  if (mCollection) return { type: 'collection', id: Number(mCollection[1]) }
   const mForum = path.match(/^\/forum\/(\d+)$/)
   if (mForum) {
     return {
@@ -86,6 +98,7 @@ export function detectPage(loc = location) {
   if (path === '/' || path === '/index.php') {
     return { type: 'home', page: Number(q.get('p') || 1), sort: q.get('sort') || 'post' }
   }
+  if (path === '/topic_collections') return { type: 'collections', tab: q.get('tab') || 'mine' }
   const known = {
     '/profile': 'profile',
     '/topic_edit': 'topic_edit',
@@ -105,8 +118,13 @@ export function detectPage(loc = location) {
     '/community_wallet': 'wallet',
     '/topic_featured': 'featured',
     '/unread_topic_notice_footprint': 'footprint',
+    '/identity_center': 'identity',
+    '/promotions': 'promotions',
+    '/topic_essence_review_list': 'essence_review',
     '/color_scheme': 'color_scheme',
     '/home_keyword_filter_settings': 'keyword_filter',
+    '/direct_messages': 'messages',
+    '/user_block': 'user_block',
   }
   if (known[path]) return { type: known[path] }
   if (/^\/notify\/\d+$/.test(path)) return { type: 'notify', id: num(path) }
@@ -207,8 +225,10 @@ export function readForums(doc = document) {
 /** 列表页（首页 / 版块页 / 用户页 / 精华 / 足迹）的一条条目 */
 export function parseListItem(li) {
   if (li.classList.contains('post-entry')) return null
+  if (li.classList.contains('topic-collections-collection-row')) return null
   const titleA = li.querySelector('a.post-title:not(.post-author)')
   if (!titleA) return null
+  if (/\/topic_collection\//.test(titleA.getAttribute('href') || '')) return null
   const authorA = li.querySelector('.post-avatar a[href^="/user/"]') || li.querySelector('.post-meta a[href^="/user/"]')
   const forumA = li.querySelector('.post-forum-meta a[href^="/forum/"], .post-meta a[href^="/forum/"]')
   const stamp = li.querySelector('span[data-performance-time]')
@@ -216,6 +236,22 @@ export function parseListItem(li) {
     .map((s) => text(s))
     .filter((t) => /^\d[\d,]*$/.test(t))
     .map(num)
+  const redEl = li.querySelector('.red-packet-title-status')
+  const cardEl = li.querySelector('.virtual-card-title-status')
+  const blob = (el) => (el ? `${el.className} ${text(el)}` : '')
+  const redPacket = !redEl
+    ? null
+    : /结束|已抢|抢完|已领|ended|expired/i.test(blob(redEl))
+      ? 'ended'
+      : 'live'
+  const cardBlob = blob(cardEl)
+  const virtualCard = !cardEl
+    ? null
+    : cardEl.classList.contains('finished') || /结束|已结束|已发完|ended|expired/i.test(cardBlob)
+      ? 'ended'
+      : cardEl.classList.contains('active') || /发卡中|发放中/.test(text(cardEl))
+        ? 'live'
+        : 'ended'
   return {
     id: idFrom(titleA.getAttribute('href'), 'topic'),
     title: text(titleA),
@@ -227,7 +263,10 @@ export function parseListItem(li) {
     replies: counts.length ? counts[counts.length - 1] : null,
     lastActiveTs: stamp ? num(stamp.getAttribute('data-performance-time')) : null,
     pinned: li.classList.contains('topic-pinned') || !!li.querySelector('.topic-badge.pinned'),
-    badges: [...li.querySelectorAll('.topic-stamp-badge')].map((b) => text(b)),
+    badges: [...li.querySelectorAll('.topic-stamp-badge, .red-packet-title-status, .virtual-card-title-status')].map(
+      (b) => text(b),
+    ),
+    marks: { redPacket, virtualCard },
     el: li,
   }
 }

@@ -17,6 +17,7 @@ import {
   parseNotifications,
   parsePost,
   SEL,
+  USER_TABS,
 } from '../src/site.js'
 
 const fx = (n) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), 'utf8')
@@ -48,8 +49,23 @@ test('detectPage 识别各类路由', () => {
   assert.equal(detectPage(mk('https://linux.sb/community_wallet')).type, 'wallet')
   assert.equal(detectPage(mk('https://linux.sb/topic_featured')).type, 'featured')
   assert.equal(detectPage(mk('https://linux.sb/unread_topic_notice_footprint')).type, 'footprint')
+  assert.deepEqual(detectPage(mk('https://linux.sb/topic_collections')), { type: 'collections', tab: 'mine' })
+  assert.deepEqual(detectPage(mk('https://linux.sb/topic_collections?tab=everyone')), {
+    type: 'collections',
+    tab: 'everyone',
+  })
+  assert.deepEqual(detectPage(mk('https://linux.sb/topic_collection/153')), { type: 'collection', id: 153 })
+  assert.equal(detectPage(mk('https://linux.sb/identity_center')).type, 'identity')
+  assert.equal(detectPage(mk('https://linux.sb/promotions')).type, 'promotions')
+  assert.equal(detectPage(mk('https://linux.sb/topic_essence_review_list')).type, 'essence_review')
+  assert.equal(detectPage(mk('https://linux.sb/topic/14055')).type, 'topic', '不得把淘帖路径认成帖子')
   assert.equal(detectPage(mk('https://linux.sb/index.php?sort=lucky')).sort, 'lucky')
   assert.equal(detectPage(mk('https://linux.sb/index.php?sort=card')).sort, 'card')
+  assert.equal(detectPage(mk('https://linux.sb/index.php?sort=red_packet')).sort, 'red_packet')
+  assert.equal(detectPage(mk('https://linux.sb/direct_messages')).type, 'messages')
+  assert.equal(detectPage(mk('https://linux.sb/user_block')).type, 'user_block')
+  assert.equal(detectPage(mk('https://linux.sb/user/1?tab=attachments')).tab, 'attachments')
+  assert.ok(USER_TABS.includes('attachments'))
   assert.equal(detectPage(mk('https://linux.sb/nope')).type, 'unknown')
 })
 
@@ -66,6 +82,13 @@ test('ROUTES 生成正确 URL', () => {
   assert.equal(ROUTES.featured, '/topic_featured')
   assert.equal(ROUTES.footprint, '/unread_topic_notice_footprint')
   assert.equal(ROUTES.wallet, '/community_wallet')
+  assert.equal(ROUTES.collections, '/topic_collections')
+  assert.equal(ROUTES.collection(153), '/topic_collection/153')
+  assert.equal(ROUTES.identity, '/identity_center')
+  assert.equal(ROUTES.promotions, '/promotions')
+  assert.equal(ROUTES.essenceReview, '/topic_essence_review_list')
+  assert.equal(ROUTES.messages, '/direct_messages')
+  assert.equal(ROUTES.userBlock, '/user_block')
 })
 
 test('帖子页：整体元数据与楼层', () => {
@@ -254,6 +277,100 @@ const V875_TOPIC = `<!DOCTYPE html><html><head>
   </li>
 </ul>
 </body></html>`
+
+test('v9.0：列表徽章含热/红包帖/发卡状态', () => {
+  const html =
+    '<ul class="post-list">' +
+    '<li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/10">红包</a>' +
+    '<span class="topic-stamp-badge topic-stamp-hot">热</span>' +
+    '<span class="red-packet-title-status">红包帖</span>' +
+    '</div></li>' +
+    '<li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/11">发卡</a>' +
+    '<span class="virtual-card-title-status active">发卡中</span>' +
+    '</div></li>' +
+    '</ul>'
+  const list = parseList(new JSDOM(html, { url: 'https://linux.sb/' }).window.document)
+  assert.deepEqual(list[0].badges, ['热', '红包帖'])
+  assert.deepEqual(list[1].badges, ['发卡中'])
+  assert.deepEqual(list[0].marks, { redPacket: 'live', virtualCard: null })
+  assert.deepEqual(list[1].marks, { redPacket: null, virtualCard: 'live' })
+
+  const disc =
+    '<ul class="post-list"><li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/17">讨论</a>' +
+    '<span class="red-packet-title-status is-discussion">讨论红包</span>' +
+    '</div></li></ul>'
+  const discList = parseList(new JSDOM(disc, { url: 'https://linux.sb/' }).window.document)
+  assert.deepEqual(discList[0].badges, ['讨论红包'])
+  assert.equal(discList[0].marks.redPacket, 'live', '讨论红包还活着，不当成结束')
+})
+
+test('v9.0：红包/发卡结束态与空标记', () => {
+  const html =
+    '<ul class="post-list">' +
+    '<li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/12">抢完</a>' +
+    '<span class="red-packet-title-status">已抢完</span>' +
+    '</div></li>' +
+    '<li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/13">结束</a>' +
+    '<span class="virtual-card-title-status">结束</span>' +
+    '</div></li>' +
+    '<li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/14">双标</a>' +
+    '<span class="virtual-card-title-status active">结束</span>' +
+    '</div></li>' +
+    '<li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/15">认不出</a>' +
+    '<span class="virtual-card-title-status finished">发卡中</span>' +
+    '</div></li>' +
+    '<li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/16">普通</a>' +
+    '</div></li>' +
+    '</ul>'
+  const list = parseList(new JSDOM(html, { url: 'https://linux.sb/' }).window.document)
+  assert.equal(list[0].marks.redPacket, 'ended')
+  assert.equal(list[1].marks.virtualCard, 'ended')
+  assert.equal(list[2].marks.virtualCard, 'ended', '结束优先于 active')
+  assert.equal(list[3].marks.virtualCard, 'ended', 'finished class 优先于发卡中文案')
+  assert.deepEqual(list[4].marks, { redPacket: null, virtualCard: null })
+})
+
+test('置顶回帖副本不算楼层', () => {
+  const html =
+    '<html><head><link rel="canonical" href="https://linux.sb/topic/22651"></head><body>' +
+    '<h1 class="post-content-title">置顶回帖</h1>' +
+    '<ul class="post-list topic-post-list">' +
+    '<li class="post-item post-entry" id="post-22651">' +
+    '<a class="post-title post-author" href="/user/1">楼主</a><div class="post-content">op</div></li>' +
+    '<li class="post-entry reply-pin-pinned reply-pin-duplicate" data-reply-pin="top-copy" id="reply-pin-top-194477">' +
+    '<a class="post-title post-author" href="/user/2">甲</a><div class="post-content">副本</div></li>' +
+    '<li class="post-item post-entry reply-pin-original" id="post-194477" data-floor="11">' +
+    '<a class="post-title post-author" href="/user/2">甲</a><div class="post-content">原楼</div></li>' +
+    '</ul></body></html>'
+  const t = parseTopic(new JSDOM(html, { url: 'https://linux.sb/topic/22651' }).window.document)
+  assert.equal(t.posts.length, 2, '副本不能进 posts')
+  assert.equal(t.op.postId, 22651)
+  assert.equal(t.posts[1].postId, 194477)
+  assert.equal(t.posts[1].floor, 11)
+  assert.ok(!t.posts.some((p) => p.el.classList.contains('reply-pin-duplicate')))
+})
+
+test('v8.9.2：淘帖专辑行不是主题列表', () => {
+  const html =
+    '<ul class="post-list topic-collections-collection-list">' +
+    '<li class="post-item topic-collections-collection-row"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic_collection/153">MARK</a></div></li>' +
+    '<li class="post-item"><div class="post-title-row"><a class="post-title" href="/topic/10">真帖</a></div></li>' +
+    '</ul>'
+  const doc = new JSDOM(html, { url: 'https://linux.sb/topic_collections?tab=everyone' }).window.document
+  assert.equal(doc.querySelectorAll(SEL.listItems).length, 1)
+  const list = parseList(doc)
+  assert.equal(list.length, 1)
+  assert.equal(list[0].id, 10)
+})
 
 test('v8.7.5：帖内楼层不是列表行；主楼无 data-floor / 时间戳走相对文案', () => {
   const mixed =

@@ -222,9 +222,14 @@ test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块，无时间轴',
   assert.match(
     railCss,
     /\.lsb-shell-rail-scroll\{[^}]*overflow:hidden/,
-    '左栏不可滚，工具再多时再考虑要不要开滚动',
+    '整栏不滚，多出版块只在版块区滚',
   )
   assert.doesNotMatch(railCss, /\.lsb-shell-rail-scroll\{[^}]*overflow:auto/)
+  assert.match(
+    railCss,
+    /\[data-lsb-shell-section="boards"\]\{[^}]*overflow:auto/,
+    '版块区可滚，称号行情钉在下面',
+  )
 })
 
 test('氢壳：个人卡晚于壳出现时仍迁入左栏（LTS document-start 首屏竞态）', async () => {
@@ -254,6 +259,39 @@ test('氢壳：个人卡晚于壳出现时仍迁入左栏（LTS document-start �
     1,
     '晚出现的卡是迁入不是克隆',
   )
+})
+
+test('氢壳：左栏收全部版块，多出来的交流只挤版块区，不挤掉称号行情', async () => {
+  const { w } = makeHome()
+  let more = w.document.querySelector('.forum-more-region')
+  if (!more) {
+    more = w.document.createElement('div')
+    more.className = 'forum-more-region'
+    w.document.body.append(more)
+  }
+  const extra = w.document.createElement('a')
+  extra.className = 'forum-more-link'
+  extra.href = '/forum/99'
+  extra.textContent = '交流'
+  more.append(extra)
+
+  await loadBase(w, PLUG('title-quotes.user.js'), PLUG('skin.user.js'))
+  const boards = [...shell(w).querySelectorAll('[data-lsb-shell-section="boards"] a')].map((a) =>
+    (a.querySelector('.lsb-shell-link-label')?.textContent || a.textContent).trim(),
+  )
+  assert.ok(boards.includes('技术交流'))
+  assert.ok(boards.includes('交流'), '全部版块里的交流也要进左栏')
+  assert.ok(
+    boards.length > w.document.querySelectorAll('.forum-nav a[href^="/forum/"]').length,
+    '左栏不能只剩顶部导航那 6 个',
+  )
+  const tools = [...shell(w).querySelectorAll('[data-lsb-shell-section="tools"] .lsb-shell-link-label')].map(
+    (el) => el.textContent,
+  )
+  assert.ok(tools.includes('称号行情'), '版块再多，称号行情也要留在工具区')
+  const css = skinCss(w).replace(/\s+/g, '')
+  assert.match(css, /\[data-lsb-shell-section="boards"\]\{[^}]*overflow:auto/)
+  assert.match(css, /\[data-lsb-shell-section="tools"\]\{[^}]*flex:0/)
 })
 
 test('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 称号行情 / 年度报告', async () => {
@@ -718,6 +756,19 @@ test('氢壳：新外观菜单迁入顶栏，关壳迁回', async () => {
   )
 })
 
+test('氢壳：切换色系弹层要盖过右栏', async () => {
+  const { w } = makeHome()
+  await loadBase(w, PLUG('skin.user.js'))
+  const compact = skinCss(w).replace(/\s+/g, '')
+  const shellZ = Number(compact.match(/#lsb-shell\{[^}]*z-index:(\d+)/)?.[1] || 0)
+  const modalZ = Number(compact.match(/#color-scheme-modal\{[^}]*z-index:(\d+)/)?.[1] || 0)
+  assert.ok(shellZ >= 7999, '氢壳整层（含右栏）在 7999')
+  assert.ok(
+    modalZ > shellZ,
+    '站点 #color-scheme-modal 只有 z-index:120，必须抬到整层氢壳之上，否则右上角点开会被右栏挡住',
+  )
+})
+
 test('氢壳：站点把外观控件补回原顶栏时不再搬走，避免死循环', async () => {
   const { w, tick } = makeHome()
   const bar = w.document.querySelector('body > .top .bar')
@@ -850,6 +901,37 @@ test('氢壳：顶栏迁入用户榜单等入口，右栏迁入快捷功能/热�
   await tick(80)
   assert.ok(aside.querySelector('.online-users-card'), '站点后插入的当前在线也迁入')
   assert.equal(w.document.querySelectorAll('.online-users-card').length, 1)
+})
+
+test('氢壳：右栏迁入站点广告卡，不跟原生侧栏一起藏掉', async () => {
+  const { w } = makeHome()
+  const nativeSide = [...w.document.querySelectorAll('aside.sidebar')].find(
+    (el) => !el.classList.contains('mobile-menu-drawer'),
+  )
+  nativeSide.insertAdjacentHTML(
+    'beforeend',
+    '<div class="card sidebar-card sidebar-promotions-card"><a href="https://example.com/ad">广告位</a></div>',
+  )
+  await loadBase(w, PLUG('skin.user.js'))
+  const aside = shell(w).querySelector('#lsb-shell-aside')
+  assert.ok(aside.querySelector('.sidebar-promotions-card'), '广告卡进氢壳右栏')
+  assert.match(aside.textContent, /广告位/)
+})
+
+test('氢壳：右栏迁入站务公告，不跟原生侧栏一起藏掉', async () => {
+  const { w } = makeHome()
+  const nativeSide = [...w.document.querySelectorAll('aside.sidebar')].find(
+    (el) => !el.classList.contains('mobile-menu-drawer'),
+  )
+  nativeSide.insertAdjacentHTML(
+    'beforeend',
+    '<div class="card sidebar-card quick-card forum-enhancements-left-announcements">' +
+      '<div class="quick-title">站务公告</div><a href="/topic/20997">广告隐藏</a></div>',
+  )
+  await loadBase(w, PLUG('skin.user.js'))
+  const aside = shell(w).querySelector('#lsb-shell-aside')
+  assert.ok(aside.querySelector('.forum-enhancements-left-announcements'), '站务公告进氢壳右栏')
+  assert.match(aside.textContent, /站务公告/)
 })
 
 test('氢壳：关壳后右栏卡片与顶栏入口回到原位', async () => {
@@ -1369,6 +1451,11 @@ test('氢壳：精华 / 抽奖 / 称号页顶栏文案跟路由走', async () =>
   dbg = await lucky.w.LSB.bus.request('skin:debug')
   assert.equal(dbg.shell.location, '抽奖')
 
+  const red = makeDom(homeHtml, 'https://linux.sb/index.php?sort=red_packet')
+  await loadBase(red.w, PLUG('skin.user.js'))
+  dbg = await red.w.LSB.bus.request('skin:debug')
+  assert.equal(dbg.shell.location, '红包')
+
   const gacha = makeDom(homeHtml, 'https://linux.sb/gacha')
   await loadBase(gacha.w, PLUG('skin.user.js'))
   dbg = await gacha.w.LSB.bus.request('skin:debug')
@@ -1394,6 +1481,78 @@ test('氢壳：帖内时间轴能读 .post-time（v8.7.5 不再写 data-performa
   await loadBase(w, PLUG('skin.user.js'))
   await tick(40)
   assert.equal(w.document.querySelector('[data-timeline-date]')?.textContent, '昨天 21:03')
+})
+
+test('壳内跳转：淘帖中心和申精走软跳；淘帖详情和认证中心整页', async () => {
+  const { w, tick } = makeHome()
+  const calls = stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'))
+  const shellNode = w.document.getElementById('lsb-shell')
+
+  const collections = w.document.createElement('a')
+  collections.href = 'https://linux.sb/topic_collections?tab=everyone'
+  collections.textContent = '淘帖中心'
+  w.document.querySelector('main.wrap').append(collections)
+  collections.click()
+  await tick(80)
+  assert.ok(calls.some((u) => /\/topic_collections/.test(u)), '淘帖中心拦点击去拉 HTML')
+  assert.equal(w.location.pathname, '/topic_collections')
+  assert.equal(w.document.getElementById('lsb-shell'), shellNode)
+  assert.equal((await w.LSB.bus.request('skin:debug')).shell.location, '淘帖中心')
+
+  const essence = w.document.createElement('a')
+  essence.href = 'https://linux.sb/topic_essence_review_list'
+  essence.textContent = '申精'
+  w.document.querySelector('main.wrap').append(essence)
+  essence.click()
+  await tick(80)
+  assert.ok(calls.some((u) => /\/topic_essence_review_list/.test(u)), '申精拦点击去拉 HTML')
+  assert.equal(w.location.pathname, '/topic_essence_review_list')
+  assert.equal((await w.LSB.bus.request('skin:debug')).shell.location, '申精')
+
+  const before = calls.length
+  const album = w.document.createElement('a')
+  album.href = 'https://linux.sb/topic_collection/153'
+  album.textContent = 'MARK'
+  w.document.querySelector('main.wrap').append(album)
+  album.click()
+  await tick(40)
+  assert.equal(calls.length, before, '淘帖详情整页，不换 main')
+  assert.equal(w.location.pathname, '/topic_essence_review_list', '软跳没改到淘帖详情')
+
+  const identity = w.document.createElement('a')
+  identity.href = 'https://linux.sb/identity_center'
+  identity.textContent = '认证中心'
+  w.document.querySelector('main.wrap').append(identity)
+  identity.click()
+  await tick(40)
+  assert.equal(calls.length, before, '认证中心整页')
+  assert.equal(w.location.pathname, '/topic_essence_review_list')
+
+  const ads = w.document.createElement('a')
+  ads.href = 'https://linux.sb/promotions'
+  ads.textContent = '我的广告'
+  w.document.querySelector('main.wrap').append(ads)
+  ads.click()
+  await tick(40)
+  assert.equal(calls.length, before, '我的广告整页')
+  assert.equal(w.location.pathname, '/topic_essence_review_list')
+})
+
+test('壳内跳转：软跳进淘帖后实时流不得改挂专辑列表', async () => {
+  const { w, tick } = makeHome({
+    'lsb_base:live-feed:__config': { jitterMs: 0, pollSec: 30, autoInsert: false },
+  })
+  stubHtmlFetch(w, homeHtml)
+  await loadBase(w, PLUG('skin.user.js'), PLUG('live-feed.user.js'))
+  const link = w.document.createElement('a')
+  link.href = 'https://linux.sb/topic_collections?tab=everyone'
+  w.document.querySelector('main.wrap').append(link)
+  link.click()
+  await tick(120)
+  assert.equal(w.location.pathname, '/topic_collections')
+  const feed = await w.LSB.bus.request('live-feed:debug')
+  assert.equal(feed.mode(), null, '软跳进淘帖后仍不进 list 模式')
 })
 
 test('壳内跳转：精华页走软跳', async () => {
@@ -1592,4 +1751,66 @@ test('壳内跳转：软跳文档被后退到非软跳地址才整页重开', as
   w.dispatchEvent(new w.Event('popstate'))
   await tick(20)
   assert.equal(reloads(), 1, '软跳主栏还在、地址已是交易页时必须 reload 才能挂上站点脚本')
+})
+
+test('氢壳：首页地点是新帖子；淘帖 / 申精 / 认证有对应文案', async () => {
+  const home = makeHome()
+  await loadBase(home.w, PLUG('skin.user.js'))
+  const homeDbg = await home.w.LSB.bus.request('skin:debug')
+  assert.equal(homeDbg.shell.location, '新帖子')
+  assert.equal(shell(home.w).querySelector('[data-lsb-shell-where]')?.textContent, '新帖子')
+  assert.ok(shell(home.w).querySelector('a[href="/"]'), '左栏全部主题入口还在')
+
+  const comment = makeDom(homeHtml, 'https://linux.sb/index.php?sort=comment')
+  await loadBase(comment.w, PLUG('skin.user.js'))
+  assert.equal((await comment.w.LSB.bus.request('skin:debug')).shell.location, '新评论')
+
+  const cases = [
+    ['https://linux.sb/topic_collections', '我的淘帖'],
+    ['https://linux.sb/topic_collections?tab=everyone', '淘帖中心'],
+    ['https://linux.sb/identity_center', '认证中心'],
+    ['https://linux.sb/promotions', '我的广告'],
+    ['https://linux.sb/direct_messages', '我的私信'],
+    ['https://linux.sb/user_block', '屏蔽名单'],
+    ['https://linux.sb/topic_essence_review_list', '申精'],
+  ]
+  for (const [url, label] of cases) {
+    const { w } = makeDom(homeHtml, url)
+    await loadBase(w, PLUG('skin.user.js'))
+    const dbg = await w.LSB.bus.request('skin:debug')
+    assert.equal(dbg.shell.location, label, url)
+  }
+})
+
+test('氢壳：论坛导航淘帖进顶栏；与淘帖中心同址只留一份', async () => {
+  const onlyPlugin = makeHome()
+  onlyPlugin.w.document.querySelector('.forum-nav').insertAdjacentHTML(
+    'beforeend',
+    '<a class="forum-link plugin-top-menu-link" href="/topic_collections?tab=everyone">淘帖</a>',
+  )
+  await loadBase(onlyPlugin.w, PLUG('skin.user.js'))
+  const pluginExtras = [...shell(onlyPlugin.w).querySelectorAll('.lsb-shell-extras a')].map((a) => ({
+    href: a.getAttribute('href'),
+    label: a.textContent.trim(),
+  }))
+  assert.ok(
+    pluginExtras.some((x) => x.href === '/topic_collections?tab=everyone' && x.label === '淘帖'),
+    '没有增强菜单时，导航里的淘帖也要进顶栏',
+  )
+
+  const both = makeHome()
+  both.w.document.querySelector('.forum-nav').insertAdjacentHTML(
+    'beforeend',
+    '<a class="forum-link plugin-top-menu-link" href="/topic_collections?tab=everyone">淘帖</a>' +
+      '<a class="forum-link forum-enhancements-custom-top-link" href="/topic_collections?tab=everyone">淘帖中心</a>' +
+      '<a class="forum-link forum-enhancements-custom-top-link" href="/identity_center">认证中心</a>',
+  )
+  await loadBase(both.w, PLUG('skin.user.js'))
+  const extras = [...shell(both.w).querySelectorAll('.lsb-shell-extras a')]
+  const labels = extras.map((a) => a.textContent.trim())
+  const sameHref = extras.filter((a) => /topic_collections/.test(a.getAttribute('href') || ''))
+  assert.equal(sameHref.length, 1, '淘帖和淘帖中心同址只挂一条')
+  assert.equal(sameHref[0].textContent.trim(), '淘帖中心', '同址留下增强菜单文案')
+  assert.ok(labels.includes('认证中心'))
+  assert.ok(!labels.includes('淘帖'))
 })

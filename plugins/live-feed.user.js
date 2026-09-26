@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·实时流
 // @namespace    https://linux.sb/
-// @version      1.2.17
+// @version      1.2.18
 // @description  免刷新获取新帖与新回复：前台短周期、后台长周期的自适应轮询（跨标签选主，只有一个标签发请求）；视口锚点补偿让任意滚动位置都能无感插入；打字期间只暂存不打扰；老帖有新回复原地高亮。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.17',
+    version: '1.2.18',
     description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -113,6 +113,12 @@
       return election.isLeader || isUserTopicList()
     }
 
+    function isTopicListPage() {
+      const t = api.page?.type
+      if (t === 'home' || t === 'forum' || t === 'featured' || t === 'footprint') return true
+      return isUserTopicList()
+    }
+
     function captureList() {
       const ul = document.querySelector(api.sel?.listUl || 'ul.post-list')
       if (!ul) return false
@@ -169,12 +175,15 @@
     function init() {
       teardown()
       navGen += 1
-      if (api.page.type === 'user' && !isUserTopicList()) {
+      if (api.page.type === 'topic' && cfg.trackTopicReplies) {
+        if (!captureTopic()) mode = null
+        return
+      }
+      if (!isTopicListPage()) {
         mode = null
         return
       }
-      const ok = api.page.type === 'topic' && cfg.trackTopicReplies ? captureTopic() : captureList()
-      if (!ok) mode = null
+      if (!captureList()) mode = null
     }
 
     function teardown() {

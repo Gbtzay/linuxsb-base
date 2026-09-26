@@ -9,7 +9,7 @@ const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.met
 const ltsCode = readFileSync(new URL('../dist/linuxsb-lts.user.js', import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
 
-import { ORDER as MEMBERS, SUITE_EXCLUDE } from '../suite/order.js'
+import { ORDER as MEMBERS, ORDER_LTS, SUITE_EXCLUDE } from '../suite/order.js'
 
 function makeSuiteSite(preload = {}) {
   const dom = new JSDOM(topicHtml, { url: 'https://linux.sb/topic/1', runScripts: 'outside-only' })
@@ -142,6 +142,25 @@ test('套件收录完整：plugins/ 下每个模块都在 ORDER 里，且产物�
   }
 })
 
+test('AI 副驾登记在 AI 总结之后，且不进入 LTS', () => {
+  const summaryIndex = MEMBERS.indexOf('ai-summary')
+  assert.equal(MEMBERS[summaryIndex + 1], 'ai-copilot')
+  assert.equal(ORDER_LTS.includes('ai-copilot'), false)
+  const code = readFileSync(new URL('../plugins/ai-copilot.user.js', import.meta.url), 'utf8')
+  assert.match(code, /@version\s+0\.2\.0/)
+  assert.match(code, /\bversion:\s*'0\.2\.0'/)
+  assert.match(code, /\bid:\s*'ai-copilot'/)
+})
+
+test('产物新鲜度：每个插件正文都来自当前源码', () => {
+  for (const id of MEMBERS) {
+    const source = readFileSync(new URL(`../plugins/${id}.user.js`, import.meta.url), 'utf8')
+    const header = source.match(/^\/\/ ==UserScript==\r?\n[\s\S]*?\/\/ ==\/UserScript==\r?\n*/)
+    assert.ok(header, `${id} 源码缺少 userscript 头`)
+    assert.ok(suiteCode.includes(source.slice(header[0].length).trim()), `${id} 的当前源码正文未进入 Oxygen 产物`)
+  }
+})
+
 test('版本号双处对齐：userscript 头部 @version === manifest.version', () => {
   const mismatches = []
   for (const id of MEMBERS) {
@@ -163,6 +182,8 @@ test('套件 banner 声明的版本与卡片实际展示的版本一致', async 
   await until(() => w.LSB.info().plugins.length > MEMBERS.length - 1, 3000)
 
   const runtime = new Map(w.LSB.info().plugins.map((p) => [p.id, p.version]))
+  const suiteVersion = suiteCode.match(/@version\s+([\d.]+)/)?.[1]
+  assert.equal(runtime.get('suite'), suiteVersion, '套件中心版本与氧 banner 声明不符')
   for (const id of MEMBERS) {
     const code = readFileSync(new URL(`../plugins/${id}.user.js`, import.meta.url), 'utf8')
     const header = code.match(/@version\s+([\d.]+)/)?.[1]
@@ -213,8 +234,8 @@ test('Greasy Fork：氢/氧对外名称与简介不带 RC', () => {
   assert.match(suiteCode, /@name\s+LINUX\.SB 氧\s*$/m)
   assert.match(baseCode, /@name:en\s+LINUX\.SB Hydrogen\s*$/m)
   assert.match(suiteCode, /@name:en\s+LINUX\.SB Oxygen\s*$/m)
-  assert.match(baseCode, /@version\s+0\.1\.36/)
-  assert.match(suiteCode, /@version\s+1\.0\.105/)
+  assert.match(baseCode, /@version\s+0\.1\.41/)
+  assert.match(suiteCode, /@version\s+1\.0\.114/)
   assert.match(baseCode, /@description\s+linux\.sb 脚本基座/)
   assert.match(suiteCode, /@description\s+linux\.sb 功能套件/)
   assert.doesNotMatch(baseCode, /【RC】/)
@@ -236,7 +257,7 @@ test('Greasy Fork：LTS 产物一段头、document-start、含氢 grant、不含
   assert.equal([...ltsCode.matchAll(/\/\/ ==UserScript==/g)].length, 1)
   assert.match(ltsCode, /@name\s+LINUX\.SB（LTS）/)
   assert.match(ltsCode, /@name:en\s+LINUX\.SB \(LTS\)/)
-  assert.match(ltsCode, /@version\s+1\.0\.105/)
+  assert.match(ltsCode, /@version\s+1\.0\.114/)
   assert.match(ltsCode, /冻新功能/)
   assert.doesNotMatch(ltsCode, /氢（RC）/)
   assert.doesNotMatch(ltsCode, /【RC】/)
@@ -246,7 +267,7 @@ test('Greasy Fork：LTS 产物一段头、document-start、含氢 grant、不含
   assert.doesNotMatch(ltsCode, /@updateURL/)
   assert.match(ltsCode, /id: 'skin'/)
   assert.match(ltsCode, /id: 'live-feed'/)
-  for (const id of ['local-bridge', 'title-quotes', 'forum-watch', 'ai-summary', 'my-archive', 'hot-floor-badge', 'perf-probe', 'hover-profile']) {
+  for (const id of ['local-bridge', 'title-quotes', 'forum-watch', 'ai-summary', 'my-archive', 'hot-floor-badge', 'perf-probe', 'hover-profile', 'topic-marks']) {
     assert.doesNotMatch(ltsCode, new RegExp(`id: '${id}'`))
   }
   assert.match(ltsCode, /__LSB_CHANNEL__\s*=\s*'lts'/)
