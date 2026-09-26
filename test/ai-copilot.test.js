@@ -223,3 +223,22 @@ test('UI：草稿模式只提供复制，不提供发送站内回复动作', asy
   assert.ok(panel.querySelector('[data-target-floor]'))
   assert.equal([...panel.querySelectorAll('button')].some((b) => /发送回复|提交回复/.test(b.textContent)), false)
 })
+
+test('路由：旧主题请求完成后不覆盖新主题面板', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-question]').value = '旧主题'
+  const release = ctx.holdLLM()
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => ctx.w.document.querySelector('.lsb-copilot-wait')))
+  ctx.w.LSB.bus.emit(
+    'route:changed',
+    { href: 'https://linux.sb/topic/2', page: { type: 'topic', id: 2 } },
+    { source: 'core' },
+  )
+  release()
+  await sleep(100)
+  assert.equal(ctx.w.document.querySelector('.lsb-copilot-result'), null)
+})

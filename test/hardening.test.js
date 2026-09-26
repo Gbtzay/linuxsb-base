@@ -202,6 +202,50 @@ test('停用清理：本地联动的健康巡检定时器被清掉', async () =>
   assert.equal(calls, after, '停用后不再发健康检查')
 })
 
+test('停用清理：AI 副驾面板、等待计时器和在途请求全部收摊', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  let release
+  let held = new Promise((resolve) => {
+    release = resolve
+  })
+  w.fetch = async (url) => {
+    if (!/linux\.sb/.test(String(url))) {
+      await held
+      return {
+        status: 200,
+        ok: true,
+        url: String(url),
+        text: async () => JSON.stringify({ choices: [{ message: { content: '草稿' } }] }),
+      }
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => topicHtml }
+  }
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-question]').value = '等待中的问题'
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => !!w.document.querySelector('.lsb-copilot-wait')), '副驾已经进入等待状态')
+
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '停用后面板被移除')
+  assert.equal(w.document.querySelector('.lsb-copilot-mask'), null, '停用后遮罩被移除')
+  release()
+  await new Promise((r) => setTimeout(r, 80))
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '在途请求完成也不能重新挂回面板')
+})
+
 /* ═══════════ 定点缺陷 ═══════════ */
 
 test('esc 转义反引号（模板/未加引号属性上下文）', async () => {

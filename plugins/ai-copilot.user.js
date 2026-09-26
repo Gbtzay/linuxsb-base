@@ -340,8 +340,11 @@
     let panel = null
     let mask = null
     let waitTimer = null
+    let routeTimer = null
     let waitStarted = 0
     let currentMode = 'ask'
+    let generation = 0
+    let disposed = false
     const buttons = new Set()
 
     function esc(value) {
@@ -561,18 +564,22 @@
     }
 
     async function runAndShow(mode, options) {
+      const requestGeneration = generation
       showWait('正在采集本帖…')
       try {
         const record = await run(mode, options)
+        if (disposed || requestGeneration !== generation) return
         showResult(record)
         api.ui.toast('AI 副驾完成', { type: 'success' })
       } catch (error) {
+        if (disposed || requestGeneration !== generation) return
         api.ui.toast(String(error?.message || error), { type: 'error', title: 'AI 副驾失败' })
         showError(error)
       }
     }
 
     function openPanel() {
+      if (disposed) return
       renderMode(currentMode)
     }
 
@@ -589,6 +596,10 @@
 
     function syncTopLink() {
       const existing = document.querySelector('a.lsb-ai-copilot-top')
+      if (disposed) {
+        existing?.remove()
+        return
+      }
       if (api.page.type !== 'topic') {
         existing?.remove()
         return
@@ -604,7 +615,16 @@
 
     api.dom.each('li.post-entry', injectOpButton)
     syncTopLink()
-    api.on('route:changed', () => setTimeout(syncTopLink, 50))
+    api.on('route:changed', () => {
+      generation += 1
+      closePanel()
+      buttons.clear()
+      if (routeTimer) clearTimeout(routeTimer)
+      routeTimer = setTimeout(() => {
+        routeTimer = null
+        syncTopLink()
+      }, 50)
+    })
     api.ui.configTab({ name: 'AI 副驾', order: 54 })
     api.ui.style(
       '.lsb-copilot-panel{width:min(760px,94vw)}' +
@@ -618,6 +638,17 @@
         '.lsb-copilot-facts{margin-bottom:8px}.lsb-copilot-wait{padding:8px 0}' +
         '.lsb-copilot-status{font-weight:600;margin-bottom:8px}',
     )
+
+    api.onDispose(() => {
+      disposed = true
+      generation += 1
+      if (routeTimer) clearTimeout(routeTimer)
+      routeTimer = null
+      closePanel()
+      document.querySelector('a.lsb-ai-copilot-top')?.remove()
+      buttons.clear()
+      running = null
+    })
 
     api.handle('ai-copilot:debug', () => ({
       collectContext,
