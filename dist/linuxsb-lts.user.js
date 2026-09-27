@@ -1430,7 +1430,7 @@
       const nav = document.querySelector(".themes-top-menu .forum-nav") || document.querySelector(".forum-nav");
       if (!nav) return null;
       const a = document.createElement("a");
-      a.className = "forum-link lsb-top-link";
+      a.className = "forum-link forum-enhancements-custom-top-link lsb-top-link";
       a.href = href;
       a.textContent = label;
       if (title) a.title = title;

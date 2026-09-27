@@ -400,7 +400,8 @@ export class UI {
     const nav = document.querySelector('.themes-top-menu .forum-nav') || document.querySelector('.forum-nav')
     if (!nav) return null
     const a = document.createElement('a')
-    a.className = 'forum-link lsb-top-link'
+    // linux.sb 首屏样式只放行这个标记的自定义顶栏入口；保留 lsb-top-link 供插件查询。
+    a.className = 'forum-link forum-enhancements-custom-top-link lsb-top-link'
     a.href = href
     a.textContent = label
     if (title) a.title = title

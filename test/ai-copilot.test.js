@@ -231,6 +231,15 @@ test('M4 UI：普通页显示操作台入口，帖子页同时保留副驾入口
   assert.equal(dbg.state().page, 'home')
 })
 
+test('M4 UI：操作台顶栏入口应被站点首屏样式放行并可见', async () => {
+  const home = makeSite(homeHtml, 'https://linux.sb/')
+  await load(home)
+  const link = home.w.document.querySelector('a.lsb-ai-console-top')
+  assert.ok(link)
+  assert.ok(link.classList.contains('forum-enhancements-custom-top-link'))
+  assert.notEqual(home.w.getComputedStyle(link).display, 'none')
+})
+
 test('M4 UI：快捷问题填充输入框，面板显示范围提示且没有写操作按钮', async () => {
   const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
   await load(ctx)
