@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LSB·AI 帖子副驾
 // @namespace    https://linux.sb/
-// @version      0.3.0
-// @description  帖子问答、讨论分析、新回复摘要与回复草稿。复用 LSB·AI 总结的模型配置，不自动提交站内回复。
+// @version      0.4.0
+// @description  帖子问答、讨论分析、新回复摘要、问题追踪与回复草稿。复用 LSB·AI 总结的模型配置，不自动提交站内回复。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -22,8 +22,8 @@
   const manifest = {
     id: 'ai-copilot',
     name: 'AI 帖子副驾',
-    version: '0.3.0',
-    description: '帖子问答、讨论分析、新回复摘要与回复草稿；不自动提交站内回复',
+    version: '0.4.0',
+    description: '帖子问答、讨论分析、新回复摘要、问题追踪与回复草稿；不自动提交站内回复',
     author: 'you',
     requires: {
       base: '^0.1.0',
@@ -179,18 +179,23 @@
 
   function parseUnresolvedIssues(text, citations) {
     const source = String(text || '')
+    const section = source.match(/^##\s*未解决问题\s*$/m)
+    if (!section) return []
+    const sectionStart = section.index + section[0].length
+    const sectionEnd = source.slice(sectionStart).search(/^##\s+/m)
+    const sectionText = sectionEnd < 0 ? source.slice(sectionStart) : source.slice(sectionStart, sectionStart + sectionEnd)
     const known = new Map(
       (Array.isArray(citations) ? citations : [])
         .filter((citation) => citation?.known && citation?.postId)
         .map((citation) => [asNumber(citation.floor, 0), citation]),
     )
-    const headers = [...source.matchAll(/^###\s*问题\s*\d+\s*[：:]\s*(.+?)\s*$/gm)]
+    const headers = [...sectionText.matchAll(/^###\s*问题\s*\d+\s*[：:]\s*(.+?)\s*$/gm)]
     const issues = []
     for (let i = 0; i < headers.length; i += 1) {
       const match = headers[i]
       const start = match.index + match[0].length
-      const end = headers[i + 1]?.index ?? source.length
-      const block = source.slice(start, end)
+      const end = headers[i + 1]?.index ?? sectionText.length
+      const block = sectionText.slice(start, end)
       const question = block.match(/^-\s*问题\s*[：:]\s*(.+?)\s*$/m)?.[1]?.trim() || ''
       const rawFloors = [...block.matchAll(/\[#\s*(\d+)\]/g)].map((item) => Number(item[1]))
       const floors = [...new Set(rawFloors.filter((floor) => known.has(floor)))]
@@ -356,7 +361,11 @@
         seen.add(row.key)
         out.push(row)
       }
-      return out.sort((a, b) => a.floor - b.floor || a.seenAt - b.seenAt).slice(-limit)
+      const sorted = out.sort((a, b) => a.floor - b.floor || a.seenAt - b.seenAt)
+      if (sorted.length <= limit) return sorted
+      const baseline = sorted.filter((row) => row.kind === 'initial')
+      if (baseline.length >= limit) return baseline.slice(0, limit)
+      return [...baseline, ...sorted.filter((row) => row.kind !== 'initial').slice(-(limit - baseline.length))]
     }
 
     function normalizeTrackingSuggestion(raw) {
@@ -1002,7 +1011,7 @@
           mode === 'digest'
             ? [...context.posts, ...newPosts]
             : mode === 'track-review'
-              ? [...context.posts, ...trackingEvidencePosts(options.trackingItem)]
+              ? trackingEvidencePosts(options.trackingItem)
               : context.posts
         const citations = citationRecords(
           result.text,

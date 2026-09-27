@@ -9,8 +9,8 @@
 | | 油猴名 | 版本 |
 |---|---|---|
 | 氢 | LINUX.SB 氢 | **0.1.41** |
-| 氧 | LINUX.SB 氧 | **1.0.115** |
-| LTS | LINUX.SB（LTS） | **1.0.115** |
+| 氧 | LINUX.SB 氧 | **1.0.116** |
+| LTS | LINUX.SB（LTS） | **1.0.116** |
 
 对不上就刷新 Greasy Fork 再装一次。氧也要一起换（先氢后氧）。
 
@@ -27,7 +27,7 @@ LTS 与上面二选一：不要同时开氢/氧和 LINUX.SB（LTS）。商店页
 
 作者页：https://greasyfork.org/zh-CN/users/1637325-xb70sr71
 
-GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.115
+GitHub Release：https://github.com/Gbtzay/linuxsb-base/releases/tag/v1.0.116
 
 Greasy Fork 地址里可能还带 `-beta`，以油猴里的脚本名和版本号为准。
 
