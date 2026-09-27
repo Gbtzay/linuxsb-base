@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·AI 帖子副驾
 // @namespace    https://linux.sb/
-// @version      0.5.0
+// @version      0.6.0
 // @description  帖子问答、讨论分析、新回复摘要、问题追踪、回复草稿与只读自然语言操作台。
 // @author       you
 // @match        https://linux.sb/*
@@ -22,8 +22,8 @@
   const manifest = {
     id: 'ai-copilot',
     name: 'AI 帖子副驾',
-    version: '0.5.0',
-    description: '帖子问答、讨论分析、新回复摘要、问题追踪与回复草稿；不自动提交站内回复',
+    version: '0.6.0',
+    description: '帖子问答、讨论分析、新回复摘要、问题追踪、回复草稿与只读自然语言操作台；不自动提交站内回复',
     author: 'you',
     requires: {
       base: '^0.1.0',

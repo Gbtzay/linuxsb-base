@@ -1,6 +1,6 @@
 # AI 帖子副驾自然语言操作台 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 在任意普通页面提供独立的 AI 操作台，以两阶段只读查询完成当前帖子与所有本地追踪项的自然语言问答，并保留可验证的跨主题引用。
 
@@ -80,7 +80,7 @@ runConsoleQuery({ question, force = false, onStage })
 - Consumes: 现有 `loadTrackingState`、`saveTrackingState`、`normalizeTrackingIssue`、`currentPosts`、`normalizeTopic`。
 - Produces: `trackingTopicCatalog`, `normalizeConsolePlan`, `executeConsolePlan`、`consoleCitationRecords`，以及带 `topicMeta` 的 v2 追踪状态。
 
-- [ ] **Step 1: 写失败测试，锁定 v2 元数据兼容和主题目录。**
+- [x] **Step 1: 写失败测试，锁定 v2 元数据兼容和主题目录。**
 
 ```js
 test('M4 协议：旧 v2 追踪状态可读，写入时补充 topicMeta 并进入主题目录', async () => {
@@ -99,13 +99,13 @@ test('M4 协议：旧 v2 追踪状态可读，写入时补充 topicMeta 并进�
 })
 ```
 
-- [ ] **Step 2: 运行单测确认新接口尚未存在。**
+- [x] **Step 2: 运行单测确认新接口尚未存在。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 协议：旧 v2"`
 
 Expected: FAIL，因为 debug 接口尚未导出 `trackingTopicCatalog`，且旧状态没有规范化 `topicMeta`。
 
-- [ ] **Step 3: 实现主题元数据兼容和目录扫描。**
+- [x] **Step 3: 实现主题元数据兼容和目录扫描。**
 
 在常量区加入 `CONSOLE_PLAN_VERSION = 1`、`CONSOLE_MAX_TOPICS = 100`、`CONSOLE_MAX_ITEMS = 200`、`CONSOLE_MAX_TERMS = 8`、`CONSOLE_MAX_TERM_LENGTH = 80` 和 `CONSOLE_MAX_CHARS = 18000`。实现：
 
@@ -122,7 +122,7 @@ function normalizeTopicMeta(raw, topicId) {
 
 让 `emptyTrackingState`, `loadTrackingState` 和 `saveTrackingState` 始终带 `topicMeta`；旧数据缺失时使用 `主题 #<id>`，不联网补齐。`trackingTopicMeta` 从当前 DOM 或快照取得可见标题和版块，保存追踪状态时写回。`trackingTopicCatalog` 只扫描 `api.store.keys()` 中形如 `track:<正整数>` 的键，加载并计数活动/归档项，按 `updatedAt`（无项目时使用 `scan.ts`）倒序，最后截取 100 条。
 
-- [ ] **Step 4: 写失败测试，锁定计划白名单、上限和归档授权。**
+- [x] **Step 4: 写失败测试，锁定计划白名单、上限和归档授权。**
 
 ```js
 test('M4 计划：只接受白名单字段，非法值拒绝，未授权归档自动收窄', async () => {
@@ -146,13 +146,13 @@ test('M4 计划：只接受白名单字段，非法值拒绝，未授权归档�
 })
 ```
 
-- [ ] **Step 5: 运行计划测试确认失败。**
+- [x] **Step 5: 运行计划测试确认失败。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 计划"`
 
 Expected: FAIL，因为计划校验器和 debug 导出尚未实现。
 
-- [ ] **Step 6: 实现归档授权和计划规范化。**
+- [x] **Step 6: 实现归档授权和计划规范化。**
 
 实现 `archiveRequestedByUser(question)`：只有原始问题包含正向归档词（`归档`、`已归档`、`历史追踪项`）且同一局部表达不含“不要/不查/排除/不包含”等否定词时返回 `true`。实现 `normalizeConsolePlan(raw, context)`：
 
@@ -163,7 +163,7 @@ Expected: FAIL，因为计划校验器和 debug 导出尚未实现。
 5. `includeArchived` 只有 `archiveRequestedByUser(question)` 为真时保留，否则收窄为 `false`；不把该不一致当成非法计划。
 6. 任何其它字段、写操作/网络意图字段、越界数量和非法枚举抛出可展示的中文错误。
 
-- [ ] **Step 7: 写失败测试，锁定主题、状态、关键词、意图和截断顺序。**
+- [x] **Step 7: 写失败测试，锁定主题、状态、关键词、意图和截断顺序。**
 
 ```js
 test('M4 执行器：组合筛选活动项、关键词、意图并稳定截断', async () => {
@@ -190,13 +190,13 @@ test('M4 执行器：组合筛选活动项、关键词、意图并稳定截断',
 })
 ```
 
-- [ ] **Step 8: 运行执行器测试确认失败。**
+- [x] **Step 8: 运行执行器测试确认失败。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 执行器"`
 
 Expected: FAIL，因为测试夹具和执行器尚未存在。
 
-- [ ] **Step 9: 实现本地执行器和引用索引。**
+- [x] **Step 9: 实现本地执行器和引用索引。**
 
 实现 `executeConsolePlan(plan, { catalog, currentTopic, currentPosts })`，严格按“主题范围 → 归档范围 → 状态 → 关键词 → 意图”的顺序筛选。关键词查找字段固定为追踪问题标题/正文、来源摘要、证据摘录、主题标题；当前帖子查找作者名和正文。意图筛选规则固定为：
 
@@ -210,7 +210,7 @@ question        => 保留之前筛选结果
 
 当前帖子记录排在追踪项之前；追踪项按 `updatedAt` 倒序、`topicId` 和 `id` 稳定打破平局。最多 200 个项目，序列化结果先保留当前帖子，再按该顺序加入完整追踪项，达到 18,000 字符后跳过后续完整项并设置 `truncated`。为每个可引用楼层建立 `{ topicId, floor, postId, issueId, excerpt, href }`，跨主题 `href` 只由本地已知 `postId` 和 `api.routes.topic(topicId)` 生成。
 
-- [ ] **Step 10: 将协议和执行器导出到 debug 接口并通过纯函数测试。**
+- [x] **Step 10: 将协议和执行器导出到 debug 接口并通过纯函数测试。**
 
 在 `ai-copilot:debug` 返回 `trackingTopicCatalog`、`normalizeConsolePlan`、`executeConsolePlan`、`consoleCitationRecords`、`consolePlanVersion`，运行：
 
@@ -218,7 +218,7 @@ Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 (协议|计划
 
 Expected: PASS。
 
-- [ ] **Step 11: 提交本任务。**
+- [x] **Step 11: 提交本任务。**
 
 ```bash
 git add plugins/ai-copilot.user.js test/ai-copilot.test.js
@@ -237,7 +237,7 @@ git commit -m "feat: add copilot local console query protocol"
 - Consumes: Task 1 的目录、计划规范化器、本地执行器和引用索引。
 - Produces: `buildConsolePlanRequest`, `buildConsoleAnswerRequest`, `runConsoleQuery`，以及 `console-plan:`/`console-answer:` 缓存。
 
-- [ ] **Step 1: 写失败测试，验证阶段一只发送目录且能解析 fenced JSON。**
+- [x] **Step 1: 写失败测试，验证阶段一只发送目录且能解析 fenced JSON。**
 
 ```js
 test('M4 两阶段：阶段一只发送路由和主题目录，不发送追踪正文', async () => {
@@ -257,13 +257,13 @@ test('M4 两阶段：阶段一只发送路由和主题目录，不发送追踪�
 })
 ```
 
-- [ ] **Step 2: 运行测试确认阶段二接口尚未存在。**
+- [x] **Step 2: 运行测试确认阶段二接口尚未存在。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 两阶段：阶段一"`
 
 Expected: FAIL，因为夹具尚未支持多次模型响应且 `runConsoleQuery` 未实现。
 
-- [ ] **Step 3: 扩展模型夹具并实现阶段一请求构造。**
+- [x] **Step 3: 扩展模型夹具并实现阶段一请求构造。**
 
 让 `makeSite` 支持 `_llmReplies` 按请求顺序返回，同时保留 `_llmReply` 的现有行为；在返回对象中增加 `llmCallsAt(index)`，返回第 `index` 次 LLM 调用记录。实现响应队列的核心逻辑：
 
@@ -287,7 +287,7 @@ function buildConsolePlanRequest(question, context) {
 
 计划解析先去掉 ```json 围栏，再 `JSON.parse`，最后交给 `normalizeConsolePlan`；解析失败、非法字段和超限直接进入可重试错误，不发起阶段二。
 
-- [ ] **Step 4: 写归档收窄、空结果短路和答案引用测试。**
+- [x] **Step 4: 写归档收窄、空结果短路和答案引用测试。**
 
 ```js
 test('M4 两阶段：模型越权包含归档会被收窄，空结果不调用答案阶段', async () => {
@@ -315,17 +315,17 @@ test('M4 答案：只接受本地存在的结构化引用，未知引用标记�
 })
 ```
 
-- [ ] **Step 5: 运行测试确认阶段二失败。**
+- [x] **Step 5: 运行测试确认阶段二失败。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 (模型越权|答案)"`
 
 Expected: FAIL，因为答案请求和结构化引用解析尚未实现。
 
-- [ ] **Step 6: 实现阶段二请求和引用校验。**
+- [x] **Step 6: 实现阶段二请求和引用校验。**
 
 实现 `consoleContext()` 返回 `{ route: { type, id, href }, catalog, currentTopic, currentPosts }`，其中非帖子页的 `currentTopic/currentPosts` 为 `null/[]`；该对象供两个请求构造器和本地执行器共同使用。实现 `buildConsoleAnswerRequest(question, plan, operationResults, context)`，系统提示明确要求只能使用 `<operation-results>`，先给结论，再按状态/主题分组，证据不足写“无法判断”，不建议站内动作。用户区块包含规范化计划和本地执行结果，不包含未筛选的存储原文。实现 `consoleCitationRecords(text, references)`：解析 `[[topic:<id> floor:<n> issue:<id>]]` 和当前主题 `[#N]`，仅映射到 `references` 中的已知组合；未知项保留 `known:false`，不使用模型提供的 URL。
 
-- [ ] **Step 7: 实现缓存、请求复用和空结果短路。**
+- [x] **Step 7: 实现缓存、请求复用和空结果短路。**
 
 实现 `consoleCacheKey(kind, fingerprint)`，计划指纹包含问题、路由和目录指纹，答案指纹再包含规范化计划和本地结果指纹。`runConsoleQuery({ question, force, onStage })` 按以下顺序执行：
 
@@ -337,13 +337,13 @@ Expected: FAIL，因为答案请求和结构化引用解析尚未实现。
 6. 缓存只保留模型文本、计划、结果元数据和指纹；按时间淘汰计划 60 条、答案 60 条。
 7. 同指纹在途请求复用 Promise，不同指纹拒绝并发请求，避免覆盖现有副驾请求。
 
-- [ ] **Step 8: 运行协议和请求测试。**
+- [x] **Step 8: 运行协议和请求测试。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 (两阶段|答案|缓存)"`
 
 Expected: PASS，且普通 `run('ask'|'analyze'|'digest'|'track-review')` 测试保持通过。
 
-- [ ] **Step 9: 提交本任务。**
+- [x] **Step 9: 提交本任务。**
 
 ```bash
 git add plugins/ai-copilot.user.js test/ai-copilot.test.js
@@ -362,7 +362,7 @@ git commit -m "feat: add ai copilot two-stage console query"
 - Consumes: Task 2 的 `runConsoleQuery({ question, force, onStage })`。
 - Produces: `a.lsb-ai-console-top` 全站入口、独立操作台面板、进度/结果/引用/重试 UI；不改变既有帖子副驾入口。
 
-- [ ] **Step 1: 写失败测试，锁定普通页入口和帖子上下文差异。**
+- [x] **Step 1: 写失败测试，锁定普通页入口和帖子上下文差异。**
 
 ```js
 test('M4 UI：普通页显示操作台入口，帖子页同时保留副驾入口', async () => {
@@ -379,17 +379,17 @@ test('M4 UI：普通页显示操作台入口，帖子页同时保留副驾入口
 })
 ```
 
-- [ ] **Step 2: 运行入口测试确认当前 manifest 会跳过首页。**
+- [x] **Step 2: 运行入口测试确认当前 manifest 会跳过首页。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 UI：普通页"`
 
 Expected: FAIL，因为现有 manifest 的 `pages: ['topic']` 会让首页插件处于 skipped。
 
-- [ ] **Step 3: 取消页面限定并同步两个顶栏入口。**
+- [x] **Step 3: 取消页面限定并同步两个顶栏入口。**
 
 删除 manifest 的 `pages: ['topic']`，让副驾在所有普通页面激活。保留 `syncTopLink` 只负责 `a.lsb-ai-copilot-top` 和帖子页；新增 `syncConsoleTopLink`：每次 setup 和 `route:changed` 都尝试调用 `api.ui.topLink`，给链接加 `lsb-ai-console-top`，所有有站点顶栏的普通页面都保留；停用、路由清理时删除它。帖子页两个链接都显示。
 
-- [ ] **Step 4: 写失败测试，锁定面板字段、快捷问题和只读按钮边界。**
+- [x] **Step 4: 写失败测试，锁定面板字段、快捷问题和只读按钮边界。**
 
 ```js
 test('M4 UI：快捷问题填充输入框，面板显示范围提示且没有写操作按钮', async () => {
@@ -406,13 +406,13 @@ test('M4 UI：快捷问题填充输入框，面板显示范围提示且没有写
 })
 ```
 
-- [ ] **Step 5: 运行 UI 测试确认面板尚未实现。**
+- [x] **Step 5: 运行 UI 测试确认面板尚未实现。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "M4 UI：快捷问题"`
 
 Expected: FAIL，因为独立操作台面板和数据属性尚未实现。
 
-- [ ] **Step 6: 实现独立操作台面板和快捷问题。**
+- [x] **Step 6: 实现独立操作台面板和快捷问题。**
 
 新增 `openConsolePanel`, `renderConsolePanel`, `renderConsolePrompt`, `renderConsoleResult`, `renderConsoleError`。面板标题为“AI 操作台”，内容固定包含：
 
@@ -424,7 +424,7 @@ Expected: FAIL，因为独立操作台面板和数据属性尚未实现。
 
 结果元数据显示“含归档”和“已截断”时，摘要同步显示对应提示。空结果显示明确说明和重新查询按钮，绝不出现接受建议、归档、恢复或站内提交动作。
 
-- [ ] **Step 7: 写失败测试，锁定进度、结果和引用链接。**
+- [x] **Step 7: 写失败测试，锁定进度、结果和引用链接。**
 
 ```js
 test('M4 UI：查询显示两阶段进度、答案和结构化引用', async () => {
@@ -445,11 +445,11 @@ test('M4 UI：查询显示两阶段进度、答案和结构化引用', async () 
 })
 ```
 
-- [ ] **Step 8: 实现阶段回调、结果渲染和复制。**
+- [x] **Step 8: 实现阶段回调、结果渲染和复制。**
 
 `runConsoleQueryAndShow` 在调用前捕获 `generation` 和 panel 节点；`onStage` 只更新仍连接的 `[data-console-stage]`。结果使用 `provider.renderMarkdown`，复制按钮写入原始 Markdown。引用列表只接收 Task 2 的 `meta.citations`，已知引用链接到 `api.routes.topic(topicId)?floor=<floor>#post-<postId>`，未知引用显示“未验证引用”。重新查询带 `force:true`，错误面板提供重试。
 
-- [ ] **Step 9: 写生命周期和停用回归测试。**
+- [x] **Step 9: 写生命周期和停用回归测试。**
 
 ```js
 test('M4 生命周期：路由切换或停用后旧操作台请求不能回写', async () => {
@@ -470,13 +470,13 @@ test('M4 生命周期：路由切换或停用后旧操作台请求不能回写',
 })
 ```
 
-- [ ] **Step 10: 运行现有副驾回归和新增 UI 测试。**
+- [x] **Step 10: 运行现有副驾回归和新增 UI 测试。**
 
 Run: `node --test test/ai-copilot.test.js`
 
 Expected: PASS；现有帖子问答、M2 分析、M3 追踪和 M3.1 导入导出测试不改变行为，首页旧的“插件 skipped”断言改为“操作台入口存在、帖子副驾入口不存在”。
 
-- [ ] **Step 11: 提交本任务。**
+- [x] **Step 11: 提交本任务。**
 
 ```bash
 git add plugins/ai-copilot.user.js test/ai-copilot.test.js
@@ -498,21 +498,21 @@ git commit -m "feat: add ai copilot natural language console ui"
 - Consumes: Task 1–3 的源码和测试。
 - Produces: AI 副驾 `0.6.0`、Oxygen/LTS `1.0.118`，以及新鲜可解析的 dist 文件。
 
-- [ ] **Step 1: 更新模块和套件版本。**
+- [x] **Step 1: 更新模块和套件版本。**
 
 把 `plugins/ai-copilot.user.js` 顶部 `@version` 和 manifest `version` 同步改为 `0.6.0`，更新描述以包含“只读自然语言操作台”。把 `build-suite.mjs` 的 `SUITE_VERSION` 与 `suite/suite-center.js` 的 manifest version 同步改为 `1.0.118`。不要把 `ai-copilot` 加入 `ORDER_LTS`。
 
-- [ ] **Step 2: 更新版本断言并验证 LTS 边界。**
+- [x] **Step 2: 更新版本断言并验证 LTS 边界。**
 
 在 `test/suite.test.js` 将副驾版本断言改为 `0.6.0`、Oxygen/LTS 断言改为 `1.0.118`，保留 `ORDER_LTS.includes('ai-copilot') === false` 和 LTS 产物不含 `id: 'ai-copilot'` 的断言。
 
-- [ ] **Step 3: 运行副驾和套件测试。**
+- [x] **Step 3: 运行副驾和套件测试。**
 
 Run: `node --test test/ai-copilot.test.js test/suite.test.js`
 
 Expected: PASS。
 
-- [ ] **Step 4: 生成并校验 dist。**
+- [x] **Step 4: 生成并校验 dist。**
 
 Run: `npm run build`
 
@@ -522,7 +522,7 @@ Run: `npm run verify:dist`
 
 Expected: `dist 新鲜度通过`；Oxygen 包含当前 `ai-copilot` 正文，LTS 不包含它。
 
-- [ ] **Step 5: 运行全量测试、语法和 diff 检查。**
+- [x] **Step 5: 运行全量测试、语法和 diff 检查。**
 
 ```bash
 npm test
@@ -531,13 +531,13 @@ git diff --check
 
 Expected: 全部测试通过，`git diff --check` 无输出。若全量测试失败，只修复本次自然语言操作台引入的回归，不扩大功能范围。
 
-- [ ] **Step 6: 提交版本和产物。**
+- [x] **Step 6: 提交版本和产物。**
 
 ```bash
 git add plugins/ai-copilot.user.js build-suite.mjs suite/suite-center.js test/suite.test.js dist/linuxsb-suite.user.js dist/linuxsb-lts.user.js
 git commit -m "feat: ship ai copilot natural language console"
 ```
 
-- [ ] **Step 7: 最终验收报告。**
+- [x] **Step 7: 最终验收报告。**
 
 确认以下行为后再报告完成：普通页可打开独立入口；帖子页同时显示两个入口；未授权归档请求会收窄到活动项；本地空结果不产生第二次模型调用；跨主题引用只链接本地存在的楼层；路由切换/停用没有旧面板或异步回写；`npm test`、`npm run build`、`npm run verify:dist` 和 `git diff --check` 均通过。
