@@ -447,3 +447,42 @@ test('M2 UI：模型未遵循标题格式时仍显示原文和引用', async () 
   assert.match(record.text, /只有一句普通文本/)
   assert.equal(record.meta.citations[0].known, true)
 })
+
+test('M3 状态：缺失存储返回空集合，保存后按主题隔离', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  assert.equal(dbg.trackingState(1).items.length, 0)
+  const saved = dbg.createTrackingIssue(1, {
+    title: '缓存问题',
+    question: '缓存是否会过期？',
+    floors: [12],
+    excerpt: '依据 [#12]',
+  }, { fingerprint: 'f1', analysisVersion: '2' })
+  assert.equal(saved.status, '待验证')
+  assert.equal(dbg.trackingState(1).items.length, 1)
+  assert.equal(dbg.trackingState(2).items.length, 0)
+})
+
+test('M3 状态：相同问题和基线楼层幂等，不重复建立追踪项', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const seed = { title: '问题', question: '同一个问题', floors: [12, 18], excerpt: '依据' }
+  const a = dbg.createTrackingIssue(1, seed, { fingerprint: 'f1', analysisVersion: '2' })
+  const b = dbg.createTrackingIssue(1, seed, { fingerprint: 'f2', analysisVersion: '2' })
+  assert.equal(a.id, b.id)
+  assert.equal(dbg.trackingState(1).items.length, 1)
+})
+
+test('M3 解析：只接受有问题文本和本地楼层的固定问题块', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const citations = [{ floor: 12, postId: 12, excerpt: '已知证据', known: true }]
+  const out = dbg.parseUnresolvedIssues(
+    '## 未解决问题\n### 问题 1：缓存\n- 问题：缓存是否会过期？\n- 相关楼层：[#12]\n- 当前已知：有缓存\n- 缺少信息：过期策略\n' +
+      '### 问题 2：无引用\n- 问题：没有本地依据\n- 相关楼层：[#999]\n',
+    citations,
+  )
+  assert.equal(out.length, 1)
+  assert.equal(out[0].question, '缓存是否会过期？')
+  assert.deepEqual(Array.from(out[0].floors), [12])
+})

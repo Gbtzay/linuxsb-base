@@ -39,6 +39,12 @@
   const CITATION_VERSION = '2'
   const ANALYSIS_VERSION = '1'
   const DIGEST_MAX_PENDING = 100
+  const TRACKING_VERSION = '1'
+  const TRACKING_MAX_ITEMS = 50
+  const TRACKING_MAX_EVIDENCE = 100
+  const TRACKING_MAX_SEEN = 2000
+  const TRACKING_STATES = ['待验证', '有新证据', '可能已解决', '已确认解决', '仍未解决']
+  const REVIEW_STATES = ['待验证', '有新证据', '可能已解决', '仍未解决']
   const ANALYZE_PRESETS = {
     未解决问题: {
       instruction: '列出仍未得到明确回答的问题，逐项标注相关楼层；无法确认时明确写出未知。',
@@ -153,6 +159,39 @@
     return floors
   }
 
+  function stableIssueId(question, floors) {
+    const normalizedFloors = [...new Set((floors || []).map((floor) => asNumber(floor, 0)).filter((floor) => floor > 0))].sort(
+      (a, b) => a - b,
+    )
+    return `issue-${hashText(JSON.stringify({ question: String(question || '').trim(), floors: normalizedFloors }))}`
+  }
+
+  function parseUnresolvedIssues(text, citations) {
+    const source = String(text || '')
+    const known = new Map(
+      (Array.isArray(citations) ? citations : [])
+        .filter((citation) => citation?.known && citation?.postId)
+        .map((citation) => [asNumber(citation.floor, 0), citation]),
+    )
+    const headers = [...source.matchAll(/^###\s*问题\s*\d+\s*[：:]\s*(.+?)\s*$/gm)]
+    const issues = []
+    for (let i = 0; i < headers.length; i += 1) {
+      const match = headers[i]
+      const start = match.index + match[0].length
+      const end = headers[i + 1]?.index ?? source.length
+      const block = source.slice(start, end)
+      const question = block.match(/^-\s*问题\s*[：:]\s*(.+?)\s*$/m)?.[1]?.trim() || ''
+      const rawFloors = [...block.matchAll(/\[#\s*(\d+)\]/g)].map((item) => Number(item[1]))
+      const floors = [...new Set(rawFloors.filter((floor) => known.has(floor)))]
+      if (!question || !floors.length) continue
+      const title = String(match[1] || '').trim()
+      const knownText = block.match(/^-\s*当前已知\s*[：:]\s*(.+?)\s*$/m)?.[1]?.trim() || ''
+      const excerpt = knownText || floors.map((floor) => known.get(floor)?.excerpt || '').filter(Boolean).join('；').slice(0, 240)
+      issues.push({ id: stableIssueId(question, floors), title, question, floors, excerpt })
+    }
+    return issues
+  }
+
   function normalizeDigestPost(post) {
     const normalized = normalizePost(post)
     return {
@@ -265,6 +304,179 @@
 
     function sessionKey(topicId) {
       return `session:${topicId}`
+    }
+
+    function trackingKey(topicId) {
+      return `track:${topicId}`
+    }
+
+    function emptyTrackingState(topicId) {
+      return {
+        version: TRACKING_VERSION,
+        topicId: asNumber(topicId, topicId),
+        scan: { seenKeys: [], lastFloor: 0, ts: 0 },
+        items: [],
+      }
+    }
+
+    function normalizeTrackingEvidence(raw, kind = 'new') {
+      const post = normalizePost(raw)
+      const floor = asNumber(raw?.floor ?? post.floor, 0)
+      if (floor <= 0) return null
+      const postId = post.postId
+      const key = String(raw?.key || postKey(post))
+      return {
+        key,
+        postId,
+        floor,
+        authorName: String(raw?.authorName || post.authorName || '?'),
+        excerpt: String(raw?.excerpt || post.content || '').trim().slice(0, 240),
+        kind: String(raw?.kind || kind),
+        seenAt: Math.max(0, asNumber(raw?.seenAt, Date.now())),
+      }
+    }
+
+    function dedupeEvidence(rows, limit = TRACKING_MAX_EVIDENCE) {
+      const seen = new Set()
+      const out = []
+      for (const raw of rows || []) {
+        const row = normalizeTrackingEvidence(raw, raw?.kind || 'new')
+        if (!row || seen.has(row.key)) continue
+        seen.add(row.key)
+        out.push(row)
+      }
+      return out.sort((a, b) => a.floor - b.floor || a.seenAt - b.seenAt).slice(-limit)
+    }
+
+    function normalizeTrackingIssue(raw) {
+      if (!raw || typeof raw !== 'object') return null
+      const question = String(raw.question || '').trim()
+      if (!question) return null
+      const floors = [...new Set((raw.source?.floors || []).map((floor) => asNumber(floor, 0)).filter((floor) => floor > 0))].sort(
+        (a, b) => a - b,
+      )
+      const evidence = dedupeEvidence(raw.evidence, TRACKING_MAX_EVIDENCE)
+      const pendingEvidence = dedupeEvidence(raw.pendingEvidence, TRACKING_MAX_EVIDENCE).filter(
+        (row) => !evidence.some((known) => known.key === row.key),
+      )
+      const status = TRACKING_STATES.includes(raw.status) ? raw.status : '待验证'
+      return {
+        id: String(raw.id || stableIssueId(question, floors)),
+        title: String(raw.title || '').trim(),
+        question,
+        status,
+        source: {
+          analysisVersion: String(raw.source?.analysisVersion || ''),
+          fingerprint: String(raw.source?.fingerprint || ''),
+          floors,
+          excerpt: String(raw.source?.excerpt || '').slice(0, 240),
+          createdAt: Math.max(0, asNumber(raw.source?.createdAt, 0)),
+        },
+        evidence,
+        pendingEvidence,
+        suggestion: raw.suggestion && typeof raw.suggestion === 'object' ? raw.suggestion : null,
+        createdAt: Math.max(0, asNumber(raw.createdAt, 0)),
+        updatedAt: Math.max(0, asNumber(raw.updatedAt, 0)),
+      }
+    }
+
+    function loadTrackingState(topicId) {
+      const empty = emptyTrackingState(topicId)
+      const raw = api.store.get(trackingKey(topicId), null)
+      if (!raw || typeof raw !== 'object' || raw.version !== TRACKING_VERSION) return empty
+      const items = []
+      const seenItems = new Set()
+      for (const item of Array.isArray(raw.items) ? raw.items : []) {
+        const normalized = normalizeTrackingIssue(item)
+        if (!normalized || seenItems.has(normalized.id)) continue
+        seenItems.add(normalized.id)
+        items.push(normalized)
+      }
+      return {
+        version: TRACKING_VERSION,
+        topicId: asNumber(raw.topicId, topicId),
+        scan: {
+          seenKeys: [...new Set((raw.scan?.seenKeys || []).map((key) => String(key)).filter(Boolean))].slice(-TRACKING_MAX_SEEN),
+          lastFloor: Math.max(0, asNumber(raw.scan?.lastFloor, 0)),
+          ts: Math.max(0, asNumber(raw.scan?.ts, 0)),
+        },
+        items: items.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, TRACKING_MAX_ITEMS),
+      }
+    }
+
+    function saveTrackingState(topicId, state) {
+      const normalized = state && typeof state === 'object' ? state : emptyTrackingState(topicId)
+      const next = {
+        version: TRACKING_VERSION,
+        topicId: asNumber(topicId, topicId),
+        scan: {
+          seenKeys: [...new Set((normalized.scan?.seenKeys || []).map((key) => String(key)).filter(Boolean))].slice(-TRACKING_MAX_SEEN),
+          lastFloor: Math.max(0, asNumber(normalized.scan?.lastFloor, 0)),
+          ts: Math.max(0, asNumber(normalized.scan?.ts, 0)),
+        },
+        items: (Array.isArray(normalized.items) ? normalized.items : [])
+          .map(normalizeTrackingIssue)
+          .filter(Boolean)
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, TRACKING_MAX_ITEMS),
+      }
+      api.store.set(trackingKey(topicId), next)
+      return loadTrackingState(topicId)
+    }
+
+    function createTrackingIssue(topicId, seed, source = {}) {
+      const question = String(seed?.question || '').trim()
+      const floors = [...new Set((seed?.floors || []).map((floor) => asNumber(floor, 0)).filter((floor) => floor > 0))].sort(
+        (a, b) => a - b,
+      )
+      if (!question || !floors.length) throw new Error('问题缺少可验证的本地楼层')
+      const id = stableIssueId(question, floors)
+      const state = loadTrackingState(topicId)
+      const existing = state.items.find((item) => item.id === id)
+      if (existing) return existing
+      const citations = Array.isArray(source.citations) ? source.citations : []
+      const evidence = floors.map((floor) => {
+        const citation = citations.find((row) => asNumber(row?.floor, 0) === floor)
+        return normalizeTrackingEvidence(
+          {
+            key: citation?.postId ? `id:${citation.postId}` : `floor:${floor}`,
+            postId: citation?.postId || null,
+            floor,
+            authorName: citation?.authorName || '?',
+            excerpt: citation?.excerpt || seed.excerpt || '',
+            kind: 'initial',
+          },
+          'initial',
+        )
+      }).filter(Boolean)
+      const now = Date.now()
+      const item = {
+        id,
+        title: String(seed.title || '').trim(),
+        question,
+        status: '待验证',
+        source: {
+          analysisVersion: String(source.analysisVersion || ''),
+          fingerprint: String(source.fingerprint || ''),
+          floors,
+          excerpt: String(seed.excerpt || '').slice(0, 240),
+          createdAt: now,
+        },
+        evidence,
+        pendingEvidence: [],
+        suggestion: null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      const next = {
+        ...state,
+        scan: {
+          ...state.scan,
+          seenKeys: [...new Set([...state.scan.seenKeys, ...evidence.map((row) => row.key)])].slice(-TRACKING_MAX_SEEN),
+        },
+        items: [...state.items, item],
+      }
+      return saveTrackingState(topicId, next).items.find((row) => row.id === id)
     }
 
     function sessionFor(topicId) {
@@ -945,6 +1157,10 @@
       digestState: (topicId = api.page.id) => loadDigestState(topicId),
       pendingReplies: (topicId = api.page.id, posts = null) => pendingReplies(topicId, posts),
       markDigestRead: (topicId = api.page.id, posts = []) => markDigestRead(topicId, posts),
+      trackingState: (topicId = api.page.id) => loadTrackingState(topicId),
+      createTrackingIssue,
+      parseUnresolvedIssues,
+      trackingVersion: TRACKING_VERSION,
       buildRequest,
       analysisVersion: ANALYSIS_VERSION,
       run,
