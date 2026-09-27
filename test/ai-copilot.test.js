@@ -714,6 +714,66 @@ test('M3.1 状态：v1 追踪项迁移到 v2 且保留问题、证据和建议',
   assert.deepEqual(Array.from(state.items[0].evidence.map((row) => row.key)), ['id:12'])
 })
 
+test('M4 协议：旧 v2 追踪状态可读，写入时补充 topicMeta 并进入主题目录', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  ctx.w.localStorage.setItem('lsb_base:ai-copilot:track:7', JSON.stringify({
+    version: '2', topicId: 7, scan: { seenKeys: [], lastFloor: 0, ts: 10 },
+    items: [{ id: 'old', question: '旧问题', status: '待验证', source: { floors: [12] },
+      evidence: [], pendingEvidence: [], suggestion: null, createdAt: 10, updatedAt: 20 }],
+  }))
+  const state = dbg.trackingState(7)
+  assert.equal(state.items[0].question, '旧问题')
+  assert.equal(state.topicMeta.id, 7)
+  assert.equal(state.topicMeta.title, '主题 #7')
+  assert.equal(state.topicMeta.forumName, '')
+  const catalog = dbg.trackingTopicCatalog()
+  assert.equal(catalog.find((row) => row.id === 7).activeCount, 1)
+})
+
+test('M4 计划：只接受白名单字段，非法值拒绝，未授权归档自动收窄', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const catalog = dbg.trackingTopicCatalog()
+  const plan = dbg.normalizeConsolePlan({
+    version: 1, intent: 'status-summary', includeCurrentTopic: true,
+    includeArchived: true, statuses: [], topicIds: [], terms: [],
+  }, { question: '汇总活动追踪项', catalog, currentTopicId: 1 })
+  assert.equal(plan.includeArchived, false)
+  assert.throws(() => dbg.normalizeConsolePlan({ version: 1, intent: 'question', write: true },
+    { question: '查问题', catalog, currentTopicId: 1 }), /计划字段|未知字段/)
+  assert.throws(() => dbg.normalizeConsolePlan({ version: 1, intent: 'question', includeCurrentTopic: true,
+    includeArchived: false, statuses: ['未知状态'], topicIds: [], terms: [] },
+    { question: '查问题', catalog, currentTopicId: 1 }), /状态/)
+  const archived = dbg.normalizeConsolePlan({ version: 1, intent: 'question', includeCurrentTopic: false,
+    includeArchived: true, statuses: [], topicIds: [], terms: [] },
+    { question: '请包含已归档追踪项', catalog, currentTopicId: 1 })
+  assert.equal(archived.includeArchived, true)
+})
+
+test('M4 执行器：组合筛选活动项、关键词、意图并稳定截断', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  ctx.w.localStorage.setItem('lsb_base:ai-copilot:track:2', JSON.stringify({
+    version: '2', topicId: 2,
+    topicMeta: { id: 2, title: '第二主题', forumName: '技术' },
+    scan: { seenKeys: [], lastFloor: 0, ts: 30 },
+    items: [
+      { id: 'active', question: '缓存刷新', status: '有新证据', updatedAt: 30, archivedAt: 0,
+        source: { floors: [3], excerpt: '刷新' }, evidence: [], pendingEvidence: [] },
+      { id: 'archived', question: '旧缓存', status: '仍未解决', updatedAt: 40, archivedAt: 40,
+        source: { floors: [4], excerpt: '旧' }, evidence: [], pendingEvidence: [] },
+    ],
+  }))
+  const result = dbg.executeConsolePlan({ version: 1, intent: 'unresolved', includeCurrentTopic: false,
+    includeArchived: false, statuses: [], topicIds: [2], terms: ['刷新'] }, {
+    catalog: dbg.trackingTopicCatalog(), currentTopic: null, currentPosts: [],
+  })
+  assert.deepEqual(Array.from(result.items.map((item) => item.id)), ['active'])
+  assert.equal(result.includedArchived, false)
+  assert.equal(result.truncated, false)
+})
+
 test('M3.1 生命周期：归档停止收集，恢复后继续收集新证据', async () => {
   const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
   const dbg = await load(ctx)

@@ -44,6 +44,12 @@
   const TRACKING_MAX_EVIDENCE = 100
   const TRACKING_MAX_SEEN = 2000
   const TRACKING_MAX_HISTORY = 100
+  const CONSOLE_PLAN_VERSION = 1
+  const CONSOLE_MAX_TOPICS = 100
+  const CONSOLE_MAX_ITEMS = 200
+  const CONSOLE_MAX_TERMS = 8
+  const CONSOLE_MAX_TERM_LENGTH = 80
+  const CONSOLE_MAX_CHARS = 18000
   const TRACKING_STATES = ['待验证', '有新证据', '可能已解决', '已确认解决', '仍未解决']
   const REVIEW_STATES = ['待验证', '有新证据', '可能已解决', '仍未解决']
   const ANALYZE_PRESETS = {
@@ -329,10 +335,20 @@
       return `track:${topicId}`
     }
 
+    function normalizeTopicMeta(raw, topicId) {
+      const id = asNumber(raw?.id, topicId)
+      return {
+        id,
+        title: String(raw?.title || `主题 #${id}`),
+        forumName: String(raw?.forumName || ''),
+      }
+    }
+
     function emptyTrackingState(topicId, unsupportedVersion = '') {
       return {
         version: TRACKING_VERSION,
         topicId: asNumber(topicId, topicId),
+        topicMeta: normalizeTopicMeta(null, topicId),
         scan: { seenKeys: [], lastFloor: 0, ts: 0 },
         items: [],
         unsupportedVersion: String(unsupportedVersion || ''),
@@ -484,6 +500,7 @@
       return {
         version: TRACKING_VERSION,
         topicId: asNumber(raw.topicId, topicId),
+        topicMeta: normalizeTopicMeta(raw.topicMeta, raw.topicId || topicId),
         scan: {
           seenKeys: [...new Set((raw.scan?.seenKeys || []).map((key) => String(key)).filter(Boolean))].slice(-TRACKING_MAX_SEEN),
           lastFloor: Math.max(0, asNumber(raw.scan?.lastFloor, 0)),
@@ -499,6 +516,10 @@
       const next = {
         version: TRACKING_VERSION,
         topicId: asNumber(topicId, topicId),
+        topicMeta: normalizeTopicMeta(
+          asNumber(topicId, topicId) === asNumber(api.page.id, 0) ? trackingTopicMeta(topicId) : normalized.topicMeta,
+          topicId,
+        ),
         scan: {
           seenKeys: [...new Set((normalized.scan?.seenKeys || []).map((key) => String(key)).filter(Boolean))].slice(-TRACKING_MAX_SEEN),
           lastFloor: Math.max(0, asNumber(normalized.scan?.lastFloor, 0)),
@@ -885,16 +906,227 @@
 
     function trackingTopicMeta(topicId) {
       let topic = null
-      try {
-        topic = normalizeTopic(api.parse.topic(document))
-      } catch {
-        topic = null
+      if (api.page.type === 'topic' && asNumber(topicId, 0) === asNumber(api.page.id, 0)) {
+        try {
+          topic = normalizeTopic(api.parse.topic(document))
+        } catch {
+          topic = null
+        }
       }
-      const fallback = normalizeTopic(api.snapshot?.topic)
+      const fallback = asNumber(topicId, 0) === asNumber(api.page.id, 0) ? normalizeTopic(api.snapshot?.topic) : null
+      return normalizeTopicMeta({
+        id: topicId,
+        title: topic?.title || fallback?.title,
+        forumName: topic?.forumName || fallback?.forumName,
+      }, topicId)
+    }
+
+    function trackingTopicCatalog() {
+      const rows = []
+      const seen = new Set()
+      for (const key of api.store.keys()) {
+        const match = String(key).match(/^track:(\d+)$/)
+        if (!match) continue
+        const id = asNumber(match[1], 0)
+        if (id <= 0 || seen.has(id)) continue
+        seen.add(id)
+        const state = loadTrackingState(id)
+        if (state.unsupportedVersion) continue
+        const activeCount = state.items.filter((item) => !item.archivedAt).length
+        const archivedCount = state.items.filter((item) => Boolean(item.archivedAt)).length
+        const updatedAt = Math.max(
+          state.scan.ts,
+          ...state.items.map((item) => Math.max(item.updatedAt, item.createdAt, item.archivedAt)),
+        )
+        rows.push({
+          id,
+          title: state.topicMeta.title || `主题 #${id}`,
+          forumName: state.topicMeta.forumName || '',
+          activeCount,
+          archivedCount,
+          updatedAt,
+        })
+      }
+      return rows.sort((a, b) => b.updatedAt - a.updatedAt || a.id - b.id).slice(0, CONSOLE_MAX_TOPICS)
+    }
+
+    function consoleArchiveAuthorized(question) {
+      const source = String(question || '')
+      if (!/(归档|已归档|历史追踪项)/.test(source)) return false
+      return !/(不要|不查|不含|不包含|排除)[^。！？\n]{0,12}(归档|已归档|历史追踪项)/.test(source)
+    }
+
+    function normalizeConsolePlan(raw, context = {}) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('查询计划必须是 JSON 对象')
+      const fields = ['version', 'intent', 'includeCurrentTopic', 'includeArchived', 'statuses', 'topicIds', 'terms']
+      const keys = Object.keys(raw)
+      if (keys.some((key) => !fields.includes(key)) || fields.some((key) => !keys.includes(key))) {
+        throw new Error('查询计划字段不完整或包含未知字段')
+      }
+      if (raw.version !== CONSOLE_PLAN_VERSION) throw new Error('不支持的查询计划版本')
+      const intents = ['unresolved', 'new-evidence', 'possibly-resolved', 'status-summary', 'question']
+      if (!intents.includes(raw.intent)) throw new Error('查询计划意图无效')
+      if (typeof raw.includeCurrentTopic !== 'boolean' || typeof raw.includeArchived !== 'boolean') {
+        throw new Error('查询计划范围必须是布尔值')
+      }
+      if (!Array.isArray(raw.statuses) || raw.statuses.length > TRACKING_STATES.length || raw.statuses.some((status) => !TRACKING_STATES.includes(status))) {
+        throw new Error('查询计划状态无效')
+      }
+      if (!Array.isArray(raw.topicIds) || raw.topicIds.length > CONSOLE_MAX_TOPICS) throw new Error('查询计划主题范围无效')
+      const catalogIds = new Set((Array.isArray(context.catalog) ? context.catalog : []).map((row) => asNumber(row?.id, 0)).filter((id) => id > 0))
+      if (raw.topicIds.some((id) => !Number.isInteger(id) || id <= 0 || !catalogIds.has(id))) {
+        throw new Error('查询计划包含未在目录中的主题')
+      }
+      if (!Array.isArray(raw.terms) || raw.terms.length > CONSOLE_MAX_TERMS) throw new Error('查询计划关键词过多')
+      const terms = raw.terms.map((term) => String(term || '').trim())
+      if (terms.some((term) => !term || term.length > CONSOLE_MAX_TERM_LENGTH)) throw new Error('查询计划关键词无效')
+      const currentTopicId = asNumber(context.currentTopicId, 0)
       return {
-        id: asNumber(topicId, topic?.id || fallback?.id || topicId),
-        title: String(topic?.title || fallback?.title || ''),
-        forumName: String(topic?.forumName || fallback?.forumName || ''),
+        version: CONSOLE_PLAN_VERSION,
+        intent: raw.intent,
+        includeCurrentTopic: currentTopicId > 0 ? raw.includeCurrentTopic : false,
+        includeArchived: raw.includeArchived && consoleArchiveAuthorized(context.question) ? true : false,
+        statuses: [...new Set(raw.statuses)],
+        topicIds: [...new Set(raw.topicIds)],
+        terms: [...new Set(terms)],
+      }
+    }
+
+    function consoleTextMatches(value, terms) {
+      if (!terms.length) return true
+      const text = String(value || '').toLocaleLowerCase()
+      return terms.some((term) => text.includes(term.toLocaleLowerCase()))
+    }
+
+    function consoleIssueMatches(item, topicMeta, plan) {
+      if (item.archivedAt && !plan.includeArchived) return false
+      if (plan.statuses.length && !plan.statuses.includes(item.status)) return false
+      const evidence = [...(item.evidence || []), ...(item.pendingEvidence || [])]
+      const searchable = [
+        item.title,
+        item.question,
+        item.source?.excerpt,
+        topicMeta?.title,
+        ...evidence.map((row) => row.excerpt),
+      ]
+      if (!searchable.some((value) => consoleTextMatches(value, plan.terms))) return false
+      if (plan.intent === 'unresolved' && !['待验证', '有新证据', '仍未解决'].includes(item.status)) return false
+      if (plan.intent === 'new-evidence' && item.status !== '有新证据' && !item.pendingEvidence.length) return false
+      if (plan.intent === 'possibly-resolved' && item.status !== '可能已解决') return false
+      return true
+    }
+
+    function executeConsolePlan(plan, context = {}) {
+      const catalog = Array.isArray(context.catalog) ? context.catalog : []
+      const selectedTopics = new Set(plan.topicIds.length ? plan.topicIds : catalog.map((row) => asNumber(row.id, 0)))
+      const rows = []
+      const references = []
+      let includedArchived = false
+      for (const topic of catalog) {
+        const topicId = asNumber(topic.id, 0)
+        if (!selectedTopics.has(topicId)) continue
+        const state = loadTrackingState(topicId)
+        if (state.unsupportedVersion) continue
+        for (const item of state.items) {
+          if (!consoleIssueMatches(item, topic, plan)) continue
+          const evidence = [...item.evidence, ...item.pendingEvidence].map((row) => ({
+            key: row.key,
+            floor: row.floor,
+            postId: row.postId || null,
+            authorName: row.authorName || '?',
+            excerpt: row.excerpt || '',
+            kind: row.kind || 'new',
+          }))
+          rows.push({
+            kind: 'tracking',
+            id: item.id,
+            topicId,
+            topicTitle: topic.title || `主题 #${topicId}`,
+            forumName: topic.forumName || '',
+            title: item.title,
+            question: item.question,
+            status: item.status,
+            archivedAt: item.archivedAt,
+            updatedAt: item.updatedAt,
+            source: { floors: item.source.floors, excerpt: item.source.excerpt },
+            evidence,
+            pendingEvidence: item.pendingEvidence.map((row) => ({ ...row })),
+          })
+          if (item.archivedAt) includedArchived = true
+          for (const row of evidence) {
+            references.push({
+              topicId,
+              topicTitle: topic.title || `主题 #${topicId}`,
+              issueId: item.id,
+              floor: row.floor,
+              postId: row.postId,
+              excerpt: row.excerpt,
+              known: Boolean(row.postId),
+              href: row.postId ? `${api.routes.topic(topicId)}?floor=${row.floor}#post-${row.postId}` : null,
+            })
+          }
+        }
+      }
+      rows.sort((a, b) => b.updatedAt - a.updatedAt || a.topicId - b.topicId || a.id.localeCompare(b.id))
+      const limitedRows = rows.slice(0, CONSOLE_MAX_ITEMS)
+      let truncated = rows.length > limitedRows.length
+      const currentTopic = context.currentTopic && plan.includeCurrentTopic
+        ? {
+            kind: 'current-topic',
+            topicId: asNumber(context.currentTopic.id, api.page.id),
+            title: context.currentTopic.title || `主题 #${api.page.id}`,
+            forumName: context.currentTopic.forumName || '',
+            posts: [],
+          }
+        : null
+      let chars = 0
+      if (currentTopic) {
+        const posts = Array.isArray(context.currentPosts) ? context.currentPosts : []
+        for (const raw of posts) {
+          const post = normalizePost(raw)
+          const searchable = `${post.authorName}\n${post.content}`
+          if (!consoleTextMatches(searchable, plan.terms)) continue
+          const next = { postId: post.postId, floor: post.floor, authorName: post.authorName, content: post.content }
+          const size = JSON.stringify(next).length
+          if (chars + size > CONSOLE_MAX_CHARS) {
+            truncated = true
+            break
+          }
+          currentTopic.posts.push(next)
+          chars += size
+          if (post.floor > 0) {
+            references.push({
+              topicId: currentTopic.topicId,
+              topicTitle: currentTopic.title,
+              issueId: '',
+              floor: post.floor,
+              postId: post.postId,
+              excerpt: post.content.slice(0, 240),
+              known: Boolean(post.postId),
+              href: post.postId ? `${api.routes.topic(currentTopic.topicId)}?floor=${post.floor}#post-${post.postId}` : null,
+            })
+          }
+        }
+      }
+      const kept = []
+      for (const row of limitedRows) {
+        const size = JSON.stringify(row).length
+        if (chars + size > CONSOLE_MAX_CHARS) {
+          truncated = true
+          break
+        }
+        kept.push(row)
+        chars += size
+      }
+      const keptIds = new Set(kept.map((row) => `${row.topicId}:${row.id}`))
+      const keptRefs = references.filter((row) => !row.issueId || keptIds.has(`${row.topicId}:${row.issueId}`) || row.topicId === currentTopic?.topicId)
+      return {
+        items: kept,
+        currentTopic,
+        references: keptRefs,
+        chars,
+        truncated,
+        includedArchived,
       }
     }
 
@@ -2514,6 +2746,10 @@
       pendingReplies: (topicId = api.page.id, posts = null) => pendingReplies(topicId, posts),
       markDigestRead: (topicId = api.page.id, posts = []) => markDigestRead(topicId, posts),
       trackingState: (topicId = api.page.id) => loadTrackingState(topicId),
+      trackingTopicCatalog,
+      normalizeConsolePlan,
+      consolePlanVersion: CONSOLE_PLAN_VERSION,
+      executeConsolePlan,
       createTrackingIssue,
       archiveTrackingItems,
       restoreTrackingItems,
