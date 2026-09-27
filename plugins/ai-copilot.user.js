@@ -225,6 +225,7 @@
     const provider = api.plugin('ai-summary')
     let running = null
     const downloadUrls = new Set()
+    const importOwnerToken = {}
     api.on('config:changed:ai-copilot', () => {
       cfg = api.config()
     })
@@ -1040,6 +1041,155 @@
       } catch (error) {
         api.log('追踪导出下载失败', error)
         return false
+      }
+    }
+
+    function invalidTrackingImport(topicId, reason, rejected = []) {
+      return {
+        valid: false,
+        owner: importOwnerToken,
+        topicId: asNumber(topicId, topicId),
+        incoming: null,
+        summary: { added: 0, updated: 0, evidenceMerged: 0, conflicts: 0, skipped: rejected.length },
+        conflicts: [],
+        rejected,
+        reason: String(reason || '导入文件无效'),
+      }
+    }
+
+    function mergeImportedTracking(topicId, incomingTracking) {
+      const local = loadTrackingState(topicId)
+      const incomingItems = Array.isArray(incomingTracking?.items) ? incomingTracking.items.map(normalizeTrackingIssue).filter(Boolean) : []
+      const localById = new Map(local.items.map((item) => [item.id, item]))
+      const items = [...local.items]
+      const conflicts = []
+      let added = 0
+      let updated = 0
+      let evidenceMerged = 0
+      for (const incoming of incomingItems) {
+        const current = localById.get(incoming.id)
+        if (!current) {
+          items.push(incoming)
+          added += 1
+          continue
+        }
+        const currentKeys = new Set([...current.evidence, ...current.pendingEvidence].map((row) => row.key))
+        const evidence = dedupeEvidence([...current.evidence, ...incoming.evidence])
+        const pendingEvidence = dedupeEvidence([...current.pendingEvidence, ...incoming.pendingEvidence]).filter(
+          (row) => !evidence.some((known) => known.key === row.key),
+        )
+        evidenceMerged += [...evidence, ...pendingEvidence].filter((row) => !currentKeys.has(row.key)).length
+        const incomingNewer = incoming.updatedAt > current.updatedAt
+        if (incoming.status !== current.status || Boolean(incoming.archivedAt) !== Boolean(current.archivedAt)) {
+          conflicts.push({
+            issueId: current.id,
+            localStatus: current.status,
+            incomingStatus: incoming.status,
+            localArchived: Boolean(current.archivedAt),
+            incomingArchived: Boolean(incoming.archivedAt),
+            winner: incomingNewer ? 'incoming' : 'local',
+          })
+        }
+        const winner = incomingNewer ? incoming : current
+        const history = normalizeTrackingHistory(
+          [...(current.history || []), ...(incoming.history || [])].filter((row, index, rows) => {
+            const key = JSON.stringify(row)
+            return rows.findIndex((candidate) => JSON.stringify(candidate) === key) === index
+          }),
+          winner,
+        )
+        const merged = {
+          ...winner,
+          evidence,
+          pendingEvidence,
+          history,
+          updatedAt: Math.max(current.updatedAt, incoming.updatedAt),
+        }
+        items.splice(items.findIndex((item) => item.id === current.id), 1, merged)
+        updated += 1
+      }
+      const seenKeys = new Set(local.scan.seenKeys)
+      for (const item of items) {
+        for (const row of [...item.evidence, ...item.pendingEvidence]) seenKeys.add(row.key)
+      }
+      const nextState = {
+        ...local,
+        version: TRACKING_VERSION,
+        topicId: asNumber(topicId, topicId),
+        scan: {
+          ...local.scan,
+          seenKeys: [...seenKeys].slice(-TRACKING_MAX_SEEN),
+        },
+        items,
+        unsupportedVersion: '',
+      }
+      return {
+        state: nextState,
+        summary: { added, updated, evidenceMerged, conflicts: conflicts.length, skipped: 0 },
+        conflicts,
+      }
+    }
+
+    function previewTrackingImport(topicId = api.page.id, text) {
+      const source = String(text == null ? '' : text)
+      let bytes = 0
+      try {
+        bytes = new Blob([source]).size
+      } catch {
+        bytes = source.length * 2
+      }
+      if (bytes > 5 * 1024 * 1024) return invalidTrackingImport(topicId, '导入文件超过 5 MB')
+      let parsed
+      try {
+        parsed = JSON.parse(source)
+      } catch {
+        return invalidTrackingImport(topicId, '导入文件不是有效 JSON')
+      }
+      if (!parsed || typeof parsed !== 'object') return invalidTrackingImport(topicId, '导入文件必须是对象')
+      if (parsed.schema !== 'lsb-ai-copilot-tracking-export' || asNumber(parsed.version, 0) !== 1) {
+        return invalidTrackingImport(topicId, '不支持的追踪导出协议')
+      }
+      if (asNumber(parsed.topic?.id, 0) !== asNumber(topicId, 0)) return invalidTrackingImport(topicId, '导入文件属于其他主题')
+      if (!parsed.tracking || String(parsed.tracking.version || '') !== TRACKING_VERSION) {
+        return invalidTrackingImport(topicId, '不支持的追踪存储版本')
+      }
+      const rawItems = Array.isArray(parsed.tracking.items) ? parsed.tracking.items : []
+      const rejected = []
+      const normalizedItems = []
+      rawItems.forEach((item, index) => {
+        const normalized = normalizeTrackingIssue(item)
+        if (!normalized) rejected.push({ index, reason: '追踪项缺少有效问题文本' })
+        else normalizedItems.push(normalized)
+      })
+      const incoming = {
+        ...parsed.tracking,
+        version: TRACKING_VERSION,
+        topicId: asNumber(topicId, topicId),
+        items: normalizedItems,
+      }
+      const merged = mergeImportedTracking(topicId, incoming)
+      return {
+        valid: true,
+        owner: importOwnerToken,
+        topicId: asNumber(topicId, topicId),
+        incoming: { ...parsed, tracking: incoming },
+        summary: { ...merged.summary, skipped: rejected.length },
+        conflicts: merged.conflicts,
+        rejected,
+      }
+    }
+
+    function applyTrackingImport(topicId = api.page.id, preview) {
+      if (!preview?.valid || preview.owner !== importOwnerToken || asNumber(preview.topicId, 0) !== asNumber(topicId, 0)) {
+        throw new Error('导入预览已失效，请重新选择文件')
+      }
+      const merged = mergeImportedTracking(topicId, preview.incoming.tracking)
+      const saved = saveTrackingState(topicId, merged.state)
+      return {
+        ...merged.summary,
+        conflicts: merged.conflicts.length,
+        skipped: preview.rejected?.length || 0,
+        state: saved,
       }
     }
 
@@ -2016,6 +2166,8 @@
       acceptTrackingSuggestions,
       trackingExport,
       serializeTracking,
+      previewTrackingImport,
+      applyTrackingImport,
       parseUnresolvedIssues,
       trackingVersion: TRACKING_VERSION,
       mergeTrackingEvidence,

@@ -767,3 +767,42 @@ test('M3.1 导出：CSV 正确转义引号、逗号和换行，不泄露配置',
   assert.match(csv, /""引号/)
   assert.doesNotMatch(csv, /apiKey|api\.example\.com/)
 })
+
+test('M3.1 导入：预览不写入，确认后合并证据并保留本地较新状态', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const local = dbg.createTrackingIssue(1, { question: '问题', floors: [12], excerpt: '本地' })
+  const incoming = {
+    schema: 'lsb-ai-copilot-tracking-export', version: 1,
+    topic: { id: 1, title: '当前主题', forumName: '版块' },
+    tracking: {
+      version: '2', topicId: 1, scan: { seenKeys: ['id:999'], lastFloor: 999 },
+      items: [{ ...local, status: '可能已解决', updatedAt: 1,
+        evidence: [...local.evidence, { key: 'id:9001', postId: 9001, floor: 51, excerpt: '导入证据' }] }],
+    },
+  }
+  const before = dbg.trackingState(1)
+  const preview = dbg.previewTrackingImport(1, JSON.stringify(incoming))
+  assert.equal(preview.valid, true)
+  assert.equal(dbg.trackingState(1).items[0].evidence.length, before.items[0].evidence.length)
+  const result = dbg.applyTrackingImport(1, preview)
+  assert.equal(result.evidenceMerged, 1)
+  assert.equal(dbg.trackingState(1).items[0].status, '待验证')
+  assert.equal(dbg.trackingState(1).scan.lastFloor, before.scan.lastFloor)
+  assert.deepEqual(Array.from(dbg.trackingState(1).items[0].evidence.map((row) => row.key)), ['floor:12', 'id:9001'])
+})
+
+test('M3.1 导入：跨主题、坏 JSON、超大文件和非法协议不写入', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const invalid = [
+    '{坏 JSON',
+    JSON.stringify({ schema: 'other', version: 1 }),
+    JSON.stringify({ schema: 'lsb-ai-copilot-tracking-export', version: 1, topic: { id: 2 }, tracking: {} }),
+    'x'.repeat(5 * 1024 * 1024 + 1),
+  ]
+  for (const text of invalid) {
+    assert.equal(dbg.previewTrackingImport(1, text).valid, false)
+    assert.equal(dbg.trackingState(1).items.length, 0)
+  }
+})
