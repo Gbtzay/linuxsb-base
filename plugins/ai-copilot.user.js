@@ -39,10 +39,11 @@
   const CITATION_VERSION = '2'
   const ANALYSIS_VERSION = '2'
   const DIGEST_MAX_PENDING = 100
-  const TRACKING_VERSION = '1'
+  const TRACKING_VERSION = '2'
   const TRACKING_MAX_ITEMS = 50
   const TRACKING_MAX_EVIDENCE = 100
   const TRACKING_MAX_SEEN = 2000
+  const TRACKING_MAX_HISTORY = 100
   const TRACKING_STATES = ['待验证', '有新证据', '可能已解决', '已确认解决', '仍未解决']
   const REVIEW_STATES = ['待验证', '有新证据', '可能已解决', '仍未解决']
   const ANALYZE_PRESETS = {
@@ -326,12 +327,50 @@
       return `track:${topicId}`
     }
 
-    function emptyTrackingState(topicId) {
+    function emptyTrackingState(topicId, unsupportedVersion = '') {
       return {
         version: TRACKING_VERSION,
         topicId: asNumber(topicId, topicId),
         scan: { seenKeys: [], lastFloor: 0, ts: 0 },
         items: [],
+        unsupportedVersion: String(unsupportedVersion || ''),
+      }
+    }
+
+    function normalizeTrackingHistory(rows, fallback = null) {
+      const normalized = (Array.isArray(rows) ? rows : [])
+        .filter((row) => row && typeof row === 'object')
+        .map((row) => ({
+          type: String(row.type || 'unknown').slice(0, 40),
+          status: TRACKING_STATES.includes(row.status) ? row.status : '',
+          evidenceKeys: Array.isArray(row.evidenceKeys)
+            ? row.evidenceKeys.map((key) => String(key)).filter(Boolean).slice(-TRACKING_MAX_EVIDENCE)
+            : [],
+          ts: Math.max(0, asNumber(row.ts, 0)),
+        }))
+        .slice(-TRACKING_MAX_HISTORY)
+      if (normalized.length || !fallback) return normalized
+      return [{
+        type: 'created',
+        status: TRACKING_STATES.includes(fallback.status) ? fallback.status : '待验证',
+        evidenceKeys: [],
+        ts: Math.max(0, asNumber(fallback.createdAt || fallback.updatedAt, 0)),
+      }]
+    }
+
+    function trackingEvent(type, item, patch = {}) {
+      return {
+        type: String(type || 'unknown').slice(0, 40),
+        status: TRACKING_STATES.includes(patch.status || item?.status) ? patch.status || item.status : '',
+        evidenceKeys: Array.isArray(patch.evidenceKeys) ? patch.evidenceKeys.map(String).filter(Boolean).slice(-TRACKING_MAX_EVIDENCE) : [],
+        ts: Date.now(),
+      }
+    }
+
+    function appendTrackingEvent(item, type, patch = {}) {
+      return {
+        ...item,
+        history: normalizeTrackingHistory([...(item?.history || []), trackingEvent(type, item, patch)]),
       }
     }
 
@@ -421,13 +460,17 @@
         suggestion: normalizeTrackingSuggestion(raw.suggestion),
         createdAt: Math.max(0, asNumber(raw.createdAt, 0)),
         updatedAt: Math.max(0, asNumber(raw.updatedAt, 0)),
+        archivedAt: Math.max(0, asNumber(raw.archivedAt, 0)),
+        history: normalizeTrackingHistory(raw.history, raw),
       }
     }
 
     function loadTrackingState(topicId) {
       const empty = emptyTrackingState(topicId)
       const raw = api.store.get(trackingKey(topicId), null)
-      if (!raw || typeof raw !== 'object' || raw.version !== TRACKING_VERSION) return empty
+      if (!raw || typeof raw !== 'object') return empty
+      const rawVersion = String(raw.version || '')
+      if (rawVersion !== TRACKING_VERSION && rawVersion !== '1') return emptyTrackingState(topicId, rawVersion)
       const items = []
       const seenItems = new Set()
       for (const item of Array.isArray(raw.items) ? raw.items : []) {
@@ -445,6 +488,7 @@
           ts: Math.max(0, asNumber(raw.scan?.ts, 0)),
         },
         items: items.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, TRACKING_MAX_ITEMS),
+        unsupportedVersion: '',
       }
     }
 
@@ -463,6 +507,7 @@
           .filter(Boolean)
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .slice(0, TRACKING_MAX_ITEMS),
+        unsupportedVersion: '',
       }
       api.store.set(trackingKey(topicId), next)
       return loadTrackingState(topicId)
@@ -494,7 +539,7 @@
         )
       }).filter(Boolean)
       const now = Date.now()
-      const item = {
+      const item = appendTrackingEvent({
         id,
         title: String(seed.title || '').trim(),
         question,
@@ -511,7 +556,9 @@
         suggestion: null,
         createdAt: now,
         updatedAt: now,
-      }
+        archivedAt: 0,
+        history: [],
+      }, 'created')
       const visiblePosts = asNumber(topicId, 0) === asNumber(api.page.id, 0) ? currentPosts() : []
       const next = {
         ...state,
@@ -584,6 +631,7 @@
 
     function mergeTrackingEvidence(topicId, posts) {
       const state = loadTrackingState(topicId)
+      if (state.unsupportedVersion) return state
       const seenKeys = new Set(state.scan.seenKeys)
       const added = []
       for (const raw of posts || []) {
@@ -595,6 +643,7 @@
       if (!added.length) return state
       const now = Date.now()
       const items = state.items.map((item) => {
+        if (item.archivedAt) return item
         const existingKeys = new Set([...item.evidence, ...item.pendingEvidence].map((row) => row.key))
         const pending = [...item.pendingEvidence]
         for (const row of added) {
@@ -604,12 +653,12 @@
           }
         }
         if (pending.length === item.pendingEvidence.length) return item
-        return {
+        return appendTrackingEvent({
           ...item,
           status: item.status === '已确认解决' ? item.status : '有新证据',
           pendingEvidence: pending.slice(-TRACKING_MAX_EVIDENCE),
           updatedAt: now,
-        }
+        }, 'evidence-added', { evidenceKeys: added.map((row) => row.key) })
       })
       return saveTrackingState(topicId, {
         ...state,
@@ -623,8 +672,10 @@
     }
 
     async function scanTrackingContext(topicId = api.page.id) {
+      const existing = loadTrackingState(topicId)
+      if (existing.unsupportedVersion) throw new Error('追踪数据版本不兼容，请重新建立追踪项')
       const context = await collectContext({ fetchAll: true, maxPages: cfg.maxPages })
-      const before = loadTrackingState(topicId)
+      const before = existing
       const beforeKeys = new Set(before.scan.seenKeys)
       const added = context.posts.filter((post) => !beforeKeys.has(postKey(normalizePost(post))))
       let state = mergeTrackingEvidence(topicId, added)
@@ -641,7 +692,7 @@
     }
 
     function pendingTracking(topicId = api.page.id) {
-      return loadTrackingState(topicId).items.filter((item) => item.pendingEvidence.length)
+      return loadTrackingState(topicId).items.filter((item) => !item.archivedAt && item.pendingEvidence.length)
     }
 
     function trackingEvidencePosts(item) {
@@ -712,7 +763,7 @@
       const state = loadTrackingState(topicId)
       const items = state.items.map((item) =>
         item.id === String(issueId)
-          ? { ...item, suggestion, updatedAt: Date.now() }
+          ? appendTrackingEvent({ ...item, suggestion, updatedAt: Date.now() }, 'suggestion-created')
           : item,
       )
       return saveTrackingState(topicId, { ...state, items })
@@ -721,6 +772,7 @@
     async function reviewTrackingIssue(topicId = api.page.id, issueId, options = {}) {
       const issue = trackingItem(topicId, issueId)
       if (!issue) throw new Error('追踪问题不存在')
+      if (issue.archivedAt) throw new Error('已归档的追踪项不能复核')
       if (!issue.pendingEvidence.length) throw new Error('当前没有待复核的新证据')
       const record = await run('track-review', {
         ...options,
@@ -740,20 +792,21 @@
       const id = String(issueId || '')
       const issue = state.items.find((item) => item.id === id)
       if (!issue) throw new Error('追踪问题不存在')
+      if (issue.archivedAt) throw new Error('已归档的追踪项不能接受建议')
       const suggestion = issue.suggestion
       if (!suggestion?.valid || !REVIEW_STATES.includes(suggestion.status)) {
         throw new Error('当前没有可接受的有效建议')
       }
       const next = state.items.map((item) => {
         if (item.id !== id) return item
-        return {
+        return appendTrackingEvent({
           ...item,
           status: suggestion.status,
           evidence: dedupeEvidence([...item.evidence, ...item.pendingEvidence.map((row) => ({ ...row, kind: 'reviewed' }))]),
           pendingEvidence: [],
           suggestion: null,
           updatedAt: Date.now(),
-        }
+        }, 'suggestion-accepted', { evidenceKeys: item.pendingEvidence.map((row) => row.key) })
       })
       return saveTrackingState(topicId, { ...state, items: next }).items.find((item) => item.id === id)
     }
@@ -763,7 +816,9 @@
       const id = String(issueId || '')
       const issue = state.items.find((item) => item.id === id)
       if (!issue) throw new Error('追踪问题不存在')
-      const next = state.items.map((item) => (item.id === id ? { ...item, suggestion: null, updatedAt: Date.now() } : item))
+      const next = state.items.map((item) =>
+        item.id === id ? appendTrackingEvent({ ...item, suggestion: null, updatedAt: Date.now() }, 'suggestion-dismissed') : item,
+      )
       return saveTrackingState(topicId, { ...state, items: next }).items.find((item) => item.id === id)
     }
 
@@ -774,10 +829,56 @@
       if (!issue) throw new Error('追踪问题不存在')
       const next = state.items.map((item) =>
         item.id === id
-          ? { ...item, status: '已确认解决', pendingEvidence: [], suggestion: null, updatedAt: Date.now() }
+          ? appendTrackingEvent({ ...item, status: '已确认解决', pendingEvidence: [], suggestion: null, updatedAt: Date.now() }, 'confirmed')
           : item,
       )
       return saveTrackingState(topicId, { ...state, items: next }).items.find((item) => item.id === id)
+    }
+
+    function archiveTrackingItems(topicId = api.page.id, issueIds = []) {
+      const ids = new Set((Array.isArray(issueIds) ? issueIds : [issueIds]).map((id) => String(id || '')).filter(Boolean))
+      const state = loadTrackingState(topicId)
+      const now = Date.now()
+      const next = state.items.map((item) => {
+        if (!ids.has(item.id) || item.archivedAt) return item
+        return appendTrackingEvent({ ...item, archivedAt: now, updatedAt: now }, 'archived')
+      })
+      return saveTrackingState(topicId, { ...state, items: next }).items.filter((item) => ids.has(item.id))
+    }
+
+    function restoreTrackingItems(topicId = api.page.id, issueIds = []) {
+      const ids = new Set((Array.isArray(issueIds) ? issueIds : [issueIds]).map((id) => String(id || '')).filter(Boolean))
+      const state = loadTrackingState(topicId)
+      const now = Date.now()
+      const next = state.items.map((item) => {
+        if (!ids.has(item.id) || !item.archivedAt) return item
+        return appendTrackingEvent({ ...item, archivedAt: 0, updatedAt: now }, 'restored')
+      })
+      return saveTrackingState(topicId, { ...state, items: next }).items.filter((item) => ids.has(item.id))
+    }
+
+    function acceptTrackingSuggestions(topicId = api.page.id, issueIds = []) {
+      const ids = new Set((Array.isArray(issueIds) ? issueIds : [issueIds]).map((id) => String(id || '')).filter(Boolean))
+      const state = loadTrackingState(topicId)
+      const skipped = []
+      const next = state.items.map((item) => {
+        if (!ids.has(item.id)) return item
+        const suggestion = item.suggestion
+        if (item.archivedAt || !suggestion?.valid || !REVIEW_STATES.includes(suggestion.status)) {
+          skipped.push(item.id)
+          return item
+        }
+        return appendTrackingEvent({
+          ...item,
+          status: suggestion.status,
+          evidence: dedupeEvidence([...item.evidence, ...item.pendingEvidence.map((row) => ({ ...row, kind: 'reviewed' }))]),
+          pendingEvidence: [],
+          suggestion: null,
+          updatedAt: Date.now(),
+        }, 'suggestion-accepted', { evidenceKeys: item.pendingEvidence.map((row) => row.key) })
+      })
+      const saved = saveTrackingState(topicId, { ...state, items: next })
+      return { items: saved.items.filter((item) => ids.has(item.id)), skipped }
     }
 
     function mergeDigestPosts(state, posts) {
@@ -1080,6 +1181,7 @@
     function syncTrackingRoute() {
       if (api.page.type !== 'topic' || api.page.id == null) return
       const state = loadTrackingState(api.page.id)
+      if (state.unsupportedVersion) return
       if (state.scan.ts) return
       const posts = currentPosts()
       saveTrackingState(api.page.id, {
@@ -1271,7 +1373,13 @@
 
       const list = document.createElement('div')
       list.className = 'lsb-copilot-track-list'
-      if (!state.items.length) {
+      if (state.unsupportedVersion) {
+        const incompatible = document.createElement('div')
+        incompatible.className = 'lsb-empty'
+        incompatible.setAttribute('data-track-unsupported', state.unsupportedVersion)
+        incompatible.textContent = `追踪数据版本不兼容（${state.unsupportedVersion}），请重新建立追踪项。`
+        list.appendChild(incompatible)
+      } else if (!state.items.length) {
         const empty = document.createElement('div')
         empty.className = 'lsb-empty'
         empty.setAttribute('data-track-empty', '')
@@ -1741,6 +1849,9 @@
       markDigestRead: (topicId = api.page.id, posts = []) => markDigestRead(topicId, posts),
       trackingState: (topicId = api.page.id) => loadTrackingState(topicId),
       createTrackingIssue,
+      archiveTrackingItems,
+      restoreTrackingItems,
+      acceptTrackingSuggestions,
       parseUnresolvedIssues,
       trackingVersion: TRACKING_VERSION,
       mergeTrackingEvidence,

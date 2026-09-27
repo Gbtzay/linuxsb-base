@@ -564,7 +564,7 @@ test('M3 复核：请求隔离追踪问题和新证据，禁止模型设置已�
   assert.match(req.user, /<tracked-evidence>/)
   assert.match(req.user, /<new-evidence>/)
   assert.match(req.system, /已确认解决.*用户|不得.*已确认解决/)
-  assert.equal(req.meta.trackingVersion, '1')
+  assert.equal(req.meta.trackingVersion, '2')
 })
 
 test('M3 复核：合法建议待确认，接受后才更新状态；非法建议不提供接受动作', async () => {
@@ -694,4 +694,50 @@ test('M3 解析：只接受有问题文本和本地楼层的固定问题块', as
   assert.equal(out.length, 1)
   assert.equal(out[0].question, '缓存是否会过期？')
   assert.deepEqual(Array.from(out[0].floors), [12])
+})
+
+test('M3.1 状态：v1 追踪项迁移到 v2 且保留问题、证据和建议', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  ctx.w.localStorage.setItem('lsb_base:ai-copilot:track:1', JSON.stringify({
+    version: '1', topicId: 1,
+    scan: { seenKeys: ['id:12'], lastFloor: 12, ts: 10 },
+    items: [{ id: 'issue-old', question: '旧问题', status: '有新证据',
+      source: { floors: [12], excerpt: '旧依据' },
+      evidence: [{ key: 'id:12', postId: 12, floor: 12, excerpt: '旧证据' }],
+      pendingEvidence: [], suggestion: null, createdAt: 10, updatedAt: 20 }],
+  }))
+  const dbg = await load(ctx)
+  const state = dbg.trackingState(1)
+  assert.equal(dbg.trackingVersion, '2')
+  assert.equal(state.version, '2')
+  assert.equal(state.items[0].archivedAt, 0)
+  assert.deepEqual(Array.from(state.items[0].evidence.map((row) => row.key)), ['id:12'])
+})
+
+test('M3.1 生命周期：归档停止收集，恢复后继续收集新证据', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const issue = dbg.createTrackingIssue(1, { question: '问题', floors: [12], excerpt: '依据' })
+  dbg.archiveTrackingItems(1, [issue.id])
+  ctx.w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, content: '归档期间证据' }])
+  assert.equal(dbg.trackingState(1).items[0].pendingEvidence.length, 0)
+  dbg.restoreTrackingItems(1, [issue.id])
+  ctx.w.LSB.bus.emit('topic:posts-added', [{ postId: 9002, floor: 52, content: '恢复后证据' }])
+  const current = dbg.trackingState(1).items[0]
+  assert.deepEqual(Array.from(current.pendingEvidence.map((row) => row.floor)), [52])
+  assert.ok(current.history.some((row) => row.type === 'archived'))
+  assert.ok(current.history.some((row) => row.type === 'restored'))
+})
+
+test('M3.1 状态：未知追踪版本不被覆盖并显示重新建立提示', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  ctx.w.localStorage.setItem('lsb_base:ai-copilot:track:1', JSON.stringify({ version: '99', topicId: 1, items: [{ question: '不要丢失' }] }))
+  const dbg = await load(ctx)
+  assert.equal(dbg.trackingState(1).items.length, 0)
+  assert.equal(dbg.trackingState(1).unsupportedVersion, '99')
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => /重新建立追踪项/.test(panel.textContent)), panel.textContent)
+  assert.match(ctx.w.localStorage.getItem('lsb_base:ai-copilot:track:1'), /"version":"99"/)
 })
