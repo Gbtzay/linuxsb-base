@@ -382,6 +382,37 @@ test('路由：旧主题请求完成后不覆盖新主题面板', async () => {
   assert.equal(ctx.w.document.querySelector('.lsb-copilot-result'), null)
 })
 
+test('路由：旧主题追踪重扫完成后不覆盖新主题面板', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const issue = dbg.createTrackingIssue(1, { title: '旧问题', question: '旧主题问题', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  ctx.w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, authorName: '新用户', content: '旧主题新证据', ts: 1 }], { source: 'test', raw: true })
+  const originalFetch = ctx.w.fetch
+  let release
+  let resolveStarted
+  const started = new Promise((resolve) => (resolveStarted = resolve))
+  const held = new Promise((resolve) => (release = resolve))
+  ctx.w.fetch = async (url, init = {}) => {
+    if (/\/topic\/1\?p=2/.test(String(url))) {
+      resolveStarted()
+      await held
+    }
+    return originalFetch(url, init)
+  }
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  await started
+  ctx.w.history.pushState({}, '', 'https://linux.sb/topic/2')
+  ctx.w.dispatchEvent(new ctx.w.PopStateEvent('popstate'))
+  await until(() => dbg.state().topicId === 2)
+  release()
+  await sleep(120)
+  assert.equal(ctx.w.document.querySelector('.lsb-copilot-panel'), null)
+  assert.equal(ctx.w.document.querySelector('[data-track-card]'), null)
+  assert.notEqual(issue.id, '')
+})
+
 test('M2 提示词：观点分歧包含观点字段、引用和未知项约束', async () => {
   const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
   const dbg = await load(ctx)
@@ -588,6 +619,42 @@ test('M3 复核：相同候选复用缓存，强制复核才再次请求；失�
   bad.w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, authorName: '新用户', content: '缓存已清理', ts: 1 }], { source: 'test', raw: true })
   await assert.rejects(() => badDbg.reviewTrackingIssue(1, badIssue.id))
   assert.equal(badDbg.trackingState(1).items[0].pendingEvidence.length, 1)
+})
+
+test('M3 UI：追踪页显式重扫不把历史楼层列为新证据，并可接受建议', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: {
+      choices: [{
+        message: {
+          content: '## 追踪复核\n- 状态建议：可能已解决\n- 判断依据：新回复说明缓存已清理 [#51]\n- 新增证据：[#51]\n- 仍需确认：复现条件',
+        },
+      }],
+    },
+  })
+  const dbg = await load(ctx)
+  const issue = dbg.createTrackingIssue(1, { title: '缓存', question: '缓存是否会过期？', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  ctx.w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, authorName: '新用户', content: '缓存已清理', ts: 1 }], { source: 'test', raw: true })
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-card]')))
+  assert.ok(await until(() => !panel.querySelector('[data-track-scan-status]')?.textContent.includes('重扫中')))
+  assert.match(panel.textContent, /有新证据/)
+  assert.deepEqual(Array.from(dbg.trackingState(1).items[0].pendingEvidence.map((item) => item.floor)), [51])
+
+  panel.querySelector('[data-track-review]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-accept]')))
+  assert.ok(panel.querySelector('[data-track-dismiss]'))
+  assert.equal(ctx.llmCalls(), 1)
+  panel.querySelector('[data-track-accept]').click()
+  assert.ok(await until(() => dbg.trackingState(1).items[0].status === '可能已解决'))
+  assert.equal(dbg.trackingState(1).items[0].pendingEvidence.length, 0)
+
+  panel.querySelector('[data-track-confirm]').click()
+  const confirm = await until(() => ctx.w.document.querySelector('.lsb-panel [data-yes]'))
+  assert.ok(confirm)
+  ctx.w.document.querySelector('.lsb-panel [data-yes]').click()
+  assert.ok(await until(() => dbg.trackingState(1).items[0].status === '已确认解决'))
 })
 
 test('M3 状态：缺失存储返回空集合，保存后按主题隔离', async () => {

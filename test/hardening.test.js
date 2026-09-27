@@ -246,6 +246,90 @@ test('停用清理：AI 副驾面板、等待计时器和在途请求全部收�
   assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '在途请求完成也不能重新挂回面板')
 })
 
+test('停用清理：AI 副驾追踪重扫完成后不再写回面板', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  let release
+  const held = new Promise((resolve) => (release = resolve))
+  let started = false
+  w.fetch = async (url, init = {}) => {
+    if (/\/topic\/1\?p=2/.test(String(url))) {
+      started = true
+      await held
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => topicHtml }
+  }
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  const dbg = await w.LSB.bus.request('ai-copilot:debug')
+  dbg.createTrackingIssue(1, { title: '问题', question: '重扫中的问题', floors: [12], excerpt: '依据' })
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => started), '追踪重扫已开始')
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null)
+  release()
+  await new Promise((r) => setTimeout(r, 120))
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '停用后重扫完成不能重新挂回面板')
+})
+
+test('停用清理：AI 副驾追踪复核完成后不再写回面板', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  let release
+  let started = false
+  const held = new Promise((resolve) => (release = resolve))
+  w.fetch = async (url, init = {}) => {
+    if (!/linux\.sb/.test(String(url))) {
+      started = true
+      await held
+      return {
+        status: 200,
+        ok: true,
+        url: String(url),
+        text: async () => JSON.stringify({ choices: [{ message: { content: '- 状态建议：仍未解决\n- 判断依据：仍缺少信息 [#51]\n- 新增证据：[#51]' } }] }),
+      }
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => topicHtml }
+  }
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  const dbg = await w.LSB.bus.request('ai-copilot:debug')
+  const issue = dbg.createTrackingIssue(1, { title: '问题', question: '复核中的问题', floors: [12], excerpt: '依据' })
+  w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, authorName: '新用户', content: '新证据', ts: 1 }], { source: 'test', raw: true })
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-review]')), '追踪卡片已显示复核按钮')
+  panel.querySelector('[data-track-review]').click()
+  assert.ok(await until(() => started), '追踪复核已开始')
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null)
+  release()
+  await new Promise((r) => setTimeout(r, 120))
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '停用后复核完成不能重新挂回面板')
+  assert.equal(dbg.trackingState(1).items[0].id, issue.id)
+})
+
 /* ═══════════ 定点缺陷 ═══════════ */
 
 test('esc 转义反引号（模板/未加引号属性上下文）', async () => {

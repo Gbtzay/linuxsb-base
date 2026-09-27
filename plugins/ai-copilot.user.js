@@ -359,6 +359,30 @@
       return out.sort((a, b) => a.floor - b.floor || a.seenAt - b.seenAt).slice(-limit)
     }
 
+    function normalizeTrackingSuggestion(raw) {
+      if (!raw || typeof raw !== 'object') return null
+      const citations = Array.isArray(raw.citations)
+        ? raw.citations
+            .map((citation) => ({
+              floor: asNumber(citation?.floor, 0),
+              postId: citation?.postId || null,
+              authorName: String(citation?.authorName || '').slice(0, 80),
+              excerpt: String(citation?.excerpt || '').slice(0, 240),
+              known: Boolean(citation?.known),
+            }))
+            .filter((citation) => citation.floor > 0)
+            .slice(-TRACKING_MAX_EVIDENCE)
+        : []
+      return {
+        valid: Boolean(raw.valid),
+        status: String(raw.status || '').slice(0, 40),
+        rationale: String(raw.rationale || '').slice(0, 1200),
+        citations,
+        raw: String(raw.raw || '').slice(0, 12000),
+        ts: Math.max(0, asNumber(raw.ts, 0)),
+      }
+    }
+
     function normalizeTrackingIssue(raw) {
       if (!raw || typeof raw !== 'object') return null
       const question = String(raw.question || '').trim()
@@ -385,7 +409,7 @@
         },
         evidence,
         pendingEvidence,
-        suggestion: raw.suggestion && typeof raw.suggestion === 'object' ? raw.suggestion : null,
+        suggestion: normalizeTrackingSuggestion(raw.suggestion),
         createdAt: Math.max(0, asNumber(raw.createdAt, 0)),
         updatedAt: Math.max(0, asNumber(raw.updatedAt, 0)),
       }
@@ -479,11 +503,18 @@
         createdAt: now,
         updatedAt: now,
       }
+      const visiblePosts = asNumber(topicId, 0) === asNumber(api.page.id, 0) ? currentPosts() : []
       const next = {
         ...state,
         scan: {
           ...state.scan,
-          seenKeys: [...new Set([...state.scan.seenKeys, ...evidence.map((row) => row.key)])].slice(-TRACKING_MAX_SEEN),
+          seenKeys: [
+            ...new Set([
+              ...state.scan.seenKeys,
+              ...visiblePosts.map((post) => postKey(post)),
+              ...evidence.map((row) => row.key),
+            ]),
+          ].slice(-TRACKING_MAX_SEEN),
         },
         items: [...state.items, item],
       }
@@ -586,8 +617,19 @@
       const context = await collectContext({ fetchAll: true, maxPages: cfg.maxPages })
       const before = loadTrackingState(topicId)
       const beforeKeys = new Set(before.scan.seenKeys)
-      const state = mergeTrackingEvidence(topicId, context.posts)
-      const added = context.posts.filter((post) => !beforeKeys.has(postKey(normalizePost(post))))
+      const added = context.posts.filter(
+        (post) => !beforeKeys.has(postKey(normalizePost(post))) && asNumber(post.floor, 0) > before.scan.lastFloor,
+      )
+      let state = mergeTrackingEvidence(topicId, added)
+      const scannedKeys = context.posts.map((post) => postKey(normalizePost(post)))
+      state = saveTrackingState(topicId, {
+        ...state,
+        scan: {
+          seenKeys: [...new Set([...state.scan.seenKeys, ...scannedKeys])].slice(-TRACKING_MAX_SEEN),
+          lastFloor: Math.max(state.scan.lastFloor, highestFloor(context.posts)),
+          ts: Date.now(),
+        },
+      })
       return { context, state, added }
     }
 
@@ -677,7 +719,10 @@
         ...options,
         trackingItem: issue,
       })
-      const suggestion = parseTrackingSuggestion(record.text, trackingEvidencePosts(issue), issue)
+      const suggestion = {
+        ...parseTrackingSuggestion(record.text, trackingEvidencePosts(issue), issue),
+        ts: Date.now(),
+      }
       const saved = saveTrackingSuggestion(topicId, issue.id, suggestion)
       const current = saved.items.find((item) => item.id === issue.id)
       return { ...record, suggestion: current?.suggestion || suggestion }
@@ -1008,6 +1053,8 @@
     let generation = 0
     let disposed = false
     const buttons = new Set()
+    const trackingReviewBusy = new Set()
+    let trackingScanToken = 0
 
     function esc(value) {
       return api.util.esc(String(value ?? ''))
@@ -1021,6 +1068,21 @@
         /* fall through to the boot snapshot */
       }
       return normalizeTopic(api.snapshot?.topic)?.posts || []
+    }
+
+    function syncTrackingRoute() {
+      if (api.page.type !== 'topic' || api.page.id == null) return
+      const state = loadTrackingState(api.page.id)
+      if (state.scan.ts) return
+      const posts = currentPosts()
+      saveTrackingState(api.page.id, {
+        ...state,
+        scan: {
+          seenKeys: [...new Set([...state.scan.seenKeys, ...posts.map((post) => postKey(post))])].slice(-TRACKING_MAX_SEEN),
+          lastFloor: Math.max(state.scan.lastFloor, highestFloor(posts)),
+          ts: Date.now(),
+        },
+      })
     }
 
     function stopWaitClock() {
@@ -1150,6 +1212,207 @@
         api.ui.toast('已把当前楼层设为新起点', { type: 'success' })
         renderDigest(body)
       })
+    }
+
+    function trackingCitationRecords(item, citations, topicId) {
+      const byFloor = new Map(
+        [...(item?.evidence || []), ...(item?.pendingEvidence || [])].map((row) => [asNumber(row.floor, 0), row]),
+      )
+      return (Array.isArray(citations) ? citations : []).map((citation) => {
+        const row = byFloor.get(asNumber(citation?.floor, 0))
+        const postId = citation?.postId || row?.postId || null
+        return {
+          ...citation,
+          authorName: citation?.authorName || row?.authorName || null,
+          excerpt: citation?.excerpt || row?.excerpt || '',
+          href: citation?.known && postId ? `${api.routes.topic(topicId)}?floor=${citation.floor}#post-${postId}` : null,
+          known: Boolean(citation?.known && (postId || row)),
+        }
+      })
+    }
+
+    function renderTrackingList(body, topicId, options = {}) {
+      const state = loadTrackingState(topicId)
+      const scanState = options.scanState || body.getAttribute('data-track-scan-state') || 'ready'
+      const scanError = String(options.scanError || '')
+      body.setAttribute('data-track-scan-state', scanState)
+      body.innerHTML = ''
+
+      const intro = document.createElement('div')
+      intro.className = 'lsb-row-desc'
+      intro.textContent = '只跟踪当前主题。新楼层先进入候选队列，复核结果需要你确认后才会更新状态。'
+      body.appendChild(intro)
+
+      const toolbar = document.createElement('div')
+      toolbar.className = 'lsb-actions'
+      const rescan = document.createElement('button')
+      rescan.className = 'lsb-btn'
+      rescan.setAttribute('data-track-rescan', '')
+      rescan.textContent = scanState === 'scanning' ? '重扫中…' : '重扫当前主题'
+      rescan.disabled = scanState === 'scanning'
+      rescan.onclick = () => renderTrack(body)
+      toolbar.appendChild(rescan)
+      body.appendChild(toolbar)
+
+      const scanStatus = document.createElement('div')
+      scanStatus.className = 'lsb-row-desc lsb-copilot-track-scan'
+      scanStatus.setAttribute('data-track-scan-status', '')
+      if (scanState === 'scanning') scanStatus.textContent = '正在重扫当前主题…'
+      else if (scanState === 'error') scanStatus.textContent = `重扫失败：${scanError || '请稍后重试'}`
+      else scanStatus.textContent = state.scan.ts ? `最近扫描：${new Date(state.scan.ts).toLocaleString()}` : '尚未扫描'
+      body.appendChild(scanStatus)
+
+      const list = document.createElement('div')
+      list.className = 'lsb-copilot-track-list'
+      if (!state.items.length) {
+        const empty = document.createElement('div')
+        empty.className = 'lsb-empty'
+        empty.setAttribute('data-track-empty', '')
+        empty.textContent = '当前主题还没有追踪项。先在“讨论分析 → 未解决问题”中选择“开始追踪”。'
+        list.appendChild(empty)
+      }
+
+      for (const item of state.items) {
+        const card = document.createElement('article')
+        card.className = 'lsb-copilot-track-card'
+        card.setAttribute('data-track-card', '')
+        card.setAttribute('data-track-id', item.id)
+
+        const heading = document.createElement('strong')
+        heading.className = 'lsb-copilot-track-title'
+        heading.textContent = item.title ? `${item.title}：${item.question}` : item.question
+        card.appendChild(heading)
+
+        const status = document.createElement('div')
+        status.className = 'lsb-copilot-track-status'
+        status.setAttribute('data-track-status', item.status)
+        status.textContent = `状态：${item.status}`
+        card.appendChild(status)
+
+        const evidence = document.createElement('div')
+        evidence.className = 'lsb-row-desc'
+        const baseline = item.source.floors.map((floor) => `#${floor}`).join('、') || '无'
+        evidence.textContent = `基线楼层：${baseline} · 待复核 ${item.pendingEvidence.length} 条 · 已记录 ${item.evidence.length} 条`
+        card.appendChild(evidence)
+
+        if (item.suggestion) {
+          const suggestion = document.createElement('div')
+          suggestion.className = 'lsb-copilot-track-suggestion'
+          suggestion.setAttribute('data-track-suggestion', '')
+          const suggestionTitle = document.createElement('div')
+          suggestionTitle.textContent = item.suggestion.valid
+            ? `模型建议：${item.suggestion.status}`
+            : '模型建议：未验证'
+          suggestion.appendChild(suggestionTitle)
+          if (item.suggestion.rationale) {
+            const rationale = document.createElement('div')
+            rationale.className = 'lsb-row-desc'
+            rationale.textContent = item.suggestion.rationale
+            suggestion.appendChild(rationale)
+          }
+          renderCitations(suggestion, trackingCitationRecords(item, item.suggestion.citations, topicId))
+          if (item.suggestion.valid) {
+            const actions = document.createElement('div')
+            actions.className = 'lsb-actions'
+            const accept = document.createElement('button')
+            accept.className = 'lsb-btn is-primary'
+            accept.setAttribute('data-track-accept', '')
+            accept.textContent = '接受建议'
+            accept.onclick = () => {
+              try {
+                acceptTrackingSuggestion(topicId, item.id)
+                renderTrackingList(body, topicId)
+              } catch (error) {
+                api.ui.toast(String(error?.message || error), { type: 'error' })
+              }
+            }
+            const dismiss = document.createElement('button')
+            dismiss.className = 'lsb-btn'
+            dismiss.setAttribute('data-track-dismiss', '')
+            dismiss.textContent = '驳回建议'
+            dismiss.onclick = () => {
+              try {
+                dismissTrackingSuggestion(topicId, item.id)
+                renderTrackingList(body, topicId)
+              } catch (error) {
+                api.ui.toast(String(error?.message || error), { type: 'error' })
+              }
+            }
+            actions.append(accept, dismiss)
+            suggestion.appendChild(actions)
+          }
+          card.appendChild(suggestion)
+        }
+
+        const actions = document.createElement('div')
+        actions.className = 'lsb-actions'
+        const busyKey = `${topicId}:${item.id}`
+        if (item.pendingEvidence.length) {
+          const review = document.createElement('button')
+          review.className = 'lsb-btn is-primary'
+          review.setAttribute('data-track-review', '')
+          review.textContent = trackingReviewBusy.has(busyKey) ? '复核中…' : item.suggestion ? '再次复核新证据' : '复核新证据'
+          review.disabled = trackingReviewBusy.has(busyKey)
+          review.onclick = () => {
+            if (trackingReviewBusy.has(busyKey)) return
+            trackingReviewBusy.add(busyKey)
+            renderTrackingList(body, topicId)
+            void reviewTrackingIssue(topicId, item.id)
+              .then(() => {
+                trackingReviewBusy.delete(busyKey)
+                if (!disposed && generation === Number(body.getAttribute('data-track-generation')) && body.isConnected) {
+                  renderTrackingList(body, topicId)
+                }
+              })
+              .catch((error) => {
+                trackingReviewBusy.delete(busyKey)
+                if (!disposed && generation === Number(body.getAttribute('data-track-generation')) && body.isConnected) {
+                  api.ui.toast(String(error?.message || error), { type: 'error', title: '追踪复核失败' })
+                  renderTrackingList(body, topicId)
+                }
+              })
+          }
+          actions.appendChild(review)
+        }
+
+        const confirm = document.createElement('button')
+        confirm.className = 'lsb-btn'
+        confirm.setAttribute('data-track-confirm', '')
+        confirm.textContent = item.status === '已确认解决' ? '已确认解决' : '标为已确认解决'
+        confirm.disabled = item.status === '已确认解决'
+        confirm.onclick = () => {
+          void api.ui.confirm('确认把这个问题标为已确认解决？').then((ok) => {
+            if (!ok || disposed || generation !== Number(body.getAttribute('data-track-generation')) || !body.isConnected) return
+            try {
+              confirmTrackingIssue(topicId, item.id)
+              renderTrackingList(body, topicId)
+            } catch (error) {
+              api.ui.toast(String(error?.message || error), { type: 'error' })
+            }
+          })
+        }
+        actions.appendChild(confirm)
+        card.appendChild(actions)
+        list.appendChild(card)
+      }
+      body.appendChild(list)
+    }
+
+    function renderTrack(body) {
+      const topicId = api.page.id
+      const routeGeneration = generation
+      const token = ++trackingScanToken
+      body.setAttribute('data-track-generation', String(routeGeneration))
+      renderTrackingList(body, topicId, { scanState: 'scanning' })
+      void scanTrackingContext(topicId)
+        .then(() => {
+          if (disposed || token !== trackingScanToken || routeGeneration !== generation || api.page.id !== topicId || !body.isConnected) return
+          renderTrackingList(body, topicId, { scanState: 'ready' })
+        })
+        .catch((error) => {
+          if (disposed || token !== trackingScanToken || routeGeneration !== generation || api.page.id !== topicId || !body.isConnected) return
+          renderTrackingList(body, topicId, { scanState: 'error', scanError: String(error?.message || error) })
+        })
     }
 
     function renderDraft(body) {
@@ -1400,6 +1663,7 @@
     }
 
     syncDigestRoute()
+    syncTrackingRoute()
     api.dom.each('li.post-entry', injectOpButton)
     syncTopLink()
     api.on('topic:posts-added', (posts) => {
@@ -1407,12 +1671,18 @@
       pendingReplies(api.page.id, posts)
       mergeTrackingEvidence(api.page.id, posts)
       if (panel && currentMode === 'digest' && !running) renderMode('digest')
+      if (panel && currentMode === 'track' && !running) {
+        const body = panel.querySelector('[data-body]')
+        if (body) renderTrackingList(body, api.page.id)
+      }
     })
     api.on('route:changed', () => {
       generation += 1
+      trackingScanToken += 1
       closePanel()
       buttons.clear()
       syncDigestRoute()
+      syncTrackingRoute()
       if (routeTimer) clearTimeout(routeTimer)
       routeTimer = setTimeout(() => {
         routeTimer = null
@@ -1433,17 +1703,25 @@
         '.lsb-copilot-status{font-weight:600;margin-bottom:8px}' +
         '.lsb-copilot-citations{margin-top:12px;padding-top:8px;border-top:1px solid var(--line-soft,#eee);font-size:12px}' +
         '.lsb-copilot-citation{margin-top:4px;color:var(--text-muted,#777)}' +
-        '.lsb-copilot-citation a{color:var(--brand,#5eaaa0)}',
+        '.lsb-copilot-citation a{color:var(--brand,#5eaaa0)}' +
+        '.lsb-copilot-track-list{max-height:58vh;overflow:auto;margin-top:10px}' +
+        '.lsb-copilot-track-card{border:1px solid var(--line-soft,#eee);border-radius:8px;padding:10px;margin:8px 0;background:var(--panel,#fff)}' +
+        '.lsb-copilot-track-title{display:block;line-height:1.5}' +
+        '.lsb-copilot-track-status{display:inline-block;margin:6px 0;padding:2px 7px;border-radius:999px;background:var(--fill-soft,#f2f4f5);font-size:12px}' +
+        '.lsb-copilot-track-suggestion{margin-top:8px;padding:8px;border-left:3px solid var(--brand,#5eaaa0);background:var(--fill-soft,#f7faf9)}' +
+        '.lsb-copilot-track-suggestion .lsb-actions{margin-top:8px}',
     )
 
     api.onDispose(() => {
       disposed = true
       generation += 1
+      trackingScanToken += 1
       if (routeTimer) clearTimeout(routeTimer)
       routeTimer = null
       closePanel()
       document.querySelector('a.lsb-ai-copilot-top')?.remove()
       buttons.clear()
+      trackingReviewBusy.clear()
       running = null
     })
 
