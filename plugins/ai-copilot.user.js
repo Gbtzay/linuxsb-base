@@ -37,7 +37,7 @@
   const OP_BUDGET_RATIO = 0.5
   const MIN_TOTAL_CHARS = 500
   const CITATION_VERSION = '2'
-  const ANALYSIS_VERSION = '1'
+  const ANALYSIS_VERSION = '2'
   const DIGEST_MAX_PENDING = 100
   const TRACKING_VERSION = '1'
   const TRACKING_MAX_ITEMS = 50
@@ -48,6 +48,17 @@
   const ANALYZE_PRESETS = {
     未解决问题: {
       instruction: '列出仍未得到明确回答的问题，逐项标注相关楼层；无法确认时明确写出未知。',
+      format:
+        '依次输出以下 Markdown 标题和字段：\n' +
+        '## 结论\n' +
+        '## 未解决问题\n' +
+        '### 问题 1：<简短名称>\n' +
+        '- 问题：<完整问题>\n' +
+        '- 相关楼层：[#N]\n' +
+        '- 当前已知：\n' +
+        '- 缺少信息：\n' +
+        '## 无法判断\n' +
+        '完整问题必须至少引用一个材料中真实存在的 [#N]；无法确认时写未知或未验证。',
     },
     观点分歧: {
       instruction: '归纳不同立场、代表楼层、核心理由、支持证据和反驳或限制；不足两种立场时明确写出未形成明确分歧。',
@@ -725,6 +736,7 @@
             ...result.meta,
             title: context.title,
             topicId: context.topicId,
+            analysisFingerprint: mode === 'analyze' ? request.fingerprint : '',
             citations,
             citationCount: citations.length,
             pagesFetched: context.meta.pagesFetched,
@@ -815,6 +827,7 @@
           <button class="lsb-btn ${mode === 'analyze' ? 'is-primary' : ''}" data-mode="analyze">讨论分析</button>
           <button class="lsb-btn ${mode === 'digest' ? 'is-primary' : ''}" data-mode="digest">新回复</button>
           <button class="lsb-btn ${mode === 'draft' ? 'is-primary' : ''}" data-mode="draft">回复草稿</button>
+          <button class="lsb-btn ${mode === 'track' ? 'is-primary' : ''}" data-mode="track">问题追踪</button>
         </div>
         <div class="lsb-view" data-body></div>`
       host.querySelector('[data-close]').onclick = closePanel
@@ -833,6 +846,7 @@
       if (mode === 'analyze') renderAnalyze(body)
       else if (mode === 'draft') renderDraft(body)
       else if (mode === 'digest') renderDigest(body)
+      else if (mode === 'track') renderTrack(body)
       else renderAsk(body)
     }
 
@@ -928,6 +942,51 @@
         })
     }
 
+    function renderIssueActions(host, record) {
+      if (record.meta?.analysisKind !== '未解决问题') return
+      const issues = parseUnresolvedIssues(record.text, record.meta?.citations)
+      if (!issues.length) return
+      const existing = new Set(loadTrackingState(api.page.id).items.map((item) => item.id))
+      const section = document.createElement('div')
+      section.className = 'lsb-copilot-issue-actions'
+      const title = document.createElement('div')
+      title.className = 'lsb-row-desc'
+      title.textContent = '问题追踪'
+      section.appendChild(title)
+      for (const issue of issues) {
+        const row = document.createElement('div')
+        row.className = 'lsb-copilot-issue-action'
+        const label = document.createElement('span')
+        label.textContent = issue.title ? `${issue.title}：${issue.question}` : issue.question
+        const button = document.createElement('button')
+        button.className = 'lsb-btn'
+        button.setAttribute('data-track-issue-id', issue.id)
+        if (existing.has(issue.id)) {
+          button.textContent = '已在追踪'
+          button.disabled = true
+        } else {
+          button.textContent = '开始追踪'
+          button.onclick = () => {
+            try {
+              createTrackingIssue(api.page.id, issue, {
+                analysisVersion: record.meta?.analysisVersion,
+                fingerprint: record.meta?.analysisFingerprint,
+                citations: record.meta?.citations,
+              })
+              button.textContent = '已在追踪'
+              button.disabled = true
+              api.ui.toast('已加入问题追踪', { type: 'success' })
+            } catch (error) {
+              api.ui.toast(String(error?.message || error), { type: 'error' })
+            }
+          }
+        }
+        row.append(label, button)
+        section.appendChild(row)
+      }
+      host.appendChild(section)
+    }
+
     function showWait(status) {
       const body = panelFrame(currentMode)
       waitStarted = Date.now()
@@ -1007,6 +1066,7 @@
         result.textContent = record.text
       }
       renderCitations(body, record.meta?.citations)
+      renderIssueActions(body, record)
       body.querySelector('[data-copy]').onclick = async () => {
         try {
           await navigator.clipboard.writeText(record.text)

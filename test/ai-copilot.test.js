@@ -376,7 +376,7 @@ test('M2 提示词：观点分歧包含观点字段、引用和未知项约束',
   const dbg = await load(ctx)
   const req = dbg.buildRequest('analyze', await dbg.collectContext({}), { preset: '观点分歧' })
   assert.equal(req.meta.analysisKind, '观点分歧')
-  assert.equal(req.meta.analysisVersion, '1')
+  assert.equal(req.meta.analysisVersion, '2')
   assert.match(req.system, /## 主要观点/)
   assert.match(req.system, /反驳或限制/)
   assert.match(req.system, /[#]N/)
@@ -405,8 +405,8 @@ test('M2 缓存：分析预设与分析协议版本参与指纹', async () => {
   const a = dbg.buildRequest('analyze', context, { preset: '观点分歧' })
   const b = dbg.buildRequest('analyze', context, { preset: '方案对比' })
   assert.notEqual(a.fingerprint, b.fingerprint)
-  assert.equal(dbg.analysisVersion, '1')
-  assert.equal(a.meta.analysisVersion, '1')
+  assert.equal(dbg.analysisVersion, '2')
+  assert.equal(a.meta.analysisVersion, '2')
 })
 
 test('M2 记录：保存分析类型、协议版本和引用数量', async () => {
@@ -416,7 +416,7 @@ test('M2 记录：保存分析类型、协议版本和引用数量', async () =>
   const dbg = await load(ctx)
   const record = await dbg.run('analyze', { preset: '观点分歧' })
   assert.equal(record.meta.analysisKind, '观点分歧')
-  assert.equal(record.meta.analysisVersion, '1')
+  assert.equal(record.meta.analysisVersion, '2')
   assert.equal(record.meta.citationCount, 1)
   assert.equal(record.meta.citations[0].floor, 12)
 })
@@ -446,6 +446,38 @@ test('M2 UI：模型未遵循标题格式时仍显示原文和引用', async () 
   const record = await dbg.run('analyze', { preset: '方案对比' })
   assert.match(record.text, /只有一句普通文本/)
   assert.equal(record.meta.citations[0].known, true)
+})
+
+test('M3 协议：未解决问题输出可追踪字段并带分析版本', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const req = dbg.buildRequest('analyze', await dbg.collectContext({}), { preset: '未解决问题' })
+  assert.equal(req.meta.analysisVersion, '2')
+  assert.match(req.system, /## 未解决问题/)
+  assert.match(req.system, /相关楼层|当前已知|缺少信息/)
+  assert.match(req.fingerprint, /.+/)
+})
+
+test('M3 UI：结构化未解决问题结果显示开始追踪并写入本地状态', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: {
+      choices: [{
+        message: {
+          content:
+            '## 未解决问题\n### 问题 1：缓存\n- 问题：缓存是否会过期？\n- 相关楼层：[#12]\n- 当前已知：有缓存\n- 缺少信息：过期策略',
+        },
+      }],
+    },
+  })
+  await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="analyze"]').click()
+  panel.querySelector('[data-preset="未解决问题"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-issue-id]')))
+  panel.querySelector('[data-track-issue-id]').click()
+  const dbg = await ctx.w.LSB.bus.request('ai-copilot:debug')
+  assert.equal(dbg.trackingState(1).items.length, 1)
 })
 
 test('M3 状态：缺失存储返回空集合，保存后按主题隔离', async () => {
