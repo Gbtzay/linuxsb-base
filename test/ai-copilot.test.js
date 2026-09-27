@@ -519,6 +519,77 @@ test('M3 证据：重扫失败不推进水位也不清空候选', async () => {
   assert.equal(dbg.trackingState(1).items[0].pendingEvidence.length, 1)
 })
 
+test('M3 复核：请求隔离追踪问题和新证据，禁止模型设置已确认解决', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  dbg.createTrackingIssue(1, { title: '缓存', question: '缓存是否会过期？', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  ctx.w.LSB.bus.emit(
+    'topic:posts-added',
+    [{ postId: 9001, floor: 51, authorName: '新用户', content: '缓存已清理', ts: 1 }],
+    { source: 'test', raw: true },
+  )
+  const issue = dbg.trackingState(1).items[0]
+  const req = dbg.buildRequest('track-review', await dbg.collectContext({}), { trackingItem: issue })
+  assert.match(req.user, /<tracked-evidence>/)
+  assert.match(req.user, /<new-evidence>/)
+  assert.match(req.system, /已确认解决.*用户|不得.*已确认解决/)
+  assert.equal(req.meta.trackingVersion, '1')
+})
+
+test('M3 复核：合法建议待确认，接受后才更新状态；非法建议不提供接受动作', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: {
+      choices: [{
+        message: {
+          content:
+            '## 追踪复核\n- 状态建议：可能已解决\n- 判断依据：新回复说明已清理 [#51]\n- 新增证据：[#51]\n- 仍需确认：复现条件',
+        },
+      }],
+    },
+  })
+  const dbg = await load(ctx)
+  const issue = dbg.createTrackingIssue(1, { title: '缓存', question: '缓存是否会过期？', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  ctx.w.LSB.bus.emit(
+    'topic:posts-added',
+    [{ postId: 9001, floor: 51, authorName: '新用户', content: '缓存已清理', ts: 1 }],
+    { source: 'test', raw: true },
+  )
+  const record = await dbg.reviewTrackingIssue(1, issue.id)
+  assert.equal(record.suggestion.status, '可能已解决')
+  assert.equal(dbg.trackingState(1).items[0].status, '有新证据')
+  dbg.acceptTrackingSuggestion(1, issue.id)
+  assert.equal(dbg.trackingState(1).items[0].status, '可能已解决')
+  const invalid = dbg.parseTrackingSuggestion('- 状态建议：已确认解决\n- 新增证据：[#51]', [], issue)
+  assert.equal(invalid.valid, false)
+})
+
+test('M3 复核：相同候选复用缓存，强制复核才再次请求；失败保留候选', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: {
+      choices: [{
+        message: {
+          content: '## 追踪复核\n- 状态建议：仍未解决\n- 判断依据：仍缺少复现 [#51]\n- 新增证据：[#51]\n- 仍需确认：复现',
+        },
+      }],
+    },
+  })
+  const dbg = await load(ctx)
+  const issue = dbg.createTrackingIssue(1, { title: '缓存', question: '缓存是否会过期？', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  ctx.w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, authorName: '新用户', content: '缓存已清理', ts: 1 }], { source: 'test', raw: true })
+  await dbg.reviewTrackingIssue(1, issue.id)
+  await dbg.reviewTrackingIssue(1, issue.id)
+  assert.equal(ctx.llmCalls(), 1)
+  await dbg.reviewTrackingIssue(1, issue.id, { force: true })
+  assert.equal(ctx.llmCalls(), 2)
+
+  const bad = makeSite(topicHtml, 'https://linux.sb/topic/1', { _llmReply: { choices: [] } })
+  const badDbg = await load(bad)
+  const badIssue = badDbg.createTrackingIssue(1, { title: '缓存', question: '缓存是否会过期？', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  bad.w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, authorName: '新用户', content: '缓存已清理', ts: 1 }], { source: 'test', raw: true })
+  await assert.rejects(() => badDbg.reviewTrackingIssue(1, badIssue.id))
+  assert.equal(badDbg.trackingState(1).items[0].pendingEvidence.length, 1)
+})
+
 test('M3 状态：缺失存储返回空集合，保存后按主题隔离', async () => {
   const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
   const dbg = await load(ctx)
