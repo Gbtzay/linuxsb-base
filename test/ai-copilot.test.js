@@ -14,8 +14,9 @@ const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 
 const LLM = 'https://api.example.com/v1/chat/completions'
 
 function makeSite(html, url, cfg = {}) {
-  const { _llmReply, ...storeCfg } = cfg
+  const { _llmReply, _llmReplies, ...storeCfg } = cfg
   const reply = _llmReply || { choices: [{ message: { content: '【模型输出】' } }] }
+  const replies = Array.isArray(_llmReplies) && _llmReplies.length ? _llmReplies : [reply]
   const dom = new JSDOM(html, { url, runScripts: 'outside-only' })
   const w = dom.window
   w.unsafeWindow = w
@@ -31,6 +32,7 @@ function makeSite(html, url, cfg = {}) {
     JSON.stringify({ fetchAll: false, maxPages: 15, maxChars: 12000, sessionTurns: 6 }),
   )
   const calls = []
+  let replyIndex = 0
   let hold = null
   const controls = { failTopicPages: false }
   const isLlm = (s) => !/linux\.sb/.test(s)
@@ -39,11 +41,12 @@ function makeSite(html, url, cfg = {}) {
     calls.push({ url: s, method: init.method || 'GET', body: init.body, headers: init.headers || {} })
     if (isLlm(s)) {
       if (hold) await hold
+      const selected = replies[Math.min(replyIndex++, replies.length - 1)]
       return {
         status: 200,
         ok: true,
         url: s,
-        text: async () => JSON.stringify(reply),
+        text: async () => JSON.stringify(selected),
       }
     }
     if (controls.failTopicPages && /\/topic\/[^?]+\?p=/.test(s)) {
@@ -61,6 +64,7 @@ function makeSite(html, url, cfg = {}) {
     calls,
     setCfg,
     llmCalls: () => calls.filter((c) => isLlm(c.url)).length,
+    llmCallsAt: (index) => calls.filter((c) => isLlm(c.url))[index],
     lastLlm: () => calls.filter((c) => isLlm(c.url)).at(-1),
     holdLLM: () => {
       let release
@@ -772,6 +776,64 @@ test('M4 执行器：组合筛选活动项、关键词、意图并稳定截断',
   assert.deepEqual(Array.from(result.items.map((item) => item.id)), ['active'])
   assert.equal(result.includedArchived, false)
   assert.equal(result.truncated, false)
+})
+
+test('M4 两阶段：阶段一只发送路由和主题目录，不发送追踪正文', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReplies: [
+      { choices: [{ message: { content: '```json\n{"version":1,"intent":"unresolved","includeCurrentTopic":true,"includeArchived":false,"statuses":[],"topicIds":[],"terms":[]}\n```' } }] },
+      { choices: [{ message: { content: '当前有一个未解决问题 [[topic:1 floor:12]]' } }] },
+    ],
+  })
+  const dbg = await load(ctx)
+  const result = await dbg.runConsoleQuery({ question: '当前帖子有哪些未解决问题？' })
+  assert.equal(ctx.llmCalls(), 2)
+  const first = ctx.llmCallsAt(0)
+  assert.match(first.body, /主题目录|topic-catalog/)
+  assert.doesNotMatch(first.body, /追踪问题正文|来源摘要|证据摘录/)
+  assert.match(result.text, /未解决问题/)
+})
+
+test('M4 两阶段：模型越权包含归档会被收窄，空结果不调用答案阶段', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReplies: [{ choices: [{ message: { content: JSON.stringify({ version: 1, intent: 'question', includeCurrentTopic: false, includeArchived: true, statuses: [], topicIds: [], terms: ['绝不存在'] }) } }] }],
+  })
+  const dbg = await load(ctx)
+  const result = await dbg.runConsoleQuery({ question: '查找绝不存在的问题' })
+  assert.equal(ctx.llmCalls(), 1)
+  assert.equal(result.plan.includeArchived, false)
+  assert.equal(result.operationResults.items.length, 0)
+})
+
+test('M4 答案：只接受本地存在的结构化引用，未知引用标记未验证', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReplies: [
+      { choices: [{ message: { content: '{"version":1,"intent":"question","includeCurrentTopic":true,"includeArchived":false,"statuses":[],"topicIds":[],"terms":[]}' } }] },
+      { choices: [{ message: { content: '依据 [[topic:1 floor:12]] 和 [[topic:999 floor:1]]' } }] },
+    ],
+  })
+  const dbg = await load(ctx)
+  const result = await dbg.runConsoleQuery({ question: '依据是什么？' })
+  assert.equal(result.meta.citations.find((row) => row.topicId === 1 && row.floor === 12).known, true)
+  assert.equal(result.meta.citations.find((row) => row.topicId === 999).known, false)
+})
+
+test('M4 缓存：相同操作台问题复用计划和答案，强制查询才再次调用模型', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReplies: [
+      { choices: [{ message: { content: '{"version":1,"intent":"question","includeCurrentTopic":true,"includeArchived":false,"statuses":[],"topicIds":[],"terms":[]}' } }] },
+      { choices: [{ message: { content: '缓存答案 [[topic:1 floor:12]]' } }] },
+      { choices: [{ message: { content: '{"version":1,"intent":"question","includeCurrentTopic":true,"includeArchived":false,"statuses":[],"topicIds":[],"terms":[]}' } }] },
+      { choices: [{ message: { content: '强制答案 [[topic:1 floor:12]]' } }] },
+    ],
+  })
+  const dbg = await load(ctx)
+  await dbg.runConsoleQuery({ question: '缓存问题' })
+  assert.equal(ctx.llmCalls(), 2)
+  await dbg.runConsoleQuery({ question: '缓存问题' })
+  assert.equal(ctx.llmCalls(), 2)
+  await dbg.runConsoleQuery({ question: '缓存问题', force: true })
+  assert.equal(ctx.llmCalls(), 4)
 })
 
 test('M3.1 生命周期：归档停止收集，恢复后继续收集新证据', async () => {
