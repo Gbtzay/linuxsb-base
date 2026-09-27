@@ -862,3 +862,123 @@ test('M3.1 UI：批量接受只处理有效建议，已确认解决仍只能单�
   assert.equal(dbg.trackingState(1).items.find((item) => item.id === untouched.id)?.status, '有新证据')
   assert.equal(panel.querySelectorAll(`[data-track-confirm]`).length, 2)
 })
+
+test('M3.1 UI：导出按钮分别下载 JSON、Markdown 和两份 CSV', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  dbg.createTrackingIssue(1, { question: '导出问题', floors: [12], excerpt: '依据' })
+  const downloads = []
+  ctx.w.URL.createObjectURL = (blob) => {
+    const url = `blob:${downloads.length + 1}`
+    downloads.push({ blob, url })
+    return url
+  }
+  ctx.w.URL.revokeObjectURL = () => {}
+  const originalAnchorClick = ctx.w.HTMLAnchorElement.prototype.click
+  ctx.w.HTMLAnchorElement.prototype.click = function () {
+    if (!this.download) return originalAnchorClick.call(this)
+    const record = downloads.find((row) => row.url === this.href)
+    assert.ok(record, '下载锚点应对应已创建的 Blob URL')
+    record.name = this.download
+  }
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-card]')))
+  for (const attr of ['data-track-export-json', 'data-track-export-markdown', 'data-track-export-issues', 'data-track-export-evidence']) {
+    panel.querySelector(`[${attr}]`).click()
+  }
+  assert.deepEqual(Array.from(downloads.map((row) => row.name.split('.').pop())), ['json', 'md', 'csv', 'csv'])
+  assert.deepEqual(Array.from(downloads.map((row) => row.blob.type)), [
+    'application/json;charset=utf-8',
+    'text/markdown;charset=utf-8',
+    'text/csv;charset=utf-8',
+    'text/csv;charset=utf-8',
+  ])
+})
+
+test('M3.1 UI：JSON 导入先显示预览，确认后才合并', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const incoming = {
+    ...dbg.trackingExport(1),
+    tracking: {
+      ...dbg.trackingState(1),
+      items: [{
+        id: 'issue-imported', question: '导入问题', status: '待验证', source: { floors: [12] },
+        evidence: [], pendingEvidence: [], suggestion: null, createdAt: 1, updatedAt: 1,
+      }],
+    },
+  }
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-import]')))
+  const input = panel.querySelector('[data-track-import]')
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    value: [new ctx.w.File([JSON.stringify(incoming)], 'tracking.json', { type: 'application/json' })],
+  })
+  input.dispatchEvent(new ctx.w.Event('change'))
+  assert.ok(await until(() => panel.querySelector('[data-track-import-preview]')))
+  assert.equal(dbg.trackingState(1).items.length, 0)
+  panel.querySelector('[data-track-import-confirm]').click()
+  assert.ok(await until(() => dbg.trackingState(1).items.some((item) => item.id === 'issue-imported')))
+})
+
+test('M3.1 UI：取消 JSON 导入预览不写入状态', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const incoming = {
+    ...dbg.trackingExport(1),
+    tracking: {
+      ...dbg.trackingState(1),
+      items: [{
+        id: 'issue-cancelled', question: '取消的问题', status: '待验证', source: { floors: [12] },
+        evidence: [], pendingEvidence: [], suggestion: null, createdAt: 1, updatedAt: 1,
+      }],
+    },
+  }
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-import]')))
+  const input = panel.querySelector('[data-track-import]')
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    value: [new ctx.w.File([JSON.stringify(incoming)], 'tracking.json', { type: 'application/json' })],
+  })
+  input.dispatchEvent(new ctx.w.Event('change'))
+  assert.ok(await until(() => panel.querySelector('[data-track-import-preview]')))
+  panel.querySelector('[data-track-import-cancel]').click()
+  assert.equal(panel.querySelector('[data-track-import-preview]'), null)
+  assert.equal(dbg.trackingState(1).items.length, 0)
+})
+
+test('M3.1 UI：路由切换后旧导入文件不能回写预览', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  ctx.w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-import]')))
+  const input = panel.querySelector('[data-track-import]')
+  let release
+  const pending = new Promise((resolve) => {
+    release = resolve
+  })
+  const file = new ctx.w.File(['{}'], 'tracking.json', { type: 'application/json' })
+  Object.defineProperty(file, 'text', { configurable: true, value: () => pending })
+  Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+  input.dispatchEvent(new ctx.w.Event('change'))
+  ctx.w.LSB.bus.emit(
+    'route:changed',
+    { href: 'https://linux.sb/topic/2', page: { type: 'topic', id: 2 } },
+    { source: 'core' },
+  )
+  assert.equal(ctx.w.document.querySelector('.lsb-copilot-panel'), null)
+  release(JSON.stringify(dbg.trackingExport(1)))
+  await sleep(80)
+  assert.equal(ctx.w.document.querySelector('[data-track-import-preview]'), null)
+  assert.equal(dbg.trackingState(1).items.length, 0)
+})

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·AI 帖子副驾
 // @namespace    https://linux.sb/
-// @version      0.4.0
+// @version      0.5.0
 // @description  帖子问答、讨论分析、新回复摘要、问题追踪与回复草稿。复用 LSB·AI 总结的模型配置，不自动提交站内回复。
 // @author       you
 // @match        https://linux.sb/*
@@ -22,7 +22,7 @@
   const manifest = {
     id: 'ai-copilot',
     name: 'AI 帖子副驾',
-    version: '0.4.0',
+    version: '0.5.0',
     description: '帖子问答、讨论分析、新回复摘要、问题追踪与回复草稿；不自动提交站内回复',
     author: 'you',
     requires: {
@@ -1044,6 +1044,28 @@
       }
     }
 
+    function readFileText(file) {
+      if (typeof file?.text === 'function') {
+        try {
+          return Promise.resolve(file.text()).then((value) => String(value ?? ''))
+        } catch (error) {
+          return Promise.reject(error)
+        }
+      }
+      if (typeof FileReader === 'undefined') return Promise.reject(new Error('当前环境不支持读取文件'))
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result ?? ''))
+        reader.onerror = () => reject(reader.error || new Error('无法读取导入文件'))
+        reader.onabort = () => reject(new Error('读取导入文件已取消'))
+        try {
+          reader.readAsText(file)
+        } catch (error) {
+          reject(error)
+        }
+      })
+    }
+
     function invalidTrackingImport(topicId, reason, rejected = []) {
       return {
         valid: false,
@@ -1476,11 +1498,33 @@
     const trackingReviewBusy = new Set()
     const trackingSelectedIds = new Set()
     let trackingFilter = 'active'
+    let trackingImportInput = null
+    let trackingImportNode = null
+    let trackingImportData = null
     let trackingScanToken = 0
 
     function resetTrackingListView() {
       trackingSelectedIds.clear()
       trackingFilter = 'active'
+    }
+
+    function clearTrackingImportView() {
+      trackingImportInput?.remove()
+      trackingImportInput = null
+      trackingImportNode?.remove()
+      trackingImportNode = null
+      trackingImportData = null
+    }
+
+    function clearDownloadUrls() {
+      for (const url of downloadUrls) {
+        try {
+          URL.revokeObjectURL(url)
+        } catch {
+          /* ignore cleanup failures */
+        }
+      }
+      downloadUrls.clear()
     }
 
     function esc(value) {
@@ -1523,6 +1567,8 @@
     function closePanel() {
       stopWaitClock()
       resetTrackingListView()
+      clearTrackingImportView()
+      clearDownloadUrls()
       mask?.remove()
       panel?.remove()
       mask = null
@@ -1660,6 +1706,82 @@
       })
     }
 
+    function trackingExportFile(topicId, format) {
+      const date = new Date().toISOString().slice(0, 10)
+      const suffix = format === 'json' ? 'json' : format === 'markdown' ? 'md' : 'csv'
+      const detail = format === 'issues-csv' ? '-issues' : format === 'evidence-csv' ? '-evidence' : ''
+      const mime = format === 'json' ? 'application/json;charset=utf-8' : format === 'markdown' ? 'text/markdown;charset=utf-8' : 'text/csv;charset=utf-8'
+      return {
+        name: `linuxsb-tracking-${topicId}-${date}${detail}.${suffix}`,
+        mime,
+      }
+    }
+
+    function renderTrackingImportPreview(body, topicId, preview) {
+      trackingImportNode?.remove()
+      trackingImportData = preview
+      const node = document.createElement('section')
+      node.className = 'lsb-copilot-track-import'
+      node.setAttribute('data-track-import-preview', '')
+      const title = document.createElement('strong')
+      title.textContent = preview.valid ? '导入预览' : '导入失败'
+      node.appendChild(title)
+
+      const summary = document.createElement('div')
+      summary.className = 'lsb-row-desc'
+      summary.textContent = preview.valid
+        ? `新增 ${preview.summary.added} 项 · 更新 ${preview.summary.updated} 项 · 合并证据 ${preview.summary.evidenceMerged} 条 · 冲突 ${preview.summary.conflicts} 项 · 跳过 ${preview.summary.skipped} 项`
+        : preview.reason || '导入文件无效'
+      node.appendChild(summary)
+
+      if (preview.valid && preview.conflicts.length) {
+        const conflicts = document.createElement('div')
+        conflicts.className = 'lsb-row-desc'
+        conflicts.textContent = preview.conflicts
+          .map((conflict) => `${conflict.issueId}：状态 ${conflict.winner === 'incoming' ? '采用导入' : '保留本地'}`)
+          .join('；')
+        node.appendChild(conflicts)
+      }
+      if (preview.rejected?.length) {
+        const rejected = document.createElement('div')
+        rejected.className = 'lsb-row-desc'
+        rejected.textContent = `被跳过记录：${preview.rejected.map((row) => `${row.index + 1}（${row.reason}）`).join('、')}`
+        node.appendChild(rejected)
+      }
+
+      const actions = document.createElement('div')
+      actions.className = 'lsb-actions'
+      const confirm = document.createElement('button')
+      confirm.className = 'lsb-btn is-primary'
+      confirm.setAttribute('data-track-import-confirm', '')
+      confirm.textContent = '确认合并'
+      confirm.disabled = !preview.valid
+      confirm.onclick = () => {
+        if (!preview.valid || trackingImportData !== preview || disposed || !body.isConnected) return
+        try {
+          const result = applyTrackingImport(topicId, preview)
+          clearTrackingImportView()
+          api.ui.toast(`已导入 ${result.added} 项，合并 ${result.evidenceMerged} 条证据`, { type: 'success' })
+          renderTrackingList(body, topicId)
+        } catch (error) {
+          api.ui.toast(String(error?.message || error), { type: 'error', title: '导入失败' })
+        }
+      }
+      actions.appendChild(confirm)
+      const cancel = document.createElement('button')
+      cancel.className = 'lsb-btn'
+      cancel.setAttribute('data-track-import-cancel', '')
+      cancel.textContent = '取消'
+      cancel.onclick = () => {
+        clearTrackingImportView()
+        renderTrackingList(body, topicId)
+      }
+      actions.appendChild(cancel)
+      node.appendChild(actions)
+      body.appendChild(node)
+      trackingImportNode = node
+    }
+
     function renderTrackingList(body, topicId, options = {}) {
       const state = loadTrackingState(topicId)
       const allowedFilters = new Set(['active', 'archived', 'all'])
@@ -1674,6 +1796,9 @@
       const scanError = String(options.scanError || '')
       body.setAttribute('data-track-scan-state', scanState)
       body.innerHTML = ''
+      trackingImportInput = null
+      trackingImportNode = null
+      trackingImportData = null
 
       const intro = document.createElement('div')
       intro.className = 'lsb-row-desc'
@@ -1709,6 +1834,62 @@
       }
       filterLabel.appendChild(filter)
       toolbar.appendChild(filterLabel)
+
+      const exportFormats = [
+        ['json', '导出 JSON'],
+        ['markdown', '导出 Markdown'],
+        ['issues-csv', '导出问题 CSV'],
+        ['evidence-csv', '导出证据 CSV'],
+      ]
+      for (const [format, label] of exportFormats) {
+        const exportButton = document.createElement('button')
+        exportButton.className = 'lsb-btn'
+        exportButton.setAttribute(`data-track-export-${format === 'issues-csv' ? 'issues' : format === 'evidence-csv' ? 'evidence' : format}`, '')
+        exportButton.textContent = label
+        exportButton.onclick = () => {
+          const file = trackingExportFile(topicId, format)
+          if (!downloadText(file.name, serializeTracking(topicId, format), file.mime)) {
+            api.ui.toast('下载失败，请重试', { type: 'error' })
+          }
+        }
+        toolbar.appendChild(exportButton)
+      }
+
+      const importButton = document.createElement('button')
+      importButton.className = 'lsb-btn'
+      importButton.setAttribute('data-track-import-open', '')
+      importButton.textContent = '导入 JSON'
+      const importInput = document.createElement('input')
+      importInput.type = 'file'
+      importInput.accept = 'application/json,.json'
+      importInput.style.display = 'none'
+      importInput.setAttribute('data-track-import', '')
+      trackingImportInput = importInput
+      importButton.onclick = () => importInput.click()
+      importInput.onchange = () => {
+        const file = importInput.files?.[0]
+        if (!file) return
+        const routeGeneration = generation
+        void readFileText(file)
+          .then((text) => {
+            if (disposed || routeGeneration !== generation || api.page.id !== topicId || !body.isConnected) return
+            renderTrackingImportPreview(body, topicId, previewTrackingImport(topicId, text))
+          })
+          .catch((error) => {
+            if (disposed || routeGeneration !== generation || api.page.id !== topicId || !body.isConnected) return
+            renderTrackingImportPreview(body, topicId, {
+              valid: false,
+              owner: importOwnerToken,
+              topicId,
+              incoming: null,
+              summary: { added: 0, updated: 0, evidenceMerged: 0, conflicts: 0, skipped: 0 },
+              conflicts: [],
+              rejected: [],
+              reason: String(error?.message || error || '无法读取导入文件'),
+            })
+          })
+      }
+      toolbar.append(importButton, importInput)
       body.appendChild(toolbar)
 
       const scanStatus = document.createElement('div')
@@ -2303,6 +2484,7 @@
         '.lsb-copilot-track-bulk{align-items:center;flex-wrap:wrap;margin-top:8px}' +
         '.lsb-copilot-track-card>input[type=checkbox]{float:right;margin:2px 0 0 8px}' +
         '.lsb-copilot-track-archived{display:inline-block;margin:6px 0 0 6px;padding:2px 7px;border-radius:999px;background:var(--fill-soft,#f2f4f5);font-size:12px;color:var(--text-muted,#777)}' +
+        '.lsb-copilot-track-import{margin-top:10px;padding:10px;border:1px solid var(--line-soft,#eee);border-radius:8px;background:var(--fill-soft,#f7faf9)}' +
         '.lsb-copilot-track-list{max-height:58vh;overflow:auto;margin-top:10px}' +
         '.lsb-copilot-track-card{border:1px solid var(--line-soft,#eee);border-radius:8px;padding:10px;margin:8px 0;background:var(--panel,#fff)}' +
         '.lsb-copilot-track-title{display:block;line-height:1.5}' +

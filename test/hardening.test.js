@@ -330,6 +330,50 @@ test('停用清理：AI 副驾追踪复核完成后不再写回面板', async ()
   assert.equal(dbg.trackingState(1).items[0].id, issue.id)
 })
 
+test('停用清理：AI 副驾追踪导入预览和临时下载对象全部收摊', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  const revoked = []
+  let urlId = 0
+  w.URL.createObjectURL = () => `blob:tracking-${++urlId}`
+  w.URL.revokeObjectURL = (url) => revoked.push(url)
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  const dbg = await w.LSB.bus.request('ai-copilot:debug')
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-import]')), '追踪导入控件已显示')
+
+  const input = panel.querySelector('[data-track-import]')
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    value: [new w.File([JSON.stringify(dbg.trackingExport(1))], 'tracking.json', { type: 'application/json' })],
+  })
+  input.dispatchEvent(new w.Event('change'))
+  assert.ok(await until(() => panel.querySelector('[data-track-import-preview]')), '导入预览已显示')
+
+  const originalAnchorClick = w.HTMLAnchorElement.prototype.click
+  w.HTMLAnchorElement.prototype.click = function () {}
+  panel.querySelector('[data-track-export-json]').click()
+  w.HTMLAnchorElement.prototype.click = originalAnchorClick
+  assert.deepEqual(revoked, [], '面板仍打开时临时 URL 尚未回收')
+
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('[data-track-import]'), null, '停用后文件输入被移除')
+  assert.equal(w.document.querySelector('[data-track-import-preview]'), null, '停用后导入预览被移除')
+  assert.deepEqual(revoked, ['blob:tracking-1'], '停用后回收未释放的下载 URL')
+})
+
 /* ═══════════ 定点缺陷 ═══════════ */
 
 test('esc 转义反引号（模板/未加引号属性上下文）', async () => {

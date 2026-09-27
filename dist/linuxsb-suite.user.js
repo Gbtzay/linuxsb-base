@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氧
 // @name:en      LINUX.SB Oxygen
 // @namespace    https://linux.sb/
-// @version      1.0.116
+// @version      1.0.117
 // @description  linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 21 个模块。必须先安装「LINUX.SB 氢」。
 // @description:en  Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen.
 // @author       xB70sR71
@@ -29,7 +29,7 @@
 // · LSB·积分趋势 v1.0.2
 // · LSB·称号行情 v1.0.18
 // · LSB·AI 总结 v1.2.0
-// · LSB·AI 帖子副驾 v0.4.0
+// · LSB·AI 帖子副驾 v0.5.0
 // · LSB·配置迁移 v1.0.0
 // · LSB·个人存档 v1.0.0
 // · LSB·年度报告 v1.0.1
@@ -5270,7 +5270,7 @@
 
 
 ;
-/* ══════════════ LSB·AI 帖子副驾 v0.4.0 (ai-copilot) ══════════════ */
+/* ══════════════ LSB·AI 帖子副驾 v0.5.0 (ai-copilot) ══════════════ */
 (function () {
   'use strict'
 
@@ -5284,7 +5284,7 @@
   const manifest = {
     id: 'ai-copilot',
     name: 'AI 帖子副驾',
-    version: '0.4.0',
+    version: '0.5.0',
     description: '帖子问答、讨论分析、新回复摘要、问题追踪与回复草稿；不自动提交站内回复',
     author: 'you',
     requires: {
@@ -5301,10 +5301,11 @@
   const CITATION_VERSION = '2'
   const ANALYSIS_VERSION = '2'
   const DIGEST_MAX_PENDING = 100
-  const TRACKING_VERSION = '1'
+  const TRACKING_VERSION = '2'
   const TRACKING_MAX_ITEMS = 50
   const TRACKING_MAX_EVIDENCE = 100
   const TRACKING_MAX_SEEN = 2000
+  const TRACKING_MAX_HISTORY = 100
   const TRACKING_STATES = ['待验证', '有新证据', '可能已解决', '已确认解决', '仍未解决']
   const REVIEW_STATES = ['待验证', '有新证据', '可能已解决', '仍未解决']
   const ANALYZE_PRESETS = {
@@ -5485,6 +5486,8 @@
     let cfg = api.config()
     const provider = api.plugin('ai-summary')
     let running = null
+    const downloadUrls = new Set()
+    const importOwnerToken = {}
     api.on('config:changed:ai-copilot', () => {
       cfg = api.config()
     })
@@ -5588,12 +5591,50 @@
       return `track:${topicId}`
     }
 
-    function emptyTrackingState(topicId) {
+    function emptyTrackingState(topicId, unsupportedVersion = '') {
       return {
         version: TRACKING_VERSION,
         topicId: asNumber(topicId, topicId),
         scan: { seenKeys: [], lastFloor: 0, ts: 0 },
         items: [],
+        unsupportedVersion: String(unsupportedVersion || ''),
+      }
+    }
+
+    function normalizeTrackingHistory(rows, fallback = null) {
+      const normalized = (Array.isArray(rows) ? rows : [])
+        .filter((row) => row && typeof row === 'object')
+        .map((row) => ({
+          type: String(row.type || 'unknown').slice(0, 40),
+          status: TRACKING_STATES.includes(row.status) ? row.status : '',
+          evidenceKeys: Array.isArray(row.evidenceKeys)
+            ? row.evidenceKeys.map((key) => String(key)).filter(Boolean).slice(-TRACKING_MAX_EVIDENCE)
+            : [],
+          ts: Math.max(0, asNumber(row.ts, 0)),
+        }))
+        .slice(-TRACKING_MAX_HISTORY)
+      if (normalized.length || !fallback) return normalized
+      return [{
+        type: 'created',
+        status: TRACKING_STATES.includes(fallback.status) ? fallback.status : '待验证',
+        evidenceKeys: [],
+        ts: Math.max(0, asNumber(fallback.createdAt || fallback.updatedAt, 0)),
+      }]
+    }
+
+    function trackingEvent(type, item, patch = {}) {
+      return {
+        type: String(type || 'unknown').slice(0, 40),
+        status: TRACKING_STATES.includes(patch.status || item?.status) ? patch.status || item.status : '',
+        evidenceKeys: Array.isArray(patch.evidenceKeys) ? patch.evidenceKeys.map(String).filter(Boolean).slice(-TRACKING_MAX_EVIDENCE) : [],
+        ts: Date.now(),
+      }
+    }
+
+    function appendTrackingEvent(item, type, patch = {}) {
+      return {
+        ...item,
+        history: normalizeTrackingHistory([...(item?.history || []), trackingEvent(type, item, patch)]),
       }
     }
 
@@ -5683,13 +5724,17 @@
         suggestion: normalizeTrackingSuggestion(raw.suggestion),
         createdAt: Math.max(0, asNumber(raw.createdAt, 0)),
         updatedAt: Math.max(0, asNumber(raw.updatedAt, 0)),
+        archivedAt: Math.max(0, asNumber(raw.archivedAt, 0)),
+        history: normalizeTrackingHistory(raw.history, raw),
       }
     }
 
     function loadTrackingState(topicId) {
       const empty = emptyTrackingState(topicId)
       const raw = api.store.get(trackingKey(topicId), null)
-      if (!raw || typeof raw !== 'object' || raw.version !== TRACKING_VERSION) return empty
+      if (!raw || typeof raw !== 'object') return empty
+      const rawVersion = String(raw.version || '')
+      if (rawVersion !== TRACKING_VERSION && rawVersion !== '1') return emptyTrackingState(topicId, rawVersion)
       const items = []
       const seenItems = new Set()
       for (const item of Array.isArray(raw.items) ? raw.items : []) {
@@ -5707,6 +5752,7 @@
           ts: Math.max(0, asNumber(raw.scan?.ts, 0)),
         },
         items: items.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, TRACKING_MAX_ITEMS),
+        unsupportedVersion: '',
       }
     }
 
@@ -5725,6 +5771,7 @@
           .filter(Boolean)
           .sort((a, b) => b.updatedAt - a.updatedAt)
           .slice(0, TRACKING_MAX_ITEMS),
+        unsupportedVersion: '',
       }
       api.store.set(trackingKey(topicId), next)
       return loadTrackingState(topicId)
@@ -5756,7 +5803,7 @@
         )
       }).filter(Boolean)
       const now = Date.now()
-      const item = {
+      const item = appendTrackingEvent({
         id,
         title: String(seed.title || '').trim(),
         question,
@@ -5773,7 +5820,9 @@
         suggestion: null,
         createdAt: now,
         updatedAt: now,
-      }
+        archivedAt: 0,
+        history: [],
+      }, 'created')
       const visiblePosts = asNumber(topicId, 0) === asNumber(api.page.id, 0) ? currentPosts() : []
       const next = {
         ...state,
@@ -5846,6 +5895,7 @@
 
     function mergeTrackingEvidence(topicId, posts) {
       const state = loadTrackingState(topicId)
+      if (state.unsupportedVersion) return state
       const seenKeys = new Set(state.scan.seenKeys)
       const added = []
       for (const raw of posts || []) {
@@ -5857,6 +5907,7 @@
       if (!added.length) return state
       const now = Date.now()
       const items = state.items.map((item) => {
+        if (item.archivedAt) return item
         const existingKeys = new Set([...item.evidence, ...item.pendingEvidence].map((row) => row.key))
         const pending = [...item.pendingEvidence]
         for (const row of added) {
@@ -5866,12 +5917,12 @@
           }
         }
         if (pending.length === item.pendingEvidence.length) return item
-        return {
+        return appendTrackingEvent({
           ...item,
           status: item.status === '已确认解决' ? item.status : '有新证据',
           pendingEvidence: pending.slice(-TRACKING_MAX_EVIDENCE),
           updatedAt: now,
-        }
+        }, 'evidence-added', { evidenceKeys: added.map((row) => row.key) })
       })
       return saveTrackingState(topicId, {
         ...state,
@@ -5885,8 +5936,10 @@
     }
 
     async function scanTrackingContext(topicId = api.page.id) {
+      const existing = loadTrackingState(topicId)
+      if (existing.unsupportedVersion) throw new Error('追踪数据版本不兼容，请重新建立追踪项')
       const context = await collectContext({ fetchAll: true, maxPages: cfg.maxPages })
-      const before = loadTrackingState(topicId)
+      const before = existing
       const beforeKeys = new Set(before.scan.seenKeys)
       const added = context.posts.filter((post) => !beforeKeys.has(postKey(normalizePost(post))))
       let state = mergeTrackingEvidence(topicId, added)
@@ -5903,7 +5956,7 @@
     }
 
     function pendingTracking(topicId = api.page.id) {
-      return loadTrackingState(topicId).items.filter((item) => item.pendingEvidence.length)
+      return loadTrackingState(topicId).items.filter((item) => !item.archivedAt && item.pendingEvidence.length)
     }
 
     function trackingEvidencePosts(item) {
@@ -5974,7 +6027,7 @@
       const state = loadTrackingState(topicId)
       const items = state.items.map((item) =>
         item.id === String(issueId)
-          ? { ...item, suggestion, updatedAt: Date.now() }
+          ? appendTrackingEvent({ ...item, suggestion, updatedAt: Date.now() }, 'suggestion-created')
           : item,
       )
       return saveTrackingState(topicId, { ...state, items })
@@ -5983,6 +6036,7 @@
     async function reviewTrackingIssue(topicId = api.page.id, issueId, options = {}) {
       const issue = trackingItem(topicId, issueId)
       if (!issue) throw new Error('追踪问题不存在')
+      if (issue.archivedAt) throw new Error('已归档的追踪项不能复核')
       if (!issue.pendingEvidence.length) throw new Error('当前没有待复核的新证据')
       const record = await run('track-review', {
         ...options,
@@ -6002,20 +6056,21 @@
       const id = String(issueId || '')
       const issue = state.items.find((item) => item.id === id)
       if (!issue) throw new Error('追踪问题不存在')
+      if (issue.archivedAt) throw new Error('已归档的追踪项不能接受建议')
       const suggestion = issue.suggestion
       if (!suggestion?.valid || !REVIEW_STATES.includes(suggestion.status)) {
         throw new Error('当前没有可接受的有效建议')
       }
       const next = state.items.map((item) => {
         if (item.id !== id) return item
-        return {
+        return appendTrackingEvent({
           ...item,
           status: suggestion.status,
           evidence: dedupeEvidence([...item.evidence, ...item.pendingEvidence.map((row) => ({ ...row, kind: 'reviewed' }))]),
           pendingEvidence: [],
           suggestion: null,
           updatedAt: Date.now(),
-        }
+        }, 'suggestion-accepted', { evidenceKeys: item.pendingEvidence.map((row) => row.key) })
       })
       return saveTrackingState(topicId, { ...state, items: next }).items.find((item) => item.id === id)
     }
@@ -6025,7 +6080,9 @@
       const id = String(issueId || '')
       const issue = state.items.find((item) => item.id === id)
       if (!issue) throw new Error('追踪问题不存在')
-      const next = state.items.map((item) => (item.id === id ? { ...item, suggestion: null, updatedAt: Date.now() } : item))
+      const next = state.items.map((item) =>
+        item.id === id ? appendTrackingEvent({ ...item, suggestion: null, updatedAt: Date.now() }, 'suggestion-dismissed') : item,
+      )
       return saveTrackingState(topicId, { ...state, items: next }).items.find((item) => item.id === id)
     }
 
@@ -6036,10 +6093,388 @@
       if (!issue) throw new Error('追踪问题不存在')
       const next = state.items.map((item) =>
         item.id === id
-          ? { ...item, status: '已确认解决', pendingEvidence: [], suggestion: null, updatedAt: Date.now() }
+          ? appendTrackingEvent({ ...item, status: '已确认解决', pendingEvidence: [], suggestion: null, updatedAt: Date.now() }, 'confirmed')
           : item,
       )
       return saveTrackingState(topicId, { ...state, items: next }).items.find((item) => item.id === id)
+    }
+
+    function archiveTrackingItems(topicId = api.page.id, issueIds = []) {
+      const ids = new Set((Array.isArray(issueIds) ? issueIds : [issueIds]).map((id) => String(id || '')).filter(Boolean))
+      const state = loadTrackingState(topicId)
+      const now = Date.now()
+      const next = state.items.map((item) => {
+        if (!ids.has(item.id) || item.archivedAt) return item
+        return appendTrackingEvent({ ...item, archivedAt: now, updatedAt: now }, 'archived')
+      })
+      return saveTrackingState(topicId, { ...state, items: next }).items.filter((item) => ids.has(item.id))
+    }
+
+    function restoreTrackingItems(topicId = api.page.id, issueIds = []) {
+      const ids = new Set((Array.isArray(issueIds) ? issueIds : [issueIds]).map((id) => String(id || '')).filter(Boolean))
+      const state = loadTrackingState(topicId)
+      const now = Date.now()
+      const next = state.items.map((item) => {
+        if (!ids.has(item.id) || !item.archivedAt) return item
+        return appendTrackingEvent({ ...item, archivedAt: 0, updatedAt: now }, 'restored')
+      })
+      return saveTrackingState(topicId, { ...state, items: next }).items.filter((item) => ids.has(item.id))
+    }
+
+    function acceptTrackingSuggestions(topicId = api.page.id, issueIds = []) {
+      const ids = new Set((Array.isArray(issueIds) ? issueIds : [issueIds]).map((id) => String(id || '')).filter(Boolean))
+      const state = loadTrackingState(topicId)
+      const skipped = []
+      const next = state.items.map((item) => {
+        if (!ids.has(item.id)) return item
+        const suggestion = item.suggestion
+        if (item.archivedAt || !suggestion?.valid || !REVIEW_STATES.includes(suggestion.status)) {
+          skipped.push(item.id)
+          return item
+        }
+        return appendTrackingEvent({
+          ...item,
+          status: suggestion.status,
+          evidence: dedupeEvidence([...item.evidence, ...item.pendingEvidence.map((row) => ({ ...row, kind: 'reviewed' }))]),
+          pendingEvidence: [],
+          suggestion: null,
+          updatedAt: Date.now(),
+        }, 'suggestion-accepted', { evidenceKeys: item.pendingEvidence.map((row) => row.key) })
+      })
+      const saved = saveTrackingState(topicId, { ...state, items: next })
+      return { items: saved.items.filter((item) => ids.has(item.id)), skipped }
+    }
+
+    function trackingTopicMeta(topicId) {
+      let topic = null
+      try {
+        topic = normalizeTopic(api.parse.topic(document))
+      } catch {
+        topic = null
+      }
+      const fallback = normalizeTopic(api.snapshot?.topic)
+      return {
+        id: asNumber(topicId, topic?.id || fallback?.id || topicId),
+        title: String(topic?.title || fallback?.title || ''),
+        forumName: String(topic?.forumName || fallback?.forumName || ''),
+      }
+    }
+
+    function trackingExport(topicId = api.page.id) {
+      const state = loadTrackingState(topicId)
+      return {
+        schema: 'lsb-ai-copilot-tracking-export',
+        version: 1,
+        exportedAt: Date.now(),
+        topic: trackingTopicMeta(topicId),
+        tracking: state,
+      }
+    }
+
+    function exportText(value) {
+      return String(value == null ? '' : value).replace(/\r?\n/g, ' ').trim()
+    }
+
+    function trackingEvidenceLink(topicId, row) {
+      const floor = asNumber(row?.floor, 0)
+      const postId = row?.postId ? String(row.postId) : ''
+      if (floor <= 0) return ''
+      return postId ? `[#${floor}](${api.routes.topic(topicId)}?floor=${floor}#post-${postId})` : `[#${floor}]`
+    }
+
+    function trackingMarkdown(topicId) {
+      const payload = trackingExport(topicId)
+      const active = payload.tracking.items.filter((item) => !item.archivedAt)
+      const archived = payload.tracking.items.filter((item) => item.archivedAt)
+      const lines = [
+        '# AI 帖子副驾追踪导出',
+        '',
+        `- 主题 ID：${payload.topic.id}`,
+        `- 主题：${exportText(payload.topic.title) || '未命名主题'}`,
+        `- 版块：${exportText(payload.topic.forumName) || '未知'}`,
+        `- 导出时间：${new Date(payload.exportedAt).toISOString()}`,
+        '',
+      ]
+      const appendGroup = (title, items) => {
+        lines.push(`## ${title}`, '')
+        if (!items.length) {
+          lines.push('暂无', '')
+          return
+        }
+        for (const item of items) {
+          lines.push(`### ${exportText(item.title) || '问题'}：${exportText(item.question)}`)
+          lines.push(`- ID：${item.id}`)
+          lines.push(`- 状态：${item.status}`)
+          lines.push(`- 基线楼层：${item.source.floors.map((floor) => `#${floor}`).join('、') || '无'}`)
+          lines.push(`- 来源摘要：${exportText(item.source.excerpt) || '无'}`)
+          lines.push('- 已记录证据：')
+          for (const row of item.evidence) lines.push(`  - ${trackingEvidenceLink(topicId, row)} · ${exportText(row.excerpt)}`)
+          lines.push('- 待复核证据：')
+          for (const row of item.pendingEvidence) lines.push(`  - ${trackingEvidenceLink(topicId, row)} · ${exportText(row.excerpt)}`)
+          if (item.suggestion) {
+            lines.push(`- 最近模型建议：${item.suggestion.valid ? item.suggestion.status : '未验证'}`)
+            if (item.suggestion.rationale) lines.push(`- 建议依据：${exportText(item.suggestion.rationale)}`)
+          }
+          lines.push('- 操作历史：')
+          for (const event of item.history) lines.push(`  - ${event.type} · ${event.status || '无状态'} · ${event.ts ? new Date(event.ts).toISOString() : '未知时间'}`)
+          lines.push('')
+        }
+      }
+      appendGroup('活动追踪项', active)
+      appendGroup('已归档追踪项', archived)
+      return lines.join('\n')
+    }
+
+    function csvCell(value) {
+      return `"${String(value ?? '').replaceAll('"', '""')}"`
+    }
+
+    function csvDocument(headers, rows) {
+      return `\uFEFF${[headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n')}`
+    }
+
+    function trackingIssuesCsv(topicId) {
+      const payload = trackingExport(topicId)
+      const headers = ['topicId', 'issueId', 'title', 'question', 'status', 'archived', 'createdAt', 'updatedAt', 'baselineFloors', 'evidenceCount', 'pendingCount', 'latestSuggestion', 'sourceExcerpt']
+      const rows = payload.tracking.items.map((item) => [
+        payload.topic.id,
+        item.id,
+        item.title,
+        item.question,
+        item.status,
+        item.archivedAt ? 'true' : 'false',
+        item.createdAt ? new Date(item.createdAt).toISOString() : '',
+        item.updatedAt ? new Date(item.updatedAt).toISOString() : '',
+        item.source.floors.join('|'),
+        item.evidence.length,
+        item.pendingEvidence.length,
+        item.suggestion?.valid ? item.suggestion.status : item.suggestion ? '未验证' : '',
+        item.source.excerpt,
+      ])
+      return csvDocument(headers, rows)
+    }
+
+    function trackingEvidenceCsv(topicId) {
+      const payload = trackingExport(topicId)
+      const headers = ['topicId', 'issueId', 'issueStatus', 'archived', 'kind', 'key', 'postId', 'floor', 'authorName', 'excerpt', 'seenAt']
+      const rows = []
+      for (const item of payload.tracking.items) {
+        for (const row of [...item.evidence, ...item.pendingEvidence]) {
+          rows.push([
+            payload.topic.id,
+            item.id,
+            item.status,
+            item.archivedAt ? 'true' : 'false',
+            row.kind,
+            row.key,
+            row.postId || '',
+            row.floor,
+            row.authorName,
+            row.excerpt,
+            row.seenAt ? new Date(row.seenAt).toISOString() : '',
+          ])
+        }
+      }
+      return csvDocument(headers, rows)
+    }
+
+    function serializeTracking(topicId = api.page.id, format = 'json') {
+      if (format === 'json') return JSON.stringify(trackingExport(topicId), null, 2)
+      if (format === 'markdown') return trackingMarkdown(topicId)
+      if (format === 'issues-csv') return trackingIssuesCsv(topicId)
+      if (format === 'evidence-csv') return trackingEvidenceCsv(topicId)
+      throw new Error(`不支持的追踪导出格式：${format}`)
+    }
+
+    function downloadText(name, text, mime) {
+      try {
+        const blob = new Blob([text], { type: mime })
+        const url = URL.createObjectURL(blob)
+        downloadUrls.add(url)
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = name
+        anchor.click()
+        setTimeout(() => {
+          URL.revokeObjectURL(url)
+          downloadUrls.delete(url)
+        }, 4000)
+        return true
+      } catch (error) {
+        api.log('追踪导出下载失败', error)
+        return false
+      }
+    }
+
+    function readFileText(file) {
+      if (typeof file?.text === 'function') {
+        try {
+          return Promise.resolve(file.text()).then((value) => String(value ?? ''))
+        } catch (error) {
+          return Promise.reject(error)
+        }
+      }
+      if (typeof FileReader === 'undefined') return Promise.reject(new Error('当前环境不支持读取文件'))
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result ?? ''))
+        reader.onerror = () => reject(reader.error || new Error('无法读取导入文件'))
+        reader.onabort = () => reject(new Error('读取导入文件已取消'))
+        try {
+          reader.readAsText(file)
+        } catch (error) {
+          reject(error)
+        }
+      })
+    }
+
+    function invalidTrackingImport(topicId, reason, rejected = []) {
+      return {
+        valid: false,
+        owner: importOwnerToken,
+        topicId: asNumber(topicId, topicId),
+        incoming: null,
+        summary: { added: 0, updated: 0, evidenceMerged: 0, conflicts: 0, skipped: rejected.length },
+        conflicts: [],
+        rejected,
+        reason: String(reason || '导入文件无效'),
+      }
+    }
+
+    function mergeImportedTracking(topicId, incomingTracking) {
+      const local = loadTrackingState(topicId)
+      const incomingItems = Array.isArray(incomingTracking?.items) ? incomingTracking.items.map(normalizeTrackingIssue).filter(Boolean) : []
+      const localById = new Map(local.items.map((item) => [item.id, item]))
+      const items = [...local.items]
+      const conflicts = []
+      let added = 0
+      let updated = 0
+      let evidenceMerged = 0
+      for (const incoming of incomingItems) {
+        const current = localById.get(incoming.id)
+        if (!current) {
+          items.push(incoming)
+          added += 1
+          continue
+        }
+        const currentKeys = new Set([...current.evidence, ...current.pendingEvidence].map((row) => row.key))
+        const evidence = dedupeEvidence([...current.evidence, ...incoming.evidence])
+        const pendingEvidence = dedupeEvidence([...current.pendingEvidence, ...incoming.pendingEvidence]).filter(
+          (row) => !evidence.some((known) => known.key === row.key),
+        )
+        evidenceMerged += [...evidence, ...pendingEvidence].filter((row) => !currentKeys.has(row.key)).length
+        const incomingNewer = incoming.updatedAt > current.updatedAt
+        if (incoming.status !== current.status || Boolean(incoming.archivedAt) !== Boolean(current.archivedAt)) {
+          conflicts.push({
+            issueId: current.id,
+            localStatus: current.status,
+            incomingStatus: incoming.status,
+            localArchived: Boolean(current.archivedAt),
+            incomingArchived: Boolean(incoming.archivedAt),
+            winner: incomingNewer ? 'incoming' : 'local',
+          })
+        }
+        const winner = incomingNewer ? incoming : current
+        const history = normalizeTrackingHistory(
+          [...(current.history || []), ...(incoming.history || [])].filter((row, index, rows) => {
+            const key = JSON.stringify(row)
+            return rows.findIndex((candidate) => JSON.stringify(candidate) === key) === index
+          }),
+          winner,
+        )
+        const merged = {
+          ...winner,
+          evidence,
+          pendingEvidence,
+          history,
+          updatedAt: Math.max(current.updatedAt, incoming.updatedAt),
+        }
+        items.splice(items.findIndex((item) => item.id === current.id), 1, merged)
+        updated += 1
+      }
+      const seenKeys = new Set(local.scan.seenKeys)
+      for (const item of items) {
+        for (const row of [...item.evidence, ...item.pendingEvidence]) seenKeys.add(row.key)
+      }
+      const nextState = {
+        ...local,
+        version: TRACKING_VERSION,
+        topicId: asNumber(topicId, topicId),
+        scan: {
+          ...local.scan,
+          seenKeys: [...seenKeys].slice(-TRACKING_MAX_SEEN),
+        },
+        items,
+        unsupportedVersion: '',
+      }
+      return {
+        state: nextState,
+        summary: { added, updated, evidenceMerged, conflicts: conflicts.length, skipped: 0 },
+        conflicts,
+      }
+    }
+
+    function previewTrackingImport(topicId = api.page.id, text) {
+      const source = String(text == null ? '' : text)
+      let bytes = 0
+      try {
+        bytes = new Blob([source]).size
+      } catch {
+        bytes = source.length * 2
+      }
+      if (bytes > 5 * 1024 * 1024) return invalidTrackingImport(topicId, '导入文件超过 5 MB')
+      let parsed
+      try {
+        parsed = JSON.parse(source)
+      } catch {
+        return invalidTrackingImport(topicId, '导入文件不是有效 JSON')
+      }
+      if (!parsed || typeof parsed !== 'object') return invalidTrackingImport(topicId, '导入文件必须是对象')
+      if (parsed.schema !== 'lsb-ai-copilot-tracking-export' || asNumber(parsed.version, 0) !== 1) {
+        return invalidTrackingImport(topicId, '不支持的追踪导出协议')
+      }
+      if (asNumber(parsed.topic?.id, 0) !== asNumber(topicId, 0)) return invalidTrackingImport(topicId, '导入文件属于其他主题')
+      if (!parsed.tracking || String(parsed.tracking.version || '') !== TRACKING_VERSION) {
+        return invalidTrackingImport(topicId, '不支持的追踪存储版本')
+      }
+      const rawItems = Array.isArray(parsed.tracking.items) ? parsed.tracking.items : []
+      const rejected = []
+      const normalizedItems = []
+      rawItems.forEach((item, index) => {
+        const normalized = normalizeTrackingIssue(item)
+        if (!normalized) rejected.push({ index, reason: '追踪项缺少有效问题文本' })
+        else normalizedItems.push(normalized)
+      })
+      const incoming = {
+        ...parsed.tracking,
+        version: TRACKING_VERSION,
+        topicId: asNumber(topicId, topicId),
+        items: normalizedItems,
+      }
+      const merged = mergeImportedTracking(topicId, incoming)
+      return {
+        valid: true,
+        owner: importOwnerToken,
+        topicId: asNumber(topicId, topicId),
+        incoming: { ...parsed, tracking: incoming },
+        summary: { ...merged.summary, skipped: rejected.length },
+        conflicts: merged.conflicts,
+        rejected,
+      }
+    }
+
+    function applyTrackingImport(topicId = api.page.id, preview) {
+      if (!preview?.valid || preview.owner !== importOwnerToken || asNumber(preview.topicId, 0) !== asNumber(topicId, 0)) {
+        throw new Error('导入预览已失效，请重新选择文件')
+      }
+      const merged = mergeImportedTracking(topicId, preview.incoming.tracking)
+      const saved = saveTrackingState(topicId, merged.state)
+      return {
+        ...merged.summary,
+        conflicts: merged.conflicts.length,
+        skipped: preview.rejected?.length || 0,
+        state: saved,
+      }
     }
 
     function mergeDigestPosts(state, posts) {
@@ -6323,7 +6758,36 @@
     let disposed = false
     const buttons = new Set()
     const trackingReviewBusy = new Set()
+    const trackingSelectedIds = new Set()
+    let trackingFilter = 'active'
+    let trackingImportInput = null
+    let trackingImportNode = null
+    let trackingImportData = null
     let trackingScanToken = 0
+
+    function resetTrackingListView() {
+      trackingSelectedIds.clear()
+      trackingFilter = 'active'
+    }
+
+    function clearTrackingImportView() {
+      trackingImportInput?.remove()
+      trackingImportInput = null
+      trackingImportNode?.remove()
+      trackingImportNode = null
+      trackingImportData = null
+    }
+
+    function clearDownloadUrls() {
+      for (const url of downloadUrls) {
+        try {
+          URL.revokeObjectURL(url)
+        } catch {
+          /* ignore cleanup failures */
+        }
+      }
+      downloadUrls.clear()
+    }
 
     function esc(value) {
       return api.util.esc(String(value ?? ''))
@@ -6342,6 +6806,7 @@
     function syncTrackingRoute() {
       if (api.page.type !== 'topic' || api.page.id == null) return
       const state = loadTrackingState(api.page.id)
+      if (state.unsupportedVersion) return
       if (state.scan.ts) return
       const posts = currentPosts()
       saveTrackingState(api.page.id, {
@@ -6363,6 +6828,9 @@
 
     function closePanel() {
       stopWaitClock()
+      resetTrackingListView()
+      clearTrackingImportView()
+      clearDownloadUrls()
       mask?.remove()
       panel?.remove()
       mask = null
@@ -6500,12 +6968,99 @@
       })
     }
 
+    function trackingExportFile(topicId, format) {
+      const date = new Date().toISOString().slice(0, 10)
+      const suffix = format === 'json' ? 'json' : format === 'markdown' ? 'md' : 'csv'
+      const detail = format === 'issues-csv' ? '-issues' : format === 'evidence-csv' ? '-evidence' : ''
+      const mime = format === 'json' ? 'application/json;charset=utf-8' : format === 'markdown' ? 'text/markdown;charset=utf-8' : 'text/csv;charset=utf-8'
+      return {
+        name: `linuxsb-tracking-${topicId}-${date}${detail}.${suffix}`,
+        mime,
+      }
+    }
+
+    function renderTrackingImportPreview(body, topicId, preview) {
+      trackingImportNode?.remove()
+      trackingImportData = preview
+      const node = document.createElement('section')
+      node.className = 'lsb-copilot-track-import'
+      node.setAttribute('data-track-import-preview', '')
+      const title = document.createElement('strong')
+      title.textContent = preview.valid ? '导入预览' : '导入失败'
+      node.appendChild(title)
+
+      const summary = document.createElement('div')
+      summary.className = 'lsb-row-desc'
+      summary.textContent = preview.valid
+        ? `新增 ${preview.summary.added} 项 · 更新 ${preview.summary.updated} 项 · 合并证据 ${preview.summary.evidenceMerged} 条 · 冲突 ${preview.summary.conflicts} 项 · 跳过 ${preview.summary.skipped} 项`
+        : preview.reason || '导入文件无效'
+      node.appendChild(summary)
+
+      if (preview.valid && preview.conflicts.length) {
+        const conflicts = document.createElement('div')
+        conflicts.className = 'lsb-row-desc'
+        conflicts.textContent = preview.conflicts
+          .map((conflict) => `${conflict.issueId}：状态 ${conflict.winner === 'incoming' ? '采用导入' : '保留本地'}`)
+          .join('；')
+        node.appendChild(conflicts)
+      }
+      if (preview.rejected?.length) {
+        const rejected = document.createElement('div')
+        rejected.className = 'lsb-row-desc'
+        rejected.textContent = `被跳过记录：${preview.rejected.map((row) => `${row.index + 1}（${row.reason}）`).join('、')}`
+        node.appendChild(rejected)
+      }
+
+      const actions = document.createElement('div')
+      actions.className = 'lsb-actions'
+      const confirm = document.createElement('button')
+      confirm.className = 'lsb-btn is-primary'
+      confirm.setAttribute('data-track-import-confirm', '')
+      confirm.textContent = '确认合并'
+      confirm.disabled = !preview.valid
+      confirm.onclick = () => {
+        if (!preview.valid || trackingImportData !== preview || disposed || !body.isConnected) return
+        try {
+          const result = applyTrackingImport(topicId, preview)
+          clearTrackingImportView()
+          api.ui.toast(`已导入 ${result.added} 项，合并 ${result.evidenceMerged} 条证据`, { type: 'success' })
+          renderTrackingList(body, topicId)
+        } catch (error) {
+          api.ui.toast(String(error?.message || error), { type: 'error', title: '导入失败' })
+        }
+      }
+      actions.appendChild(confirm)
+      const cancel = document.createElement('button')
+      cancel.className = 'lsb-btn'
+      cancel.setAttribute('data-track-import-cancel', '')
+      cancel.textContent = '取消'
+      cancel.onclick = () => {
+        clearTrackingImportView()
+        renderTrackingList(body, topicId)
+      }
+      actions.appendChild(cancel)
+      node.appendChild(actions)
+      body.appendChild(node)
+      trackingImportNode = node
+    }
+
     function renderTrackingList(body, topicId, options = {}) {
       const state = loadTrackingState(topicId)
+      const allowedFilters = new Set(['active', 'archived', 'all'])
+      if (!allowedFilters.has(trackingFilter)) trackingFilter = 'active'
+      const visibleItems = state.items.filter((item) =>
+        trackingFilter === 'all' || (trackingFilter === 'archived' ? Boolean(item.archivedAt) : !item.archivedAt),
+      )
+      for (const id of [...trackingSelectedIds]) {
+        if (!visibleItems.some((item) => item.id === id)) trackingSelectedIds.delete(id)
+      }
       const scanState = options.scanState || body.getAttribute('data-track-scan-state') || 'ready'
       const scanError = String(options.scanError || '')
       body.setAttribute('data-track-scan-state', scanState)
       body.innerHTML = ''
+      trackingImportInput = null
+      trackingImportNode = null
+      trackingImportData = null
 
       const intro = document.createElement('div')
       intro.className = 'lsb-row-desc'
@@ -6521,6 +7076,82 @@
       rescan.disabled = scanState === 'scanning'
       rescan.onclick = () => renderTrack(body)
       toolbar.appendChild(rescan)
+
+      const filterLabel = document.createElement('label')
+      filterLabel.className = 'lsb-copilot-track-filter'
+      filterLabel.textContent = '显示：'
+      const filter = document.createElement('select')
+      filter.setAttribute('data-track-filter', '')
+      for (const [value, label] of [['active', '活动'], ['archived', '已归档'], ['all', '全部']]) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = label
+        option.selected = trackingFilter === value
+        filter.appendChild(option)
+      }
+      filter.onchange = () => {
+        trackingFilter = filter.value
+        trackingSelectedIds.clear()
+        renderTrackingList(body, topicId)
+      }
+      filterLabel.appendChild(filter)
+      toolbar.appendChild(filterLabel)
+
+      const exportFormats = [
+        ['json', '导出 JSON'],
+        ['markdown', '导出 Markdown'],
+        ['issues-csv', '导出问题 CSV'],
+        ['evidence-csv', '导出证据 CSV'],
+      ]
+      for (const [format, label] of exportFormats) {
+        const exportButton = document.createElement('button')
+        exportButton.className = 'lsb-btn'
+        exportButton.setAttribute(`data-track-export-${format === 'issues-csv' ? 'issues' : format === 'evidence-csv' ? 'evidence' : format}`, '')
+        exportButton.textContent = label
+        exportButton.onclick = () => {
+          const file = trackingExportFile(topicId, format)
+          if (!downloadText(file.name, serializeTracking(topicId, format), file.mime)) {
+            api.ui.toast('下载失败，请重试', { type: 'error' })
+          }
+        }
+        toolbar.appendChild(exportButton)
+      }
+
+      const importButton = document.createElement('button')
+      importButton.className = 'lsb-btn'
+      importButton.setAttribute('data-track-import-open', '')
+      importButton.textContent = '导入 JSON'
+      const importInput = document.createElement('input')
+      importInput.type = 'file'
+      importInput.accept = 'application/json,.json'
+      importInput.style.display = 'none'
+      importInput.setAttribute('data-track-import', '')
+      trackingImportInput = importInput
+      importButton.onclick = () => importInput.click()
+      importInput.onchange = () => {
+        const file = importInput.files?.[0]
+        if (!file) return
+        const routeGeneration = generation
+        void readFileText(file)
+          .then((text) => {
+            if (disposed || routeGeneration !== generation || api.page.id !== topicId || !body.isConnected) return
+            renderTrackingImportPreview(body, topicId, previewTrackingImport(topicId, text))
+          })
+          .catch((error) => {
+            if (disposed || routeGeneration !== generation || api.page.id !== topicId || !body.isConnected) return
+            renderTrackingImportPreview(body, topicId, {
+              valid: false,
+              owner: importOwnerToken,
+              topicId,
+              incoming: null,
+              summary: { added: 0, updated: 0, evidenceMerged: 0, conflicts: 0, skipped: 0 },
+              conflicts: [],
+              rejected: [],
+              reason: String(error?.message || error || '无法读取导入文件'),
+            })
+          })
+      }
+      toolbar.append(importButton, importInput)
       body.appendChild(toolbar)
 
       const scanStatus = document.createElement('div')
@@ -6531,26 +7162,144 @@
       else scanStatus.textContent = state.scan.ts ? `最近扫描：${new Date(state.scan.ts).toLocaleString()}` : '尚未扫描'
       body.appendChild(scanStatus)
 
+      const selectedItems = visibleItems.filter((item) => trackingSelectedIds.has(item.id))
+      const selectedActive = selectedItems.filter((item) => !item.archivedAt)
+      const selectedArchived = selectedItems.filter((item) => item.archivedAt)
+      const validSelected = selectedActive.filter((item) => item.suggestion?.valid && REVIEW_STATES.includes(item.suggestion.status))
+      const bulk = document.createElement('div')
+      bulk.className = 'lsb-actions lsb-copilot-track-bulk'
+      bulk.setAttribute('data-track-bulk-toolbar', '')
+
+      const selectAll = document.createElement('input')
+      selectAll.type = 'checkbox'
+      selectAll.setAttribute('data-track-select-all', '')
+      selectAll.checked = Boolean(visibleItems.length && visibleItems.every((item) => trackingSelectedIds.has(item.id)))
+      selectAll.disabled = !visibleItems.length
+      selectAll.title = '选择当前筛选结果'
+      selectAll.onchange = () => {
+        if (selectAll.checked) visibleItems.forEach((item) => trackingSelectedIds.add(item.id))
+        else visibleItems.forEach((item) => trackingSelectedIds.delete(item.id))
+        renderTrackingList(body, topicId)
+      }
+      bulk.appendChild(selectAll)
+
+      const selectedCount = document.createElement('span')
+      selectedCount.className = 'lsb-row-desc'
+      selectedCount.setAttribute('data-track-selected-count', '')
+      selectedCount.textContent = `已选 ${selectedItems.length} 项`
+      bulk.appendChild(selectedCount)
+
+      const archive = document.createElement('button')
+      archive.className = 'lsb-btn'
+      archive.setAttribute('data-track-bulk-archive', '')
+      archive.textContent = '批量归档'
+      archive.disabled = !selectedActive.length
+      archive.onclick = () => {
+        void api.ui.confirm(`归档 ${selectedActive.length} 个追踪项？归档后将停止接收新证据。`).then((ok) => {
+          if (!ok || disposed || !body.isConnected) return
+          try {
+            archiveTrackingItems(topicId, selectedActive.map((item) => item.id))
+            trackingSelectedIds.clear()
+            renderTrackingList(body, topicId)
+          } catch (error) {
+            api.ui.toast(String(error?.message || error), { type: 'error' })
+          }
+        })
+      }
+      bulk.appendChild(archive)
+
+      const restore = document.createElement('button')
+      restore.className = 'lsb-btn'
+      restore.setAttribute('data-track-bulk-restore', '')
+      restore.textContent = '批量恢复'
+      restore.disabled = !selectedArchived.length
+      restore.onclick = () => {
+        void api.ui.confirm(`恢复 ${selectedArchived.length} 个追踪项？恢复后将重新接收后续新证据。`).then((ok) => {
+          if (!ok || disposed || !body.isConnected) return
+          try {
+            restoreTrackingItems(topicId, selectedArchived.map((item) => item.id))
+            trackingSelectedIds.clear()
+            renderTrackingList(body, topicId)
+          } catch (error) {
+            api.ui.toast(String(error?.message || error), { type: 'error' })
+          }
+        })
+      }
+      bulk.appendChild(restore)
+
+      const acceptBulk = document.createElement('button')
+      acceptBulk.className = 'lsb-btn is-primary'
+      acceptBulk.setAttribute('data-track-bulk-accept', '')
+      acceptBulk.textContent = `接受有效建议${validSelected.length ? ` (${validSelected.length})` : ''}`
+      acceptBulk.disabled = !validSelected.length
+      acceptBulk.onclick = () => {
+        const skipped = selectedItems.length - validSelected.length
+        void api.ui.confirm(`接受 ${validSelected.length} 条有效建议？${skipped ? ` 将跳过 ${skipped} 项。` : ''}`).then((ok) => {
+          if (!ok || disposed || !body.isConnected) return
+          try {
+            const result = acceptTrackingSuggestions(topicId, validSelected.map((item) => item.id))
+            trackingSelectedIds.clear()
+            api.ui.toast(`已接受 ${result.items.length} 条建议${result.skipped.length ? `，跳过 ${result.skipped.length} 项` : ''}`, { type: 'success' })
+            renderTrackingList(body, topicId)
+          } catch (error) {
+            api.ui.toast(String(error?.message || error), { type: 'error' })
+          }
+        })
+      }
+      bulk.appendChild(acceptBulk)
+      body.appendChild(bulk)
+
       const list = document.createElement('div')
       list.className = 'lsb-copilot-track-list'
-      if (!state.items.length) {
+      if (state.unsupportedVersion) {
+        const incompatible = document.createElement('div')
+        incompatible.className = 'lsb-empty'
+        incompatible.setAttribute('data-track-unsupported', state.unsupportedVersion)
+        incompatible.textContent = `追踪数据版本不兼容（${state.unsupportedVersion}），请重新建立追踪项。`
+        list.appendChild(incompatible)
+      } else if (!visibleItems.length) {
         const empty = document.createElement('div')
         empty.className = 'lsb-empty'
         empty.setAttribute('data-track-empty', '')
-        empty.textContent = '当前主题还没有追踪项。先在“讨论分析 → 未解决问题”中选择“开始追踪”。'
+        empty.textContent = state.items.length
+          ? trackingFilter === 'archived'
+            ? '当前没有已归档追踪项。'
+            : trackingFilter === 'all'
+              ? '当前主题还没有追踪项。先在“讨论分析 → 未解决问题”中选择“开始追踪”。'
+              : '当前没有活动追踪项。'
+          : '当前主题还没有追踪项。先在“讨论分析 → 未解决问题”中选择“开始追踪”。'
         list.appendChild(empty)
       }
 
-      for (const item of state.items) {
+      for (const item of visibleItems) {
         const card = document.createElement('article')
         card.className = 'lsb-copilot-track-card'
         card.setAttribute('data-track-card', '')
         card.setAttribute('data-track-id', item.id)
 
+        const select = document.createElement('input')
+        select.type = 'checkbox'
+        select.setAttribute('data-track-select', item.id)
+        select.checked = trackingSelectedIds.has(item.id)
+        select.title = '选择追踪项'
+        select.onchange = () => {
+          if (select.checked) trackingSelectedIds.add(item.id)
+          else trackingSelectedIds.delete(item.id)
+          renderTrackingList(body, topicId)
+        }
+        card.appendChild(select)
+
         const heading = document.createElement('strong')
         heading.className = 'lsb-copilot-track-title'
         heading.textContent = item.title ? `${item.title}：${item.question}` : item.question
         card.appendChild(heading)
+
+        if (item.archivedAt) {
+          const archived = document.createElement('span')
+          archived.className = 'lsb-copilot-track-archived'
+          archived.textContent = '已归档'
+          card.appendChild(archived)
+        }
 
         const status = document.createElement('div')
         status.className = 'lsb-copilot-track-status'
@@ -6580,7 +7329,7 @@
             suggestion.appendChild(rationale)
           }
           renderCitations(suggestion, trackingCitationRecords(item, item.suggestion.citations, topicId))
-          if (item.suggestion.valid) {
+          if (item.suggestion.valid && !item.archivedAt) {
             const actions = document.createElement('div')
             actions.className = 'lsb-actions'
             const accept = document.createElement('button')
@@ -6616,7 +7365,24 @@
         const actions = document.createElement('div')
         actions.className = 'lsb-actions'
         const busyKey = `${topicId}:${item.id}`
-        if (item.pendingEvidence.length) {
+        if (item.archivedAt) {
+          const restore = document.createElement('button')
+          restore.className = 'lsb-btn is-primary'
+          restore.setAttribute('data-track-restore', '')
+          restore.textContent = '恢复追踪'
+          restore.onclick = () => {
+            void api.ui.confirm('恢复后，这个追踪项将重新接收当前主题的新证据。').then((ok) => {
+              if (!ok || disposed || !body.isConnected) return
+              try {
+                restoreTrackingItems(topicId, [item.id])
+                renderTrackingList(body, topicId)
+              } catch (error) {
+                api.ui.toast(String(error?.message || error), { type: 'error' })
+              }
+            })
+          }
+          actions.appendChild(restore)
+        } else if (item.pendingEvidence.length) {
           const review = document.createElement('button')
           review.className = 'lsb-btn is-primary'
           review.setAttribute('data-track-review', '')
@@ -6644,23 +7410,25 @@
           actions.appendChild(review)
         }
 
-        const confirm = document.createElement('button')
-        confirm.className = 'lsb-btn'
-        confirm.setAttribute('data-track-confirm', '')
-        confirm.textContent = item.status === '已确认解决' ? '已确认解决' : '标为已确认解决'
-        confirm.disabled = item.status === '已确认解决'
-        confirm.onclick = () => {
-          void api.ui.confirm('确认把这个问题标为已确认解决？').then((ok) => {
-            if (!ok || disposed || generation !== Number(body.getAttribute('data-track-generation')) || !body.isConnected) return
-            try {
-              confirmTrackingIssue(topicId, item.id)
-              renderTrackingList(body, topicId)
-            } catch (error) {
-              api.ui.toast(String(error?.message || error), { type: 'error' })
-            }
-          })
+        if (!item.archivedAt) {
+          const confirm = document.createElement('button')
+          confirm.className = 'lsb-btn'
+          confirm.setAttribute('data-track-confirm', '')
+          confirm.textContent = item.status === '已确认解决' ? '已确认解决' : '标为已确认解决'
+          confirm.disabled = item.status === '已确认解决'
+          confirm.onclick = () => {
+            void api.ui.confirm('确认把这个问题标为已确认解决？').then((ok) => {
+              if (!ok || disposed || generation !== Number(body.getAttribute('data-track-generation')) || !body.isConnected) return
+              try {
+                confirmTrackingIssue(topicId, item.id)
+                renderTrackingList(body, topicId)
+              } catch (error) {
+                api.ui.toast(String(error?.message || error), { type: 'error' })
+              }
+            })
+          }
+          actions.appendChild(confirm)
         }
-        actions.appendChild(confirm)
         card.appendChild(actions)
         list.appendChild(card)
       }
@@ -6973,6 +7741,12 @@
         '.lsb-copilot-citations{margin-top:12px;padding-top:8px;border-top:1px solid var(--line-soft,#eee);font-size:12px}' +
         '.lsb-copilot-citation{margin-top:4px;color:var(--text-muted,#777)}' +
         '.lsb-copilot-citation a{color:var(--brand,#5eaaa0)}' +
+        '.lsb-copilot-track-filter{display:inline-flex;align-items:center;gap:4px;margin-left:auto}' +
+        '.lsb-copilot-track-filter select{padding:4px 6px;border:1px solid var(--line,#ddd);border-radius:6px;background:var(--panel,#fff);color:inherit}' +
+        '.lsb-copilot-track-bulk{align-items:center;flex-wrap:wrap;margin-top:8px}' +
+        '.lsb-copilot-track-card>input[type=checkbox]{float:right;margin:2px 0 0 8px}' +
+        '.lsb-copilot-track-archived{display:inline-block;margin:6px 0 0 6px;padding:2px 7px;border-radius:999px;background:var(--fill-soft,#f2f4f5);font-size:12px;color:var(--text-muted,#777)}' +
+        '.lsb-copilot-track-import{margin-top:10px;padding:10px;border:1px solid var(--line-soft,#eee);border-radius:8px;background:var(--fill-soft,#f7faf9)}' +
         '.lsb-copilot-track-list{max-height:58vh;overflow:auto;margin-top:10px}' +
         '.lsb-copilot-track-card{border:1px solid var(--line-soft,#eee);border-radius:8px;padding:10px;margin:8px 0;background:var(--panel,#fff)}' +
         '.lsb-copilot-track-title{display:block;line-height:1.5}' +
@@ -7003,6 +7777,13 @@
       markDigestRead: (topicId = api.page.id, posts = []) => markDigestRead(topicId, posts),
       trackingState: (topicId = api.page.id) => loadTrackingState(topicId),
       createTrackingIssue,
+      archiveTrackingItems,
+      restoreTrackingItems,
+      acceptTrackingSuggestions,
+      trackingExport,
+      serializeTracking,
+      previewTrackingImport,
+      applyTrackingImport,
       parseUnresolvedIssues,
       trackingVersion: TRACKING_VERSION,
       mergeTrackingEvidence,
@@ -10840,7 +11621,7 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.116',
+    version: '1.0.117',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },
