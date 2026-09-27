@@ -542,6 +542,59 @@
       return id && id !== '0' ? `id:${id}` : `floor:${asNumber(post?.floor, 0)}`
     }
 
+    function mergeTrackingEvidence(topicId, posts) {
+      const state = loadTrackingState(topicId)
+      const seenKeys = new Set(state.scan.seenKeys)
+      const added = []
+      for (const raw of posts || []) {
+        const row = normalizeTrackingEvidence(raw, 'new')
+        if (!row || seenKeys.has(row.key)) continue
+        seenKeys.add(row.key)
+        added.push(row)
+      }
+      if (!added.length) return state
+      const now = Date.now()
+      const items = state.items.map((item) => {
+        const existingKeys = new Set([...item.evidence, ...item.pendingEvidence].map((row) => row.key))
+        const pending = [...item.pendingEvidence]
+        for (const row of added) {
+          if (!existingKeys.has(row.key)) {
+            existingKeys.add(row.key)
+            pending.push(row)
+          }
+        }
+        if (pending.length === item.pendingEvidence.length) return item
+        return {
+          ...item,
+          status: item.status === '已确认解决' ? item.status : '有新证据',
+          pendingEvidence: pending.slice(-TRACKING_MAX_EVIDENCE),
+          updatedAt: now,
+        }
+      })
+      return saveTrackingState(topicId, {
+        ...state,
+        scan: {
+          seenKeys: [...seenKeys].slice(-TRACKING_MAX_SEEN),
+          lastFloor: Math.max(state.scan.lastFloor, highestFloor(added)),
+          ts: now,
+        },
+        items,
+      })
+    }
+
+    async function scanTrackingContext(topicId = api.page.id) {
+      const context = await collectContext({ fetchAll: true, maxPages: cfg.maxPages })
+      const before = loadTrackingState(topicId)
+      const beforeKeys = new Set(before.scan.seenKeys)
+      const state = mergeTrackingEvidence(topicId, context.posts)
+      const added = context.posts.filter((post) => !beforeKeys.has(postKey(normalizePost(post))))
+      return { context, state, added }
+    }
+
+    function pendingTracking(topicId = api.page.id) {
+      return loadTrackingState(topicId).items.filter((item) => item.pendingEvidence.length)
+    }
+
     function mergeDigestPosts(state, posts) {
       const byKey = new Map((state.pending || []).map((post) => [postKey(post), normalizeDigestPost(post)]))
       for (const raw of posts || []) {
@@ -1169,6 +1222,7 @@
     api.on('topic:posts-added', (posts) => {
       if (api.page.type !== 'topic' || api.page.id == null || !Array.isArray(posts) || !posts.length) return
       pendingReplies(api.page.id, posts)
+      mergeTrackingEvidence(api.page.id, posts)
       if (panel && currentMode === 'digest' && !running) renderMode('digest')
     })
     api.on('route:changed', () => {
@@ -1221,6 +1275,9 @@
       createTrackingIssue,
       parseUnresolvedIssues,
       trackingVersion: TRACKING_VERSION,
+      mergeTrackingEvidence,
+      scanTrackingContext,
+      pendingTracking,
       buildRequest,
       analysisVersion: ANALYSIS_VERSION,
       run,

@@ -32,6 +32,7 @@ function makeSite(html, url, cfg = {}) {
   )
   const calls = []
   let hold = null
+  const controls = { failTopicPages: false }
   const isLlm = (s) => !/linux\.sb/.test(s)
   w.fetch = async (u, init = {}) => {
     const s = String(u)
@@ -45,6 +46,9 @@ function makeSite(html, url, cfg = {}) {
         text: async () => JSON.stringify(reply),
       }
     }
+    if (controls.failTopicPages && /\/topic\/[^?]+\?p=/.test(s)) {
+      return { status: 500, ok: false, url: s, text: async () => '分页失败' }
+    }
     return { status: 200, ok: true, url: s, text: async () => html }
   }
   const setCfg = (patch) => {
@@ -52,7 +56,7 @@ function makeSite(html, url, cfg = {}) {
     w.localStorage.setItem('lsb_base:ai-copilot:__config', JSON.stringify({ ...cur, ...patch }))
     w.LSB.bus.emit('config:changed:ai-copilot', {}, { source: 'core' })
   }
-  return {
+  const result = {
     w,
     calls,
     setCfg,
@@ -67,6 +71,13 @@ function makeSite(html, url, cfg = {}) {
       }
     },
   }
+  Object.defineProperty(result, 'failTopicPages', {
+    get: () => controls.failTopicPages,
+    set: (value) => {
+      controls.failTopicPages = Boolean(value)
+    },
+  })
+  return result
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -478,6 +489,34 @@ test('M3 UI：结构化未解决问题结果显示开始追踪并写入本地状
   panel.querySelector('[data-track-issue-id]').click()
   const dbg = await ctx.w.LSB.bus.request('ai-copilot:debug')
   assert.equal(dbg.trackingState(1).items.length, 1)
+})
+
+test('M3 证据：实时楼层和重扫结果合并去重，只进入候选队列', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  dbg.createTrackingIssue(1, { title: '问题', question: '问题文本', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  const post = { postId: 9001, floor: 51, authorName: '新用户', content: '新增证据', ts: 1787000000 }
+  ctx.w.LSB.bus.emit('topic:posts-added', [post], { source: 'test', raw: true })
+  ctx.w.LSB.bus.emit('topic:posts-added', [post], { source: 'test', raw: true })
+  const after = dbg.trackingState(1).items[0]
+  assert.deepEqual(Array.from(after.pendingEvidence.map((item) => item.floor)), [51])
+  assert.equal(after.status, '有新证据')
+})
+
+test('M3 证据：重扫失败不推进水位也不清空候选', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  dbg.createTrackingIssue(1, { title: '问题', question: '问题文本', floors: [12], excerpt: '依据' }, { fingerprint: 'f', analysisVersion: '2' })
+  ctx.w.LSB.bus.emit(
+    'topic:posts-added',
+    [{ postId: 9002, floor: 52, authorName: '新用户', content: '候选', ts: 1 }],
+    { source: 'test', raw: true },
+  )
+  const before = dbg.trackingState(1).scan.lastFloor
+  ctx.failTopicPages = true
+  await assert.rejects(() => dbg.scanTrackingContext(1))
+  assert.equal(dbg.trackingState(1).scan.lastFloor, before)
+  assert.equal(dbg.trackingState(1).items[0].pendingEvidence.length, 1)
 })
 
 test('M3 状态：缺失存储返回空集合，保存后按主题隔离', async () => {
