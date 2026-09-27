@@ -1474,7 +1474,14 @@
     let disposed = false
     const buttons = new Set()
     const trackingReviewBusy = new Set()
+    const trackingSelectedIds = new Set()
+    let trackingFilter = 'active'
     let trackingScanToken = 0
+
+    function resetTrackingListView() {
+      trackingSelectedIds.clear()
+      trackingFilter = 'active'
+    }
 
     function esc(value) {
       return api.util.esc(String(value ?? ''))
@@ -1515,6 +1522,7 @@
 
     function closePanel() {
       stopWaitClock()
+      resetTrackingListView()
       mask?.remove()
       panel?.remove()
       mask = null
@@ -1654,6 +1662,14 @@
 
     function renderTrackingList(body, topicId, options = {}) {
       const state = loadTrackingState(topicId)
+      const allowedFilters = new Set(['active', 'archived', 'all'])
+      if (!allowedFilters.has(trackingFilter)) trackingFilter = 'active'
+      const visibleItems = state.items.filter((item) =>
+        trackingFilter === 'all' || (trackingFilter === 'archived' ? Boolean(item.archivedAt) : !item.archivedAt),
+      )
+      for (const id of [...trackingSelectedIds]) {
+        if (!visibleItems.some((item) => item.id === id)) trackingSelectedIds.delete(id)
+      }
       const scanState = options.scanState || body.getAttribute('data-track-scan-state') || 'ready'
       const scanError = String(options.scanError || '')
       body.setAttribute('data-track-scan-state', scanState)
@@ -1673,6 +1689,26 @@
       rescan.disabled = scanState === 'scanning'
       rescan.onclick = () => renderTrack(body)
       toolbar.appendChild(rescan)
+
+      const filterLabel = document.createElement('label')
+      filterLabel.className = 'lsb-copilot-track-filter'
+      filterLabel.textContent = '显示：'
+      const filter = document.createElement('select')
+      filter.setAttribute('data-track-filter', '')
+      for (const [value, label] of [['active', '活动'], ['archived', '已归档'], ['all', '全部']]) {
+        const option = document.createElement('option')
+        option.value = value
+        option.textContent = label
+        option.selected = trackingFilter === value
+        filter.appendChild(option)
+      }
+      filter.onchange = () => {
+        trackingFilter = filter.value
+        trackingSelectedIds.clear()
+        renderTrackingList(body, topicId)
+      }
+      filterLabel.appendChild(filter)
+      toolbar.appendChild(filterLabel)
       body.appendChild(toolbar)
 
       const scanStatus = document.createElement('div')
@@ -1683,6 +1719,93 @@
       else scanStatus.textContent = state.scan.ts ? `最近扫描：${new Date(state.scan.ts).toLocaleString()}` : '尚未扫描'
       body.appendChild(scanStatus)
 
+      const selectedItems = visibleItems.filter((item) => trackingSelectedIds.has(item.id))
+      const selectedActive = selectedItems.filter((item) => !item.archivedAt)
+      const selectedArchived = selectedItems.filter((item) => item.archivedAt)
+      const validSelected = selectedActive.filter((item) => item.suggestion?.valid && REVIEW_STATES.includes(item.suggestion.status))
+      const bulk = document.createElement('div')
+      bulk.className = 'lsb-actions lsb-copilot-track-bulk'
+      bulk.setAttribute('data-track-bulk-toolbar', '')
+
+      const selectAll = document.createElement('input')
+      selectAll.type = 'checkbox'
+      selectAll.setAttribute('data-track-select-all', '')
+      selectAll.checked = Boolean(visibleItems.length && visibleItems.every((item) => trackingSelectedIds.has(item.id)))
+      selectAll.disabled = !visibleItems.length
+      selectAll.title = '选择当前筛选结果'
+      selectAll.onchange = () => {
+        if (selectAll.checked) visibleItems.forEach((item) => trackingSelectedIds.add(item.id))
+        else visibleItems.forEach((item) => trackingSelectedIds.delete(item.id))
+        renderTrackingList(body, topicId)
+      }
+      bulk.appendChild(selectAll)
+
+      const selectedCount = document.createElement('span')
+      selectedCount.className = 'lsb-row-desc'
+      selectedCount.setAttribute('data-track-selected-count', '')
+      selectedCount.textContent = `已选 ${selectedItems.length} 项`
+      bulk.appendChild(selectedCount)
+
+      const archive = document.createElement('button')
+      archive.className = 'lsb-btn'
+      archive.setAttribute('data-track-bulk-archive', '')
+      archive.textContent = '批量归档'
+      archive.disabled = !selectedActive.length
+      archive.onclick = () => {
+        void api.ui.confirm(`归档 ${selectedActive.length} 个追踪项？归档后将停止接收新证据。`).then((ok) => {
+          if (!ok || disposed || !body.isConnected) return
+          try {
+            archiveTrackingItems(topicId, selectedActive.map((item) => item.id))
+            trackingSelectedIds.clear()
+            renderTrackingList(body, topicId)
+          } catch (error) {
+            api.ui.toast(String(error?.message || error), { type: 'error' })
+          }
+        })
+      }
+      bulk.appendChild(archive)
+
+      const restore = document.createElement('button')
+      restore.className = 'lsb-btn'
+      restore.setAttribute('data-track-bulk-restore', '')
+      restore.textContent = '批量恢复'
+      restore.disabled = !selectedArchived.length
+      restore.onclick = () => {
+        void api.ui.confirm(`恢复 ${selectedArchived.length} 个追踪项？恢复后将重新接收后续新证据。`).then((ok) => {
+          if (!ok || disposed || !body.isConnected) return
+          try {
+            restoreTrackingItems(topicId, selectedArchived.map((item) => item.id))
+            trackingSelectedIds.clear()
+            renderTrackingList(body, topicId)
+          } catch (error) {
+            api.ui.toast(String(error?.message || error), { type: 'error' })
+          }
+        })
+      }
+      bulk.appendChild(restore)
+
+      const acceptBulk = document.createElement('button')
+      acceptBulk.className = 'lsb-btn is-primary'
+      acceptBulk.setAttribute('data-track-bulk-accept', '')
+      acceptBulk.textContent = `接受有效建议${validSelected.length ? ` (${validSelected.length})` : ''}`
+      acceptBulk.disabled = !validSelected.length
+      acceptBulk.onclick = () => {
+        const skipped = selectedItems.length - validSelected.length
+        void api.ui.confirm(`接受 ${validSelected.length} 条有效建议？${skipped ? ` 将跳过 ${skipped} 项。` : ''}`).then((ok) => {
+          if (!ok || disposed || !body.isConnected) return
+          try {
+            const result = acceptTrackingSuggestions(topicId, validSelected.map((item) => item.id))
+            trackingSelectedIds.clear()
+            api.ui.toast(`已接受 ${result.items.length} 条建议${result.skipped.length ? `，跳过 ${result.skipped.length} 项` : ''}`, { type: 'success' })
+            renderTrackingList(body, topicId)
+          } catch (error) {
+            api.ui.toast(String(error?.message || error), { type: 'error' })
+          }
+        })
+      }
+      bulk.appendChild(acceptBulk)
+      body.appendChild(bulk)
+
       const list = document.createElement('div')
       list.className = 'lsb-copilot-track-list'
       if (state.unsupportedVersion) {
@@ -1691,24 +1814,49 @@
         incompatible.setAttribute('data-track-unsupported', state.unsupportedVersion)
         incompatible.textContent = `追踪数据版本不兼容（${state.unsupportedVersion}），请重新建立追踪项。`
         list.appendChild(incompatible)
-      } else if (!state.items.length) {
+      } else if (!visibleItems.length) {
         const empty = document.createElement('div')
         empty.className = 'lsb-empty'
         empty.setAttribute('data-track-empty', '')
-        empty.textContent = '当前主题还没有追踪项。先在“讨论分析 → 未解决问题”中选择“开始追踪”。'
+        empty.textContent = state.items.length
+          ? trackingFilter === 'archived'
+            ? '当前没有已归档追踪项。'
+            : trackingFilter === 'all'
+              ? '当前主题还没有追踪项。先在“讨论分析 → 未解决问题”中选择“开始追踪”。'
+              : '当前没有活动追踪项。'
+          : '当前主题还没有追踪项。先在“讨论分析 → 未解决问题”中选择“开始追踪”。'
         list.appendChild(empty)
       }
 
-      for (const item of state.items) {
+      for (const item of visibleItems) {
         const card = document.createElement('article')
         card.className = 'lsb-copilot-track-card'
         card.setAttribute('data-track-card', '')
         card.setAttribute('data-track-id', item.id)
 
+        const select = document.createElement('input')
+        select.type = 'checkbox'
+        select.setAttribute('data-track-select', item.id)
+        select.checked = trackingSelectedIds.has(item.id)
+        select.title = '选择追踪项'
+        select.onchange = () => {
+          if (select.checked) trackingSelectedIds.add(item.id)
+          else trackingSelectedIds.delete(item.id)
+          renderTrackingList(body, topicId)
+        }
+        card.appendChild(select)
+
         const heading = document.createElement('strong')
         heading.className = 'lsb-copilot-track-title'
         heading.textContent = item.title ? `${item.title}：${item.question}` : item.question
         card.appendChild(heading)
+
+        if (item.archivedAt) {
+          const archived = document.createElement('span')
+          archived.className = 'lsb-copilot-track-archived'
+          archived.textContent = '已归档'
+          card.appendChild(archived)
+        }
 
         const status = document.createElement('div')
         status.className = 'lsb-copilot-track-status'
@@ -1738,7 +1886,7 @@
             suggestion.appendChild(rationale)
           }
           renderCitations(suggestion, trackingCitationRecords(item, item.suggestion.citations, topicId))
-          if (item.suggestion.valid) {
+          if (item.suggestion.valid && !item.archivedAt) {
             const actions = document.createElement('div')
             actions.className = 'lsb-actions'
             const accept = document.createElement('button')
@@ -1774,7 +1922,24 @@
         const actions = document.createElement('div')
         actions.className = 'lsb-actions'
         const busyKey = `${topicId}:${item.id}`
-        if (item.pendingEvidence.length) {
+        if (item.archivedAt) {
+          const restore = document.createElement('button')
+          restore.className = 'lsb-btn is-primary'
+          restore.setAttribute('data-track-restore', '')
+          restore.textContent = '恢复追踪'
+          restore.onclick = () => {
+            void api.ui.confirm('恢复后，这个追踪项将重新接收当前主题的新证据。').then((ok) => {
+              if (!ok || disposed || !body.isConnected) return
+              try {
+                restoreTrackingItems(topicId, [item.id])
+                renderTrackingList(body, topicId)
+              } catch (error) {
+                api.ui.toast(String(error?.message || error), { type: 'error' })
+              }
+            })
+          }
+          actions.appendChild(restore)
+        } else if (item.pendingEvidence.length) {
           const review = document.createElement('button')
           review.className = 'lsb-btn is-primary'
           review.setAttribute('data-track-review', '')
@@ -1802,23 +1967,25 @@
           actions.appendChild(review)
         }
 
-        const confirm = document.createElement('button')
-        confirm.className = 'lsb-btn'
-        confirm.setAttribute('data-track-confirm', '')
-        confirm.textContent = item.status === '已确认解决' ? '已确认解决' : '标为已确认解决'
-        confirm.disabled = item.status === '已确认解决'
-        confirm.onclick = () => {
-          void api.ui.confirm('确认把这个问题标为已确认解决？').then((ok) => {
-            if (!ok || disposed || generation !== Number(body.getAttribute('data-track-generation')) || !body.isConnected) return
-            try {
-              confirmTrackingIssue(topicId, item.id)
-              renderTrackingList(body, topicId)
-            } catch (error) {
-              api.ui.toast(String(error?.message || error), { type: 'error' })
-            }
-          })
+        if (!item.archivedAt) {
+          const confirm = document.createElement('button')
+          confirm.className = 'lsb-btn'
+          confirm.setAttribute('data-track-confirm', '')
+          confirm.textContent = item.status === '已确认解决' ? '已确认解决' : '标为已确认解决'
+          confirm.disabled = item.status === '已确认解决'
+          confirm.onclick = () => {
+            void api.ui.confirm('确认把这个问题标为已确认解决？').then((ok) => {
+              if (!ok || disposed || generation !== Number(body.getAttribute('data-track-generation')) || !body.isConnected) return
+              try {
+                confirmTrackingIssue(topicId, item.id)
+                renderTrackingList(body, topicId)
+              } catch (error) {
+                api.ui.toast(String(error?.message || error), { type: 'error' })
+              }
+            })
+          }
+          actions.appendChild(confirm)
         }
-        actions.appendChild(confirm)
         card.appendChild(actions)
         list.appendChild(card)
       }
@@ -2131,6 +2298,11 @@
         '.lsb-copilot-citations{margin-top:12px;padding-top:8px;border-top:1px solid var(--line-soft,#eee);font-size:12px}' +
         '.lsb-copilot-citation{margin-top:4px;color:var(--text-muted,#777)}' +
         '.lsb-copilot-citation a{color:var(--brand,#5eaaa0)}' +
+        '.lsb-copilot-track-filter{display:inline-flex;align-items:center;gap:4px;margin-left:auto}' +
+        '.lsb-copilot-track-filter select{padding:4px 6px;border:1px solid var(--line,#ddd);border-radius:6px;background:var(--panel,#fff);color:inherit}' +
+        '.lsb-copilot-track-bulk{align-items:center;flex-wrap:wrap;margin-top:8px}' +
+        '.lsb-copilot-track-card>input[type=checkbox]{float:right;margin:2px 0 0 8px}' +
+        '.lsb-copilot-track-archived{display:inline-block;margin:6px 0 0 6px;padding:2px 7px;border-radius:999px;background:var(--fill-soft,#f2f4f5);font-size:12px;color:var(--text-muted,#777)}' +
         '.lsb-copilot-track-list{max-height:58vh;overflow:auto;margin-top:10px}' +
         '.lsb-copilot-track-card{border:1px solid var(--line-soft,#eee);border-radius:8px;padding:10px;margin:8px 0;background:var(--panel,#fff)}' +
         '.lsb-copilot-track-title{display:block;line-height:1.5}' +
