@@ -2,7 +2,7 @@
 // @name         LSB·AI 帖子副驾
 // @namespace    https://linux.sb/
 // @version      0.5.0
-// @description  帖子问答、讨论分析、新回复摘要、问题追踪与回复草稿。复用 LSB·AI 总结的模型配置，不自动提交站内回复。
+// @description  帖子问答、讨论分析、新回复摘要、问题追踪、回复草稿与只读自然语言操作台。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -30,7 +30,6 @@
       plugins: { 'ai-summary': '^1.2.0' },
     },
     permissions: ['read', 'storage', 'ui', 'events'],
-    pages: ['topic'],
     config: CONFIG,
   }
 
@@ -1916,6 +1915,8 @@
 
     let panel = null
     let mask = null
+    let consolePanel = null
+    let consoleMask = null
     let waitTimer = null
     let routeTimer = null
     let waitStarted = 0
@@ -2001,6 +2002,224 @@
       panel?.remove()
       mask = null
       panel = null
+    }
+
+    function closeConsolePanel() {
+      consoleMask?.remove()
+      consolePanel?.remove()
+      consoleMask = null
+      consolePanel = null
+    }
+
+    function openConsolePanel() {
+      if (disposed) return
+      if (consolePanel?.isConnected && consoleMask?.isConnected) {
+        consolePanel.querySelector('[data-console-question]')?.focus()
+        return
+      }
+      closeConsolePanel()
+      consoleMask = document.createElement('div')
+      consoleMask.className = 'lsb-mask lsb-ai-console-mask'
+      consolePanel = document.createElement('div')
+      consolePanel.className = 'lsb-panel lsb-ai-console-panel'
+      document.body.append(consoleMask, consolePanel)
+      const panelNode = consolePanel
+      consoleMask.onclick = (event) => {
+        if (event.target === consoleMask) closeConsolePanel()
+      }
+      renderConsolePrompt(panelNode)
+    }
+
+    function renderConsolePrompt(host, question = '') {
+      if (!host?.isConnected) return
+      const context = consoleContext()
+      const topicHint = context.currentTopic
+        ? `当前主题：${context.currentTopic.title || `主题 #${context.route.id}`} · `
+        : ''
+      const topicCount = context.catalog.length
+      host.innerHTML = `
+        <div class="lsb-panel-head lsb-ai-console-head">
+          <strong>✨ AI 操作台</strong>
+          <span class="lsb-ver">只读查询</span>
+          <button class="lsb-panel-close" data-console-close title="关闭">×</button>
+        </div>
+        <div class="lsb-view lsb-ai-console-view">
+          <div class="lsb-row-desc">${esc(topicHint)}本地追踪项覆盖 ${topicCount} 个主题 · 默认只查活动追踪项；明确询问归档内容后才会纳入。</div>
+          <div class="lsb-copilot-quick lsb-ai-console-quick">
+            <button class="lsb-btn" data-console-quick="当前帖子有哪些未解决问题？">当前帖子未解决问题</button>
+            <button class="lsb-btn" data-console-quick="哪些活动追踪项最近有新证据？">最近新增证据</button>
+            <button class="lsb-btn" data-console-quick="哪些追踪项可能已解决？">可能已解决</button>
+            <button class="lsb-btn" data-console-quick="汇总所有活动追踪项，按状态分组。">按状态汇总</button>
+          </div>
+          <textarea class="lsb-copilot-question" data-console-question rows="3" placeholder="询问当前帖子或本地追踪项……"></textarea>
+          <div class="lsb-actions lsb-ai-console-actions">
+            <button class="lsb-btn is-primary" data-console-run>运行查询</button>
+          </div>
+        </div>`
+      host.querySelector('[data-console-close]').onclick = closeConsolePanel
+      host.querySelectorAll('[data-console-quick]').forEach((button) => {
+        button.onclick = () => {
+          const input = host.querySelector('[data-console-question]')
+          input.value = button.getAttribute('data-console-quick') || ''
+          input.focus()
+        }
+      })
+      host.querySelector('[data-console-run]').onclick = () => {
+        const input = host.querySelector('[data-console-question]')
+        void runConsoleQueryAndShow(host, input.value)
+      }
+      host.querySelector('[data-console-question]').addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+          event.preventDefault()
+          void runConsoleQueryAndShow(host, event.currentTarget.value)
+        }
+      })
+    }
+
+    function renderConsoleWait(host, question, activeStage = '') {
+      if (!host?.isConnected) return
+      const stages = [
+        ['plan', '生成查询计划'],
+        ['local', '本地筛选'],
+        ['answer', '生成答案'],
+      ]
+      host.innerHTML = `
+        <div class="lsb-panel-head lsb-ai-console-head">
+          <strong>✨ AI 操作台</strong>
+          <span class="lsb-ver">只读查询</span>
+          <button class="lsb-panel-close" data-console-close title="关闭">×</button>
+        </div>
+        <div class="lsb-view lsb-ai-console-view">
+          <div class="lsb-row-desc">${esc(question)}</div>
+          <ol class="lsb-ai-console-stages" data-console-stage>
+            ${stages.map(([id, label]) => `<li data-stage="${id}">${label}</li>`).join('')}
+          </ol>
+        </div>`
+      host.querySelector('[data-console-close]').onclick = closeConsolePanel
+      setConsoleStage(host, activeStage)
+    }
+
+    function setConsoleStage(host, activeStage) {
+      const order = ['plan', 'local', 'answer']
+      const activeIndex = order.indexOf(activeStage)
+      host?.querySelectorAll('[data-stage]').forEach((node) => {
+        const index = order.indexOf(node.getAttribute('data-stage'))
+        node.dataset.state = index < activeIndex ? 'done' : index === activeIndex ? 'active' : 'pending'
+      })
+    }
+
+    function renderConsoleCitations(host, citations) {
+      const rows = Array.isArray(citations) ? citations : []
+      if (!rows.length) return
+      const section = document.createElement('section')
+      section.className = 'lsb-ai-console-citations'
+      const heading = document.createElement('strong')
+      heading.textContent = '引用与证据'
+      section.appendChild(heading)
+      for (const citation of rows) {
+        const row = document.createElement('div')
+        row.className = 'lsb-copilot-citation'
+        row.setAttribute('data-console-citation', `${citation.topicId}:${citation.floor}`)
+        if (citation.known && citation.href) {
+          const link = document.createElement('a')
+          link.href = citation.href
+          link.textContent = `主题 #${citation.topicId} · #${citation.floor}`
+          row.append(link)
+          if (citation.issueId) row.append(` · 问题 ${citation.issueId}`)
+          if (citation.excerpt) row.append(`：${citation.excerpt}`)
+        } else {
+          row.textContent = `主题 #${citation.topicId} · #${citation.floor}：未验证引用`
+        }
+        section.appendChild(row)
+      }
+      host.appendChild(section)
+    }
+
+    function renderConsoleResult(host, record) {
+      if (!host?.isConnected) return
+      const meta = record.meta || {}
+      const facts = [
+        `${record.operationResults?.items?.length || 0} 个追踪项`,
+        meta.includedArchived ? '含归档' : '仅活动项',
+        meta.truncated ? '结果已截断' : '',
+        meta.citationCount ? `引用 ${meta.citationCount} 条` : '',
+      ].filter(Boolean)
+      host.innerHTML = `
+        <div class="lsb-panel-head lsb-ai-console-head">
+          <strong>✨ AI 操作台结果</strong>
+          <span class="lsb-ver">${esc(facts.join(' · '))}</span>
+          <button class="lsb-panel-close" data-console-close title="关闭">×</button>
+        </div>
+        <div class="lsb-view lsb-ai-console-view">
+          <div class="lsb-row-desc lsb-copilot-facts">${esc(facts.join(' · '))}</div>
+          <div class="lsb-ai-console-answer lsb-md" data-console-result></div>
+          ${record.operationResults?.truncated ? '<div class="lsb-row-desc">部分本地结果超过上下文上限，未发送给模型。</div>' : ''}
+          ${record.operationResults?.includedArchived ? '<div class="lsb-row-desc">本次查询含归档追踪项。</div>' : ''}
+        </div>
+        <div class="lsb-actions lsb-ai-console-actions">
+          <button class="lsb-btn" data-console-again>重新查询</button>
+          <button class="lsb-btn" data-console-copy>复制</button>
+          <button class="lsb-btn is-primary" data-console-close-action>关闭</button>
+        </div>`
+      const answer = host.querySelector('[data-console-result]')
+      try {
+        answer.innerHTML = provider.renderMarkdown(record.text)
+      } catch {
+        answer.textContent = record.text
+      }
+      renderConsoleCitations(host.querySelector('.lsb-ai-console-view'), meta.citations)
+      host.querySelector('[data-console-close]').onclick = closeConsolePanel
+      host.querySelector('[data-console-close-action]').onclick = closeConsolePanel
+      host.querySelector('[data-console-copy]').onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(record.text)
+          api.ui.toast('操作台答案已复制', { type: 'success' })
+        } catch {
+          api.ui.toast('复制失败，请手动选择文本', { type: 'error' })
+        }
+      }
+      host.querySelector('[data-console-again]').onclick = () => renderConsolePrompt(host, meta.question || '')
+    }
+
+    function renderConsoleError(host, question, error) {
+      if (!host?.isConnected) return
+      host.innerHTML = `
+        <div class="lsb-panel-head lsb-ai-console-head">
+          <strong>✨ AI 操作台</strong>
+          <button class="lsb-panel-close" data-console-close title="关闭">×</button>
+        </div>
+        <div class="lsb-view lsb-ai-console-view">
+          <div class="lsb-empty lsb-copilot-error" data-console-error></div>
+        </div>
+        <div class="lsb-actions lsb-ai-console-actions">
+          <button class="lsb-btn" data-console-retry>重试</button>
+          <button class="lsb-btn is-primary" data-console-close-action>关闭</button>
+        </div>`
+      host.querySelector('[data-console-error]').textContent = String(error?.message || error || '查询失败')
+      host.querySelector('[data-console-close]').onclick = closeConsolePanel
+      host.querySelector('[data-console-close-action]').onclick = closeConsolePanel
+      host.querySelector('[data-console-retry]').onclick = () => void runConsoleQueryAndShow(host, question, { force: true })
+    }
+
+    async function runConsoleQueryAndShow(host, question, options = {}) {
+      const requestGeneration = generation
+      const normalizedQuestion = String(question || '').trim()
+      renderConsoleWait(host, normalizedQuestion, 'plan')
+      try {
+        const record = await runConsoleQuery({
+          question: normalizedQuestion,
+          force: Boolean(options.force),
+          onStage: (stage) => {
+            if (disposed || requestGeneration !== generation || !host.isConnected || host !== consolePanel) return
+            setConsoleStage(host, stage)
+          },
+        })
+        if (disposed || requestGeneration !== generation || !host.isConnected || host !== consolePanel) return
+        renderConsoleResult(host, record)
+      } catch (error) {
+        if (disposed || requestGeneration !== generation || !host.isConnected || host !== consolePanel) return
+        renderConsoleError(host, normalizedQuestion, error)
+      }
     }
 
     function ensurePanel() {
@@ -2860,6 +3079,21 @@
       link?.classList.add('lsb-ai-copilot-top')
     }
 
+    function syncConsoleTopLink() {
+      const existing = document.querySelector('a.lsb-ai-console-top')
+      if (disposed) {
+        existing?.remove()
+        return
+      }
+      if (existing) return
+      const link = api.ui.topLink({
+        label: '✨ AI 操作台',
+        title: '查询当前帖子和本地追踪项',
+        onClick: openConsolePanel,
+      })
+      link?.classList.add('lsb-ai-console-top')
+    }
+
     function syncDigestRoute() {
       if (api.page.type !== 'topic' || api.page.id == null) return
       pendingReplies(api.page.id, currentPosts())
@@ -2869,6 +3103,7 @@
     syncTrackingRoute()
     api.dom.each('li.post-entry', injectOpButton)
     syncTopLink()
+    syncConsoleTopLink()
     api.on('topic:posts-added', (posts) => {
       if (api.page.type !== 'topic' || api.page.id == null || !Array.isArray(posts) || !posts.length) return
       pendingReplies(api.page.id, posts)
@@ -2883,6 +3118,7 @@
       generation += 1
       trackingScanToken += 1
       closePanel()
+      closeConsolePanel()
       buttons.clear()
       syncDigestRoute()
       syncTrackingRoute()
@@ -2890,6 +3126,7 @@
       routeTimer = setTimeout(() => {
         routeTimer = null
         syncTopLink()
+        syncConsoleTopLink()
       }, 50)
     })
     api.ui.configTab({ name: 'AI 副驾', order: 54 })
@@ -2918,7 +3155,20 @@
         '.lsb-copilot-track-title{display:block;line-height:1.5}' +
         '.lsb-copilot-track-status{display:inline-block;margin:6px 0;padding:2px 7px;border-radius:999px;background:var(--fill-soft,#f2f4f5);font-size:12px}' +
         '.lsb-copilot-track-suggestion{margin-top:8px;padding:8px;border-left:3px solid var(--brand,#5eaaa0);background:var(--fill-soft,#f7faf9)}' +
-        '.lsb-copilot-track-suggestion .lsb-actions{margin-top:8px}',
+      '.lsb-copilot-track-suggestion .lsb-actions{margin-top:8px}',
+    )
+    api.ui.style(
+      '.lsb-ai-console-panel{width:min(820px,95vw);max-height:88vh}' +
+        '.lsb-ai-console-view{padding:14px 16px}' +
+        '.lsb-ai-console-quick{margin:12px 0}' +
+        '.lsb-ai-console-actions{position:sticky;bottom:0;background:var(--panel,#fff)}' +
+        '.lsb-ai-console-stages{display:flex;gap:20px;padding:8px 0;list-style:none}' +
+        '.lsb-ai-console-stages li{color:var(--text-muted,#888)}' +
+        '.lsb-ai-console-stages li[data-state="active"]{color:var(--brand,#5eaaa0);font-weight:600}' +
+        '.lsb-ai-console-stages li[data-state="done"]{color:var(--success,#3aa08f)}' +
+        '.lsb-ai-console-answer{line-height:1.7;max-height:56vh;overflow:auto}' +
+        '.lsb-ai-console-citations{margin-top:12px;padding-top:9px;border-top:1px solid var(--line-soft,#eee);font-size:12px}' +
+        '.lsb-ai-console-citations>strong{display:block;margin-bottom:5px}',
     )
 
     api.onDispose(() => {
@@ -2928,7 +3178,9 @@
       if (routeTimer) clearTimeout(routeTimer)
       routeTimer = null
       closePanel()
+      closeConsolePanel()
       document.querySelector('a.lsb-ai-copilot-top')?.remove()
+      document.querySelector('a.lsb-ai-console-top')?.remove()
       buttons.clear()
       trackingReviewBusy.clear()
       running = null

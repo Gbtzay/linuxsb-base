@@ -213,8 +213,69 @@ test('UI：帖子页显示副驾入口，首页不显示', async () => {
   assert.ok([...topic.w.document.querySelectorAll('.lsb-op')].some((b) => /AI 副驾/.test(b.textContent)))
 
   const home = makeSite(homeHtml, 'https://linux.sb/')
-  await load(home, { active: false })
+  await load(home)
   assert.equal(home.w.document.querySelector('.lsb-ai-copilot-top'), null)
+  assert.ok(home.w.document.querySelector('.lsb-ai-console-top'))
+})
+
+test('M4 UI：普通页显示操作台入口，帖子页同时保留副驾入口', async () => {
+  const topic = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(topic)
+  assert.ok(topic.w.document.querySelector('a.lsb-ai-console-top'))
+  assert.ok(topic.w.document.querySelector('a.lsb-ai-copilot-top'))
+
+  const home = makeSite(homeHtml, 'https://linux.sb/')
+  const dbg = await load(home)
+  assert.equal(home.w.document.querySelector('a.lsb-ai-copilot-top'), null)
+  assert.ok(home.w.document.querySelector('a.lsb-ai-console-top'))
+  assert.equal(dbg.state().page, 'home')
+})
+
+test('M4 UI：快捷问题填充输入框，面板显示范围提示且没有写操作按钮', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  ctx.w.document.querySelector('a.lsb-ai-console-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-ai-console-panel')
+  assert.ok(panel.querySelector('[data-console-question]'))
+  assert.ok(panel.querySelector('[data-console-run]'))
+  assert.match(panel.textContent, /本地追踪项|活动追踪项/)
+  panel.querySelector('[data-console-quick]').click()
+  assert.equal(panel.querySelector('[data-console-question]').value, '当前帖子有哪些未解决问题？')
+  assert.equal([...panel.querySelectorAll('button')].some((b) => /归档|接受|确认解决|发帖|发送/.test(b.textContent)), false)
+})
+
+test('M4 UI：查询显示两阶段进度、答案和结构化引用', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReplies: [
+      { choices: [{ message: { content: '{"version":1,"intent":"question","includeCurrentTopic":true,"includeArchived":false,"statuses":[],"topicIds":[],"terms":[]}' } }] },
+      { choices: [{ message: { content: '结论见 [[topic:1 floor:12]]。' } }] },
+    ],
+  })
+  await load(ctx)
+  ctx.w.document.querySelector('a.lsb-ai-console-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-ai-console-panel')
+  panel.querySelector('[data-console-question]').value = '依据是什么？'
+  panel.querySelector('[data-console-run]').click()
+  assert.ok(await until(() => panel.querySelector('[data-console-result]')))
+  assert.match(panel.textContent, /结论见/)
+  assert.ok(panel.querySelector('[data-console-citation="1:12"]'))
+})
+
+test('M4 生命周期：路由切换或停用后旧操作台请求不能回写', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  const release = ctx.holdLLM()
+  ctx.w.document.querySelector('a.lsb-ai-console-top').click()
+  const panel = ctx.w.document.querySelector('.lsb-ai-console-panel')
+  panel.querySelector('[data-console-question]').value = '旧页面'
+  panel.querySelector('[data-console-run]').click()
+  assert.ok(await until(() => panel.querySelector('[data-console-stage]')))
+  ctx.w.LSB.bus.emit('route:changed', { href: 'https://linux.sb/', page: { type: 'home' } }, { source: 'core' })
+  release()
+  await sleep(100)
+  assert.equal(ctx.w.document.querySelector('.lsb-ai-console-panel'), null)
+  ctx.w.LSB.disable('ai-copilot')
+  assert.equal(ctx.w.document.querySelector('a.lsb-ai-console-top'), null)
 })
 
 test('UI：问答发送后显示结果并保留复制按钮', async () => {
