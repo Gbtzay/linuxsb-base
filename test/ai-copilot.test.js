@@ -741,3 +741,29 @@ test('M3.1 状态：未知追踪版本不被覆盖并显示重新建立提示', 
   assert.ok(await until(() => /重新建立追踪项/.test(panel.textContent)), panel.textContent)
   assert.match(ctx.w.localStorage.getItem('lsb_base:ai-copilot:track:1'), /"version":"99"/)
 })
+
+test('M3.1 导出：JSON、Markdown、问题 CSV 和证据 CSV 包含活动与归档数据', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const issue = dbg.createTrackingIssue(1, { title: '缓存', question: '缓存会过期吗？', floors: [12], excerpt: '依据' })
+  dbg.archiveTrackingItems(1, [issue.id])
+
+  const payload = dbg.trackingExport(1)
+  assert.equal(payload.schema, 'lsb-ai-copilot-tracking-export')
+  assert.equal(payload.tracking.version, '2')
+  assert.equal(JSON.parse(dbg.serializeTracking(1, 'json')).tracking.items.length, 1)
+  assert.match(dbg.serializeTracking(1, 'markdown'), /缓存会过期吗？/)
+  assert.match(dbg.serializeTracking(1, 'issues-csv'), /^\uFEFF/)
+  assert.match(dbg.serializeTracking(1, 'evidence-csv'), /key|id:12/)
+  assert.match(dbg.serializeTracking(1, 'markdown'), /已归档|归档/)
+})
+
+test('M3.1 导出：CSV 正确转义引号、逗号和换行，不泄露配置', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  dbg.createTrackingIssue(1, { title: '含,逗号', question: '含"引号\n换行', floors: [12], excerpt: '摘要' })
+  const csv = dbg.serializeTracking(1, 'issues-csv')
+  assert.match(csv, /"含,逗号"/)
+  assert.match(csv, /""引号/)
+  assert.doesNotMatch(csv, /apiKey|api\.example\.com/)
+})

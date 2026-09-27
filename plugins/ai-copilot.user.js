@@ -224,6 +224,7 @@
     let cfg = api.config()
     const provider = api.plugin('ai-summary')
     let running = null
+    const downloadUrls = new Set()
     api.on('config:changed:ai-copilot', () => {
       cfg = api.config()
     })
@@ -879,6 +880,167 @@
       })
       const saved = saveTrackingState(topicId, { ...state, items: next })
       return { items: saved.items.filter((item) => ids.has(item.id)), skipped }
+    }
+
+    function trackingTopicMeta(topicId) {
+      let topic = null
+      try {
+        topic = normalizeTopic(api.parse.topic(document))
+      } catch {
+        topic = null
+      }
+      const fallback = normalizeTopic(api.snapshot?.topic)
+      return {
+        id: asNumber(topicId, topic?.id || fallback?.id || topicId),
+        title: String(topic?.title || fallback?.title || ''),
+        forumName: String(topic?.forumName || fallback?.forumName || ''),
+      }
+    }
+
+    function trackingExport(topicId = api.page.id) {
+      const state = loadTrackingState(topicId)
+      return {
+        schema: 'lsb-ai-copilot-tracking-export',
+        version: 1,
+        exportedAt: Date.now(),
+        topic: trackingTopicMeta(topicId),
+        tracking: state,
+      }
+    }
+
+    function exportText(value) {
+      return String(value == null ? '' : value).replace(/\r?\n/g, ' ').trim()
+    }
+
+    function trackingEvidenceLink(topicId, row) {
+      const floor = asNumber(row?.floor, 0)
+      const postId = row?.postId ? String(row.postId) : ''
+      if (floor <= 0) return ''
+      return postId ? `[#${floor}](${api.routes.topic(topicId)}?floor=${floor}#post-${postId})` : `[#${floor}]`
+    }
+
+    function trackingMarkdown(topicId) {
+      const payload = trackingExport(topicId)
+      const active = payload.tracking.items.filter((item) => !item.archivedAt)
+      const archived = payload.tracking.items.filter((item) => item.archivedAt)
+      const lines = [
+        '# AI 帖子副驾追踪导出',
+        '',
+        `- 主题 ID：${payload.topic.id}`,
+        `- 主题：${exportText(payload.topic.title) || '未命名主题'}`,
+        `- 版块：${exportText(payload.topic.forumName) || '未知'}`,
+        `- 导出时间：${new Date(payload.exportedAt).toISOString()}`,
+        '',
+      ]
+      const appendGroup = (title, items) => {
+        lines.push(`## ${title}`, '')
+        if (!items.length) {
+          lines.push('暂无', '')
+          return
+        }
+        for (const item of items) {
+          lines.push(`### ${exportText(item.title) || '问题'}：${exportText(item.question)}`)
+          lines.push(`- ID：${item.id}`)
+          lines.push(`- 状态：${item.status}`)
+          lines.push(`- 基线楼层：${item.source.floors.map((floor) => `#${floor}`).join('、') || '无'}`)
+          lines.push(`- 来源摘要：${exportText(item.source.excerpt) || '无'}`)
+          lines.push('- 已记录证据：')
+          for (const row of item.evidence) lines.push(`  - ${trackingEvidenceLink(topicId, row)} · ${exportText(row.excerpt)}`)
+          lines.push('- 待复核证据：')
+          for (const row of item.pendingEvidence) lines.push(`  - ${trackingEvidenceLink(topicId, row)} · ${exportText(row.excerpt)}`)
+          if (item.suggestion) {
+            lines.push(`- 最近模型建议：${item.suggestion.valid ? item.suggestion.status : '未验证'}`)
+            if (item.suggestion.rationale) lines.push(`- 建议依据：${exportText(item.suggestion.rationale)}`)
+          }
+          lines.push('- 操作历史：')
+          for (const event of item.history) lines.push(`  - ${event.type} · ${event.status || '无状态'} · ${event.ts ? new Date(event.ts).toISOString() : '未知时间'}`)
+          lines.push('')
+        }
+      }
+      appendGroup('活动追踪项', active)
+      appendGroup('已归档追踪项', archived)
+      return lines.join('\n')
+    }
+
+    function csvCell(value) {
+      return `"${String(value ?? '').replaceAll('"', '""')}"`
+    }
+
+    function csvDocument(headers, rows) {
+      return `\uFEFF${[headers, ...rows].map((row) => row.map(csvCell).join(',')).join('\n')}`
+    }
+
+    function trackingIssuesCsv(topicId) {
+      const payload = trackingExport(topicId)
+      const headers = ['topicId', 'issueId', 'title', 'question', 'status', 'archived', 'createdAt', 'updatedAt', 'baselineFloors', 'evidenceCount', 'pendingCount', 'latestSuggestion', 'sourceExcerpt']
+      const rows = payload.tracking.items.map((item) => [
+        payload.topic.id,
+        item.id,
+        item.title,
+        item.question,
+        item.status,
+        item.archivedAt ? 'true' : 'false',
+        item.createdAt ? new Date(item.createdAt).toISOString() : '',
+        item.updatedAt ? new Date(item.updatedAt).toISOString() : '',
+        item.source.floors.join('|'),
+        item.evidence.length,
+        item.pendingEvidence.length,
+        item.suggestion?.valid ? item.suggestion.status : item.suggestion ? '未验证' : '',
+        item.source.excerpt,
+      ])
+      return csvDocument(headers, rows)
+    }
+
+    function trackingEvidenceCsv(topicId) {
+      const payload = trackingExport(topicId)
+      const headers = ['topicId', 'issueId', 'issueStatus', 'archived', 'kind', 'key', 'postId', 'floor', 'authorName', 'excerpt', 'seenAt']
+      const rows = []
+      for (const item of payload.tracking.items) {
+        for (const row of [...item.evidence, ...item.pendingEvidence]) {
+          rows.push([
+            payload.topic.id,
+            item.id,
+            item.status,
+            item.archivedAt ? 'true' : 'false',
+            row.kind,
+            row.key,
+            row.postId || '',
+            row.floor,
+            row.authorName,
+            row.excerpt,
+            row.seenAt ? new Date(row.seenAt).toISOString() : '',
+          ])
+        }
+      }
+      return csvDocument(headers, rows)
+    }
+
+    function serializeTracking(topicId = api.page.id, format = 'json') {
+      if (format === 'json') return JSON.stringify(trackingExport(topicId), null, 2)
+      if (format === 'markdown') return trackingMarkdown(topicId)
+      if (format === 'issues-csv') return trackingIssuesCsv(topicId)
+      if (format === 'evidence-csv') return trackingEvidenceCsv(topicId)
+      throw new Error(`不支持的追踪导出格式：${format}`)
+    }
+
+    function downloadText(name, text, mime) {
+      try {
+        const blob = new Blob([text], { type: mime })
+        const url = URL.createObjectURL(blob)
+        downloadUrls.add(url)
+        const anchor = document.createElement('a')
+        anchor.href = url
+        anchor.download = name
+        anchor.click()
+        setTimeout(() => {
+          URL.revokeObjectURL(url)
+          downloadUrls.delete(url)
+        }, 4000)
+        return true
+      } catch (error) {
+        api.log('追踪导出下载失败', error)
+        return false
+      }
     }
 
     function mergeDigestPosts(state, posts) {
@@ -1852,6 +2014,8 @@
       archiveTrackingItems,
       restoreTrackingItems,
       acceptTrackingSuggestions,
+      trackingExport,
+      serializeTracking,
       parseUnresolvedIssues,
       trackingVersion: TRACKING_VERSION,
       mergeTrackingEvidence,
