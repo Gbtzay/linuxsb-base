@@ -626,9 +626,7 @@
       const context = await collectContext({ fetchAll: true, maxPages: cfg.maxPages })
       const before = loadTrackingState(topicId)
       const beforeKeys = new Set(before.scan.seenKeys)
-      const added = context.posts.filter(
-        (post) => !beforeKeys.has(postKey(normalizePost(post))) && asNumber(post.floor, 0) > before.scan.lastFloor,
-      )
+      const added = context.posts.filter((post) => !beforeKeys.has(postKey(normalizePost(post))))
       let state = mergeTrackingEvidence(topicId, added)
       const scannedKeys = context.posts.map((post) => postKey(normalizePost(post)))
       state = saveTrackingState(topicId, {
