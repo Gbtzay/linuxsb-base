@@ -46,12 +46,60 @@ test('计划校验：未知字段、未知动作、外部 URL 和超过五步都
   const base = { version: 1, summary: '回首页', steps: [{ action: 'site.navigate', args: { target: 'home' } }] }
   assert.equal(registry.validatePlan(base, { route: { type: 'topic' } }).ok, true)
   assert.equal(registry.validatePlan({ ...base, extra: 1 }, {}).ok, false)
+  assert.equal(
+    registry.validatePlan({ ...base, steps: [{ ...base.steps[0], actionVersion: 1, actionProvider: 'p' }] }, {}).ok,
+    false,
+  )
   assert.equal(registry.validatePlan({ ...base, steps: [{ action: 'site.missing', args: {} }] }, {}).ok, false)
   assert.equal(
     registry.validatePlan({ ...base, steps: [{ action: 'site.navigate', args: { target: 'home', url: 'https://evil.example' } }] }, {}).ok,
     false,
   )
   assert.equal(registry.validatePlan({ ...base, steps: Array.from({ length: 6 }, () => base.steps[0]) }, {}).ok, false)
+})
+
+test('计划绑定动作版本与提供方；旧绑定和缺少绑定的待执行计划会失效', () => {
+  const registry = new ActionRegistry()
+  const action = (version) => ({
+    id: 'site.navigate', version, permission: 'read', args: { target: { type: 'enum', values: ['home'] } },
+    execute: () => ({ kind: 'navigation', url: '/' }), preview: () => '回首页',
+  })
+  registry.register(action(1), 'actions-v1')
+  const raw = { version: 1, summary: '回首页', steps: [{ action: 'site.navigate', args: { target: 'home' } }] }
+  const planned = registry.validatePlan(raw, {})
+  assert.equal(planned.ok, true)
+  assert.equal(planned.plan.steps[0].actionVersion, 1)
+  assert.equal(planned.plan.steps[0].actionProvider, 'actions-v1')
+  assert.equal(registry.validatePlan(raw, {}, { requireActionBinding: true }).ok, false)
+  registry.dispose('actions-v1')
+  registry.register(action(2), 'actions-v1')
+  assert.equal(registry.validatePlan(planned.plan, {}, { requireActionBinding: true }).ok, false)
+  const versionTwoPlan = registry.validatePlan(raw, {}).plan
+  registry.dispose('actions-v1')
+  registry.register(action(2), 'actions-v2')
+  assert.equal(registry.validatePlan(versionTwoPlan, {}, { requireActionBinding: true }).ok, false)
+})
+
+test('导航动作只能位于计划末尾', () => {
+  const registry = new ActionRegistry()
+  registry.register({
+    id: 'site.navigate', version: 1, permission: 'read', terminal: true,
+    args: { target: { type: 'enum', values: ['home'] } }, execute: () => ({ kind: 'navigation', url: '/' }), preview: () => '回首页',
+  }, 'actions')
+  registry.register({
+    id: 'ui.openPanel', version: 1, permission: 'ui', args: { id: { type: 'enum', values: ['core'] } },
+    execute: () => ({ kind: 'panel', id: 'core' }), preview: () => '打开面板',
+  }, 'actions')
+  const plan = {
+    version: 1,
+    summary: '回首页后打开设置',
+    steps: [
+      { action: 'site.navigate', args: { target: 'home' } },
+      { action: 'ui.openPanel', args: { id: 'core' } },
+    ],
+  }
+  assert.equal(registry.validatePlan(plan, {}).ok, false)
+  assert.equal(registry.validatePlan({ ...plan, steps: plan.steps.slice(0, 1) }, {}).ok, true)
 })
 
 test('动作结果必须可序列化，动态 enum 目录只暴露值数组', async () => {
@@ -77,12 +125,24 @@ test('首批动作：目录只暴露固定目标，执行不接受任意 URL', a
   const actions = w.LSB.__core.ai.actions({ route: { type: 'home' } })
   assert.deepEqual([...actions.map((item) => item.id)], ['site.navigate', 'site.search', 'ui.openPanel'])
   const navigate = actions.find((item) => item.id === 'site.navigate')
+  assert.equal(navigate.terminal, true)
+  assert.equal(actions.find((item) => item.id === 'site.search').terminal, true)
+  assert.equal(actions.find((item) => item.id === 'ui.openPanel').terminal, false)
   assert.ok(navigate.args.target.values.includes('forum'))
   const bad = w.LSB.__core.ai.validate(
     { action: 'site.navigate', args: { target: 'feature', feature: 'javascript:alert(1)' } },
     { route: { type: 'home' } },
   )
   assert.equal(bad.ok, false)
+  for (const args of [
+    { target: 'home', url: 'https://evil.example' },
+    { target: 'home', url: 'javascript:alert(1)' },
+    { target: 'home', url: '//evil.example/path' },
+    { target: 'home', selector: '.post' },
+    { target: 'home', request: { method: 'POST', body: 'x' } },
+  ]) {
+    assert.equal(w.LSB.__core.ai.validate({ action: 'site.navigate', args }, { route: { type: 'home' } }).ok, false)
+  }
   const result = await w.LSB.__core.ai.execute(
     { action: 'site.navigate', args: { target: 'forum', id: 7 } },
     { route: { type: 'home' } },

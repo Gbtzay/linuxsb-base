@@ -237,6 +237,7 @@ test('skin 登记列表筛选：只在首页/版块可见，停用后注销', as
   await loadBase(w, PLUG('skin.user.js'))
   const ids = w.LSB.__core.ai.actions({ route: { type: 'home' } }).map((x) => x.id)
   assert.ok(ids.includes('site.filter'))
+  assert.equal(w.LSB.__core.ai.actions({ route: { type: 'home' } }).find((x) => x.id === 'site.filter').terminal, true)
   assert.equal(w.LSB.__core.ai.actions({ route: { type: 'topic' } }).some((x) => x.id === 'site.filter'), false)
   const result = await w.LSB.__core.ai.execute(
     { action: 'site.filter', args: { sort: 'comment' } },

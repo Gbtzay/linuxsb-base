@@ -38,6 +38,8 @@
   ]
   const ACTION_HISTORY_KEY = 'action-history'
   const ACTION_HISTORY_LIMIT = 20
+  const ROUTE_SORTS = new Set(['post', 'comment', 'lucky', 'card', 'red_packet'])
+  const ROUTE_TABS = new Set(['topics', 'replies', 'attachments', 'notifications', 'points_rewards', 'favorites', 'mine', 'followed'])
 
   function setup(api) {
     const copilot = api.plugin('ai-copilot')
@@ -66,12 +68,29 @@
       return !disposed && !state.disposed && mounted === state && generation === token && node?.isConnected
     }
 
-    function routeFingerprint(route = copilot?.actionContext?.('')?.route || api.page) {
-      return JSON.stringify({
+    function safeRouteSnapshot(route = {}) {
+      const page = Number(route?.page || 1)
+      const rawSort = String(route?.sort || '')
+      const rawTab = String(route?.tab || '')
+      return {
         type: String(route?.type || ''),
         id: Number(route?.id || 0) || 0,
-        href: String(route?.href || `${location.pathname || ''}${location.search || ''}`),
-      })
+        page: Number.isInteger(page) && page > 0 && page <= 10000 ? page : 1,
+        sort: ROUTE_SORTS.has(rawSort) ? rawSort : null,
+        tab: ROUTE_TABS.has(rawTab) ? rawTab : null,
+      }
+    }
+
+    function routeFingerprint(route = copilot?.actionContext?.('')?.route || api.page) {
+      return JSON.stringify(safeRouteSnapshot(route))
+    }
+
+    function cleanStoredRouteFingerprint(value) {
+      try {
+        return routeFingerprint(JSON.parse(String(value || '')))
+      } catch {
+        return routeFingerprint({})
+      }
     }
 
     function actionHistoryRecord(record) {
@@ -94,9 +113,11 @@
           steps: (Array.isArray(record.plan.steps) ? record.plan.steps : []).slice(0, 5).map((step) => ({
             action: String(step.action || '').slice(0, 120),
             args: step.args && typeof step.args === 'object' && !Array.isArray(step.args) ? cleanArgs(step.args) : {},
+            actionVersion: Number.isInteger(step.actionVersion) ? step.actionVersion : null,
+            actionProvider: String(step.actionProvider || '').slice(0, 120),
           })),
         },
-        routeFingerprint: String(record.routeFingerprint || '').slice(0, 500),
+        routeFingerprint: cleanStoredRouteFingerprint(record.routeFingerprint),
         status: String(record.status || 'ready').slice(0, 20),
         steps: (Array.isArray(record.steps) ? record.steps : []).slice(0, 5).map((step) => ({
           state: String(step.state || 'pending').slice(0, 20),
@@ -109,7 +130,9 @@
     function loadActionHistory() {
       try {
         const raw = api.store.get(ACTION_HISTORY_KEY, [])
-        return (Array.isArray(raw) ? raw : []).map(actionHistoryRecord).filter(Boolean).slice(-ACTION_HISTORY_LIMIT)
+        const rows = (Array.isArray(raw) ? raw : []).map(actionHistoryRecord).filter(Boolean).slice(-ACTION_HISTORY_LIMIT)
+        if (JSON.stringify(raw) !== JSON.stringify(rows)) api.store.set(ACTION_HISTORY_KEY, rows)
+        return rows
       } catch {
         return []
       }
@@ -385,7 +408,7 @@
         renderActionPlan(host, state, generation)
         return
       }
-      const validated = api.ai.validatePlan(record.plan, currentContext)
+      const validated = api.ai.validatePlan(record.plan, currentContext, { requireActionBinding: true })
       if (!validated.ok) {
         record.status = 'expired'
         record.steps.forEach((step) => { if (step.state === 'pending') step.state = 'skipped' })
@@ -404,7 +427,7 @@
           record.steps[index].state = 'skipped'
           break
         }
-        const checked = api.ai.validate(step, freshContext)
+        const checked = api.ai.validate(step, freshContext, { requireActionBinding: true })
         if (!checked.ok) {
           record.status = 'expired'
           record.steps[index].state = 'skipped'
@@ -418,22 +441,20 @@
         try {
           const result = await api.ai.execute(step, freshContext)
           if (!isAlive(state, host, runToken) || actionSession.record !== record) return
+          const navigationHref = result?.kind === 'navigation' ? internalActionPath(result.url) : ''
+          if (result?.kind === 'navigation' && (index !== record.steps.length - 1 || !navigationHref)) {
+            throw new Error(index !== record.steps.length - 1 ? '导航动作必须位于计划末尾' : '动作返回了不安全的站内路径')
+          }
           record.steps[index].state = 'completed'
           record.results[index] = result
           record.steps[index].error = ''
           saveActionHistory(record)
           renderActionPlan(host, state, runToken)
           if (result?.kind === 'navigation') {
-            const href = internalActionPath(result.url)
-            if (!href) throw new Error('动作返回了不安全的站内路径')
-            const remaining = record.steps.some((item, later) => later > index && item.state === 'pending')
-            if (remaining) {
-              record.steps.forEach((item, later) => { if (later > index && item.state === 'pending') item.state = 'skipped' })
-            }
-            record.status = remaining ? 'partial' : 'completed'
+            record.status = 'completed'
             saveActionHistory(record)
             try {
-              location.assign(href)
+              location.assign(navigationHref)
             } catch {
               /* browsers navigate; test DOMs may not implement navigation */
             }
@@ -859,7 +880,7 @@
       const record = actionSession.record
       if (!record || !['ready', 'running', 'partial', 'failed'].includes(record.status)) return
       const actionContext = copilot.actionContext(record.command)
-      const invalid = record.plan.steps.some((step) => !api.ai.validate(step, actionContext).ok)
+      const invalid = record.plan.steps.some((step) => !api.ai.validate(step, actionContext, { requireActionBinding: true }).ok)
       if (!invalid) return
       record.status = 'expired'
       record.steps.forEach((step) => { if (step.state === 'pending' || step.state === 'running') step.state = 'skipped' })

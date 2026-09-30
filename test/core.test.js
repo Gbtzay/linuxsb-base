@@ -153,6 +153,7 @@ test('权限：未声明 write 时调用动作被拒绝', async () => {
     api = a
   })
   assert.throws(() => api.actions.reply(1, 'hi'), /未声明 'write' 权限/)
+  assert.throws(() => api.net.raw('/reply_edit', { method: 'POST', body: 'x' }), /未声明 'write' 权限/)
   assert.throws(() => api.store.set('k', 1), /未声明 'storage' 权限/)
   assert.throws(() => api.ui.toast('x'), /未声明 'ui' 权限/)
 })

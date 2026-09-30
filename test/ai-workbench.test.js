@@ -104,7 +104,10 @@ test('AI 工作台：命令先显示计划，点击执行后才按顺序调用�
     plan: {
       version: 1,
       summary: '测试',
-      steps: [{ action: 'test.first', args: {} }, { action: 'test.second', args: {} }],
+      steps: [
+        { action: 'test.first', args: {}, actionVersion: 1, actionProvider: 'test-actions' },
+        { action: 'test.second', args: {}, actionVersion: 1, actionProvider: 'test-actions' },
+      ],
     },
     previews: [{ ok: true, text: '先做第一步' }, { ok: true, text: '再做第二步' }],
     context: { route: { type: 'topic', id: 1, href: '/topic/1' } },
@@ -149,9 +152,9 @@ test('AI 工作台：步骤失败停止后续，重试只调用失败步骤；�
       version: 1,
       summary: '测试',
       steps: [
-        { action: 'test.ok', args: {} },
-        { action: 'test.retry', args: {} },
-        { action: 'test.never', args: {} },
+        { action: 'test.ok', args: {}, actionVersion: 1, actionProvider: 'retry-actions' },
+        { action: 'test.retry', args: {}, actionVersion: 1, actionProvider: 'retry-actions' },
+        { action: 'test.never', args: {}, actionVersion: 1, actionProvider: 'retry-actions' },
       ],
     },
     previews: [{ ok: true, text: '成功' }, { ok: true, text: '可重试' }, { ok: true, text: '不应执行' }],
@@ -175,8 +178,50 @@ test('AI 工作台：步骤失败停止后续，重试只调用失败步骤；�
   assert.match(currentWorkbench.querySelector('[data-ai-action-status]').textContent, /expired|过期/)
 })
 
+test('AI 工作台：未声明终止属性的导航结果也不能跳过后续步骤', async () => {
+  const w = makeSite()
+  await load(w)
+  let laterCalls = 0
+  w.LSB.register({ id: 'navigation-guard', version: '1.0.0', permissions: ['read', 'events'] }, (api) => {
+    api.ai.registerAction({
+      id: 'test.navigation', version: 1, permission: 'read', label: '导航', args: {},
+      preview: () => '导航', execute: () => ({ kind: 'navigation', url: '/next' }),
+    })
+    api.ai.registerAction({
+      id: 'test.afterNavigation', version: 1, permission: 'read', label: '后续', args: {},
+      preview: () => '后续', execute: () => { laterCalls += 1; return { ok: true } },
+    })
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const exported = w.LSB.__core.plugins.get('ai-copilot').exports
+  exported.planActions = async () => ({
+    plan: {
+      version: 1,
+      summary: '导航后执行后续动作',
+      steps: [
+        { action: 'test.navigation', args: {}, actionVersion: 1, actionProvider: 'navigation-guard' },
+        { action: 'test.afterNavigation', args: {}, actionVersion: 1, actionProvider: 'navigation-guard' },
+      ],
+    },
+    previews: [{ ok: true, text: '导航' }, { ok: true, text: '后续' }],
+    context: { route: { type: 'topic', id: 1, page: 1 } },
+  })
+  const wb = w.document.querySelector('[data-ai-workbench]')
+  wb.querySelector('[data-ai-command-mode="action"]').click()
+  wb.querySelector('[data-ai-action-command]').value = '执行计划'
+  wb.querySelector('[data-ai-action-run]').click()
+  assert.equal(await until(() => wb.querySelector('[data-ai-action-execute]')), true)
+  wb.querySelector('[data-ai-action-execute]').click()
+  assert.equal(await until(() => /执行失败|failed/.test(wb.querySelector('[data-ai-action-status]').textContent)), true)
+  assert.equal(w.document.querySelector('[data-ai-action-step="1"]').dataset.state, 'failed')
+  assert.equal(w.document.querySelector('[data-ai-action-step="2"]').dataset.state, 'skipped')
+  assert.equal(laterCalls, 0)
+  assert.equal(w.location.pathname, '/topic/1')
+})
+
 test('AI 工作台：模型不可用时仍可从本地动作目录建立计划并保存本地历史', async () => {
   const w = makeSite()
+  w.history.replaceState({}, '', '/topic/1?auth=history-secret')
   w.localStorage.setItem('lsb_base:ai-summary:__config', JSON.stringify({ apiUrl: '', apiKey: '' }))
   await load(w)
   const wb = w.document.querySelector('[data-ai-workbench]')
@@ -195,12 +240,32 @@ test('AI 工作台：模型不可用时仍可从本地动作目录建立计划�
   assert.equal(history.length, 1)
   assert.equal(history[0].plan.steps[0].action, 'site.navigate')
   assert.doesNotMatch(JSON.stringify(history), /apiKey|_csrf|Cookie|完整 DOM/i)
+  assert.doesNotMatch(JSON.stringify(history), /history-secret/)
   for (let index = 0; index < 22; index += 1) {
     wb.querySelector('[data-ai-action-command]').value = `本地计划 ${index}`
     wb.querySelector('[data-ai-action-local-plan]').click()
   }
   const boundedHistory = JSON.parse(w.localStorage.getItem('lsb_base:ai-workbench:action-history'))
   assert.equal(boundedHistory.length, 20)
+})
+
+test('AI 工作台：加载旧历史时清除已持久化的 URL 查询参数', async () => {
+  const w = makeSite()
+  w.localStorage.setItem('lsb_base:ai-workbench:action-history', JSON.stringify([{
+    id: 'legacy-plan',
+    command: '回首页',
+    plan: { version: 1, summary: '回首页', steps: [{ action: 'site.navigate', args: { target: 'home' } }] },
+    routeFingerprint: JSON.stringify({ type: 'topic', id: 1, href: '/topic/1?token=legacy-secret' }),
+    status: 'completed',
+    steps: [{ state: 'completed', error: '' }],
+    ts: 1,
+  }]))
+  await load(w)
+  const saved = w.localStorage.getItem('lsb_base:ai-workbench:action-history')
+  assert.doesNotMatch(saved, /legacy-secret/)
+  const route = JSON.parse(JSON.parse(saved)[0].routeFingerprint)
+  assert.equal(route.type, 'topic')
+  assert.equal('href' in route, false)
 })
 
 test('AI 工作台：动作提供方停用后现有计划过期且不能执行', async () => {
@@ -215,7 +280,7 @@ test('AI 工作台：动作提供方停用后现有计划过期且不能执行',
   await new Promise((resolve) => setTimeout(resolve, 30))
   const exported = w.LSB.__core.plugins.get('ai-copilot').exports
   exported.planActions = async () => ({
-    plan: { version: 1, summary: '临时计划', steps: [{ action: 'test.temporary', args: {} }] },
+    plan: { version: 1, summary: '临时计划', steps: [{ action: 'test.temporary', args: {}, actionVersion: 1, actionProvider: 'temporary-actions' }] },
     previews: [{ ok: true, text: '执行临时动作' }],
     context: { route: { type: 'topic', id: 1, href: '/topic/1' } },
   })

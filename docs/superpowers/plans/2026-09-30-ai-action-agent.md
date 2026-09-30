@@ -4,7 +4,7 @@
 
 **Goal:** 在现有氢壳右栏 AI 工作台中加入自然语言只读操作代理，让用户预览并执行导航、站内搜索、列表筛选和打开面板等受限站内动作。
 
-**Architecture:** 基座新增 `ActionRegistry`，负责动作登记、页面过滤、动态参数目录、严格 schema 校验、计划校验和提供方生命周期清理。独立的 `ai-actions` 插件登记首批站点动作，`skin` 登记当前列表筛选；`ai-copilot` 只负责把用户命令转换成版本化 JSON 计划，`ai-workbench` 负责预览、串行执行、失败重试、过期检测和本地历史。任何模型输出都不能直接访问 DOM、发任意请求或调用未登记动作。
+**Architecture:** 基座新增 `ActionRegistry`，负责动作登记、页面过滤、动态参数目录、严格 schema 校验、计划校验和提供方生命周期清理。每个规范化步骤都绑定动作版本与提供方；导航、搜索、筛选等离开当前页的终止动作只能位于计划末尾。独立的 `ai-actions` 插件登记首批站点动作，`skin` 登记当前列表筛选；`ai-copilot` 只负责把用户命令转换成版本化 JSON 计划，`ai-workbench` 负责预览、串行执行、失败重试、过期检测和本地历史。任何模型输出都不能直接访问 DOM、发任意请求或调用未登记动作。
 
 **Tech Stack:** 原生 JavaScript userscript、ES modules、LSB 插件 API、JSDOM/Node `node:test`、`api.store` 本地存储、esbuild 构建脚本。
 
@@ -15,7 +15,10 @@
 - 计划至少 1 步、最多 5 步；步骤按顺序执行，某步失败立即停止，只能重试失败步骤。
 - 计划预览阶段不执行动作；必须由用户点击一次“执行计划”后才产生导航、搜索、筛选或打开面板副作用。
 - 路由、页面类型、动作提供方或工作台代次变化后，旧计划过期，旧异步回调不得回写新页面。
-- 默认只发送最小路由、页面摘要、可见状态和动作目录；只有用户明确要求基于当前帖子时才发送受预算限制的帖子内容。
+- 路由上下文和历史只保留 `type/id/page/sort/tab` 白名单字段，不传递或持久化原始 URL 查询参数；加载旧历史时也要清除已保存的查询参数。
+- 默认只发送最小路由、页面摘要、可见状态和动作目录；只有用户以肯定指令明确要求读取或分析当前帖子时才发送受预算限制的帖子内容，任何否定词都会关闭帖子正文上下文。
+- `site.navigate`、`site.search`、`site.filter` 会离开当前页，必须是计划的最后一步；注册表拒绝提前放置，执行器还会检查动作实际结果。
+- 模型计划步骤只能含 `action/args`；本地校验后才附加 `actionVersion/actionProvider` 绑定，执行前必须匹配当前动作。
 - `api.net.search(query, field)` 是基座提供的固定站内语义 API；通用 `api.actions.search` 继续受 `write` 权限保护。
 - 动作执行结果必须是可序列化对象，不能包含 API Key、Cookie、CSRF、完整私密页面正文或函数引用。
 - 氢壳宽屏右栏继续显示“站点 / AI”；窄屏、氢壳关闭、skin 停用或工作台未安装时保留现有入口。
@@ -90,9 +93,9 @@ api.ai.registerAction({
 }) // -> () => void
 
 api.ai.actions(context)
-// -> [{ id, version, label, description, permission, pages, args }]
+// -> [{ id, version, label, description, permission, terminal, pages, args }]
 
-api.ai.validatePlan(plan, context)
+api.ai.validatePlan(plan, context, { requireActionBinding })
 // -> { ok: true, plan, steps } | { ok: false, errors: [{ code, path, message }] }
 
 api.ai.preview(step, context)
@@ -109,15 +112,14 @@ api.ai.execute(step, context)
 ```json
 {
   "version": 1,
-  "summary": "打开深度思考版块并搜索缓存",
+  "summary": "搜索标题中的缓存",
   "steps": [
-    { "action": "site.navigate", "args": { "target": "forum", "id": 7 } },
     { "action": "site.search", "args": { "query": "缓存", "field": "title" } }
   ]
 }
 ```
 
-计划允许的顶层字段只有 `version`、`summary`、`steps`；每个步骤允许的字段只有 `action`、`args`。状态为 `draft`、`ready`、`running`、`completed`、`partial`、`failed`、`expired`、`cancelled`。工作台历史最多保留 20 条，单条只存命令、计划、路由指纹、步骤状态和错误摘要。
+模型计划允许的顶层字段只有 `version`、`summary`、`steps`；每个步骤只有 `action`、`args`。本地校验后的步骤增加 `actionVersion` 与 `actionProvider` 绑定，模型不能提供或覆盖这些字段。状态为 `draft`、`ready`、`running`、`completed`、`partial`、`failed`、`expired`、`cancelled`。工作台历史最多保留 20 条，单条只存命令、绑定后的计划、白名单路由指纹、步骤状态和错误摘要。
 
 ### 首批动作
 
@@ -141,7 +143,7 @@ api.ai.execute(step, context)
 - Consumes: `PluginRecord.disposers`, `Core._dispose()`, `Net.form()/doc()`, `UI._tabs`。
 - Produces: 本计划“基座动作 API”全部方法；`api.net.search(query, field)`；`api.ui.panelCatalog()`。
 
-- [ ] **Step 1: 写 registry 和 API 的失败测试。**
+- [x] **Step 1: 写 registry 和 API 的失败测试。**
 
 在 `test/ai-actions.test.js` 增加以下断言，先验证缺少 `api.ai`：
 
@@ -203,14 +205,14 @@ test('Net.search：只 POST 固定 /search 并返回站内 redirect', async () =
 })
 ```
 
-- [ ] **Step 2: 运行失败测试。**
+- [x] **Step 2: 运行失败测试。**
 
 Run: `node --test test/ai-actions.test.js test/core.test.js --test-name-pattern "动作注册表|动作提供方停用"`  
 Expected: FAIL，`ActionRegistry` 和 `api.ai` 尚未存在。  
 Run: `node --test test/net.test.js --test-name-pattern "Net.search"`  
 Expected: FAIL，`Net.search` 尚未存在。
 
-- [ ] **Step 3: 实现最小 `ActionRegistry`。**
+- [x] **Step 3: 实现最小 `ActionRegistry`。**
 
 在 `src/ai-actions.js` 实现以下边界。实现时保留这些错误码，测试按错误码而不是模糊文案断言：
 
@@ -345,14 +347,14 @@ async search(query, field = 'title') {
 
 `Actions.search()` 暂不改权限和公开行为，继续由 `api.actions` 的 `write` 门保护。
 
-- [ ] **Step 4: 运行通过测试并补充回归。**
+- [x] **Step 4: 运行通过测试并补充回归。**
 
 Run: `node --test test/ai-actions.test.js test/core.test.js --test-name-pattern "动作注册表|动作提供方停用|权限"`  
 Expected: PASS。  
 Run: `node --test test/net.test.js`  
 Expected: 所有网络和写动作测试 PASS。
 
-- [ ] **Step 5: 提交基座切片。**
+- [x] **Step 5: 提交基座切片。**
 
 ```bash
 git add src/ai-actions.js src/core.js src/net.js src/ui.js test/ai-actions.test.js test/core.test.js test/net.test.js
@@ -372,7 +374,7 @@ git commit -m "feat: add readonly ai action registry"
 - Consumes: Task 1 的 `api.ai.*`、`api.net.search()`、`api.ui.panels()`、`api.routes`、`api.page`。
 - Produces: 当前页面可用的 `site.navigate`、`site.search`、`ui.openPanel`、`site.filter` 动作。
 
-- [ ] **Step 1: 写动作提供方失败测试。**
+- [x] **Step 1: 写动作提供方失败测试。**
 
 在 `test/ai-actions.test.js` 使用现有 `baseCode + eval` 夹具加载新插件，锁定：
 
@@ -414,12 +416,12 @@ test('skin 登记列表筛选：只在首页/版块可见，停用后注销', as
 })
 ```
 
-- [ ] **Step 2: 运行失败测试。**
+- [x] **Step 2: 运行失败测试。**
 
 Run: `node --test test/ai-actions.test.js test/skin.test.js --test-name-pattern "首批动作|站内搜索动作|列表筛选"`  
 Expected: FAIL，因为动作提供方尚未登记。
 
-- [ ] **Step 3: 实现 `ai-actions.user.js`。**
+- [x] **Step 3: 实现 `ai-actions.user.js`。**
 
 manifest 固定为：`id: 'ai-actions'`、版本 `0.1.0`、`requires.base: '^0.1.43'`、权限 `['read', 'ui', 'events']`。
 
@@ -464,12 +466,12 @@ api.ai.registerAction({
 
 `skin` 仍通过现有 `api.onDispose` 自动注销；动作执行只导航，不修改 DOM 或站点数据。
 
-- [ ] **Step 4: 运行通过测试并检查动作目录。**
+- [x] **Step 4: 运行通过测试并检查动作目录。**
 
 Run: `node --test test/ai-actions.test.js test/skin.test.js --test-name-pattern "首批动作|站内搜索动作|列表筛选"`  
 Expected: PASS；动作目录不含 execute 函数、不含外部 URL。
 
-- [ ] **Step 5: 提交动作提供方切片。**
+- [x] **Step 5: 提交动作提供方切片。**
 
 ```bash
 git add plugins/ai-actions.user.js plugins/skin.user.js test/ai-actions.test.js test/skin.test.js
@@ -488,7 +490,7 @@ git commit -m "feat: register readonly site actions"
 - Consumes: Task 1 的 `api.ai.describe()` / `validatePlan()`、`ai-summary` provider、`api.page` / `api.snapshot`。
 - Produces: `planActions({ command, force }) -> Promise<{ plan, context, previews, meta }>`；工作台不读取 debug RPC。
 
-- [ ] **Step 1: 写失败测试，先锁定协议和隐私边界。**
+- [x] **Step 1: 写失败测试，先锁定协议和隐私边界。**
 
 在 `test/ai-copilot.test.js` 增加两阶段模型回复夹具：
 
@@ -521,12 +523,12 @@ test('动作计划：非法 JSON、未知动作和非当前帖子请求都被本
 })
 ```
 
-- [ ] **Step 2: 运行失败测试。**
+- [x] **Step 2: 运行失败测试。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "动作计划"`  
 Expected: FAIL，`planActions` 尚未导出。
 
-- [ ] **Step 3: 实现最小安全计划生成。**
+- [x] **Step 3: 实现最小安全计划生成。**
 
 在 `ai-copilot` 中新增常量 `ACTION_PLAN_VERSION = 1` 和 `ACTION_MAX_CHARS = 12000`，manifest 版本提升为 `0.7.0`，仍只保留 `read/storage/ui/events`。
 
@@ -581,14 +583,14 @@ return { ...existingExports, planActions, actionContext: () => api.util.clone(ac
 
 不在 `ai-copilot` 中执行动作；计划缓存可按 `action-plan:<fingerprint>` 写入自己的 storage，但不能代替工作台历史，也不能把模型原文当成可执行状态。
 
-- [ ] **Step 4: 运行通过测试并回归现有 console。**
+- [x] **Step 4: 运行通过测试并回归现有 console。**
 
 Run: `node --test test/ai-copilot.test.js --test-name-pattern "动作计划|公开工作台接口"`  
 Expected: PASS。  
 Run: `node --test test/ai-copilot.test.js`  
 Expected: 原有帖子问答、分析、追踪、导出和自然语言查询测试全部 PASS。
 
-- [ ] **Step 5: 提交计划生成切片。**
+- [x] **Step 5: 提交计划生成切片。**
 
 ```bash
 git add plugins/ai-copilot.user.js test/ai-copilot.test.js
@@ -607,7 +609,7 @@ git commit -m "feat: add readonly action plan generation"
 - Consumes: Task 1 的 `api.ai.validatePlan/preview/execute`、Task 2 的动作目录、Task 3 的 `copilot.planActions()`。
 - Produces: 右栏操作台内的“查询 / 站内操作”子模式、计划状态 UI、失败重试按钮、本地 20 条历史。
 
-- [ ] **Step 1: 写失败测试，锁定预览不执行和顺序执行。**
+- [x] **Step 1: 写失败测试，锁定预览不执行和顺序执行。**
 
 在现有 `test/ai-workbench.test.js` 扩展夹具，注册两个测试动作并记录调用：
 
@@ -665,12 +667,12 @@ test('AI 工作台：步骤失败停止后续，重试只调用失败步骤；�
 })
 ```
 
-- [ ] **Step 2: 运行失败测试。**
+- [x] **Step 2: 运行失败测试。**
 
 Run: `node --test test/ai-workbench.test.js --test-name-pattern "命令先显示计划|步骤失败"`  
 Expected: FAIL，工作台尚无命令模式和执行按钮。
 
-- [ ] **Step 3: 实现命令模式 UI 和串行执行。**
+- [x] **Step 3: 实现命令模式 UI 和串行执行。**
 
 将 `renderConsole()` 拆成查询/操作两个 pane，默认仍为查询，新增稳定选择器：
 
@@ -703,14 +705,14 @@ Expected: FAIL，工作台尚无命令模式和执行按钮。
 
 manifest 版本提升为 `0.2.0`，权限改为 `['read', 'storage', 'ui', 'events']`，依赖 `ai-copilot: '^0.7.0'` 和 `ai-actions: '^0.1.0'`。保留现有操作台查询、当前帖子和追踪三段，命令模式只是操作台子模式。
 
-- [ ] **Step 4: 运行通过测试并回归右栏。**
+- [x] **Step 4: 运行通过测试并回归右栏。**
 
 Run: `node --test test/ai-workbench.test.js --test-name-pattern "命令先显示计划|步骤失败|窄屏"`  
 Expected: PASS；窄屏仍无右栏 AI 标签，旧顶栏入口仍存在。  
 Run: `node --test test/ai-workbench.test.js`  
 Expected: 所有现有三段工作台测试和新增动作测试 PASS。
 
-- [ ] **Step 5: 提交工作台切片。**
+- [x] **Step 5: 提交工作台切片。**
 
 ```bash
 git add plugins/ai-workbench.user.js test/ai-workbench.test.js
@@ -729,7 +731,7 @@ git commit -m "feat: add ai workbench action mode"
 - Consumes: Tasks 1–4 全部 API 和 DOM 夹具。
 - Produces: 可重复的安全回归证据，确认不能通过动作代理绕过权限或站点适配层。
 
-- [ ] **Step 1: 增加失败/边界测试。**
+- [x] **Step 1: 增加失败/边界测试。**
 
 必须覆盖以下具体案例：
 
@@ -772,21 +774,21 @@ test('兼容快照：现有帖子 DOM 仍由 parseTopic 和 SEL 识别', () => {
 })
 ```
 
-- [ ] **Step 2: 运行失败测试。**
+- [x] **Step 2: 运行失败测试。**
 
 Run: `node --test test/hardening.test.js test/ai-actions.test.js test/ai-workbench.test.js --test-name-pattern "安全边界|权限边界|生命周期|模型不可用|兼容快照"`  
 Expected: 新增断言在实现缺陷时明确失败，不接受仅检查字符串存在的假阳性。
 
-- [ ] **Step 3: 修复并收紧实现。**
+- [x] **Step 3: 修复并收紧实现。**
 
 检查点：动作目录不得泄漏 `execute`、动态 schema 函数或配置；计划历史不得包含 `apiKey`、`_csrf`、`Cookie`、私信或完整 DOM；`site.search` redirect 必须同源且为固定站内路径；执行器每步前后都检查 `generation`、插件状态和路由指纹；所有 UI 文本通过 `textContent` 或 `api.util.esc`。
 
-- [ ] **Step 4: 运行安全与站点回归。**
+- [x] **Step 4: 运行安全与站点回归。**
 
 Run: `node --test test/core.test.js test/net.test.js test/hardening.test.js test/site.test.js test/ai-actions.test.js test/ai-copilot.test.js test/ai-workbench.test.js test/skin.test.js`  
 Expected: 0 failures。
 
-- [ ] **Step 5: 提交安全验收切片。**
+- [x] **Step 5: 提交安全验收切片。**
 
 ```bash
 git add test/core.test.js test/net.test.js test/hardening.test.js test/site.test.js test/ai-actions.test.js test/ai-copilot.test.js test/ai-workbench.test.js test/skin.test.js plugins/ai-actions.user.js plugins/ai-copilot.user.js plugins/ai-workbench.user.js
@@ -809,7 +811,7 @@ git commit -m "test: harden readonly ai action flow"
 - Consumes: Tasks 1–5 的源码、manifest 版本和动作插件文件。
 - Produces: Oxygen 含 `ai-summary → ai-copilot → ai-actions → ai-workbench`；LTS 不含三个 AI 模块；所有版本标记一致。
 
-- [ ] **Step 1: 写失败的收录和版本测试。**
+- [x] **Step 1: 写失败的收录和版本测试。**
 
 在 `test/suite.test.js` 增加：
 
@@ -831,12 +833,12 @@ test('版本标记：基座、manifest、Oxygen 和套件中心同步', () => {
 })
 ```
 
-- [ ] **Step 2: 运行失败测试。**
+- [x] **Step 2: 运行失败测试。**
 
 Run: `node --test test/suite.test.js test/lts.test.js --test-name-pattern "AI 动作提供方|版本标记"`  
 Expected: FAIL，ORDER、版本和产物尚未更新。
 
-- [ ] **Step 3: 更新收录、版本和 README。**
+- [x] **Step 3: 更新收录、版本和 README。**
 
 将 `suite/order.js` 中 AI 模块顺序改为：
 
@@ -849,14 +851,14 @@ Expected: FAIL，ORDER、版本和产物尚未更新。
 
 将 `build-suite.mjs` 与 `suite/suite-center.js` 的套件版本从 `1.0.119` 提升为 `1.0.120`；`src/core.js` 提升为 `0.1.43`；同步 README 的模块表、权限、版本和使用说明：右栏“AI → 操作台 → 站内操作”，生成计划后需点击“执行计划”，首版只读，窄屏仍使用旧入口。明确 `ai-workbench` 的权限为 `read/storage/ui/events`，`ai-actions` 为 `read/ui/events`。
 
-- [ ] **Step 4: 构建并验证产物。**
+- [x] **Step 4: 构建并验证产物。**
 
 Run: `npm run build`  
 Expected: 生成三个 dist 文件；Oxygen 包含 `ai-actions` 和 `ai-workbench`，LTS 不包含任何 AI 模块。  
 Run: `npm run verify:dist`  
 Expected: PASS，版本、模块顺序、头部和新鲜度一致。
 
-- [ ] **Step 5: 运行完整验收并提交。**
+- [x] **Step 5: 运行完整验收并提交。**
 
 Run: `npm test`  
 Expected: 全部测试通过。  

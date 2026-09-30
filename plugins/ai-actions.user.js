@@ -50,6 +50,7 @@
     api.ai.registerAction({
       id: 'site.navigate',
       version: 1,
+      terminal: true,
       order: 10,
       label: '站内导航',
       description: '打开首页、版块、帖子、用户页或固定功能页',
@@ -108,6 +109,7 @@
     api.ai.registerAction({
       id: 'site.search',
       version: 1,
+      terminal: true,
       order: 20,
       label: '站内搜索',
       description: '按关键词和字段搜索站内内容',

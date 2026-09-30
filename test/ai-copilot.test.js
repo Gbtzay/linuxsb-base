@@ -151,6 +151,48 @@ test('动作计划：解析 fenced JSON，目录和预览来自本地，模型�
   assert.doesNotMatch(JSON.stringify(ctx.lastLlm().body), /帖子正文|楼层内容/)
 })
 
+test('动作计划：只在明确询问帖子时附加限额上下文', async () => {
+  const reply = { choices: [{ message: { content: '{"version":1,"summary":"回首页","steps":[{"action":"site.navigate","args":{"target":"home"}}]}' } }] }
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', { _llmReplies: [reply, reply] })
+  await load(ctx)
+  ctx.w.eval(actionCode)
+  await sleep(30)
+  const exported = ctx.w.LSB.__core.plugins.get('ai-copilot').exports
+  assert.equal(exported.actionContext('打开插件设置').currentTopic, undefined)
+  const actionContext = exported.actionContext('根据当前帖子打开相关面板')
+  assert.ok(actionContext.currentTopic)
+  assert.ok(actionContext.currentTopic.posts.length <= 40)
+  assert.ok(actionContext.currentTopic.posts.every((post) => post.content.length <= 500))
+  assert.equal(exported.actionContext('不要读取当前帖子内容，只打开插件设置').currentTopic, undefined)
+  await exported.planActions({ command: '根据当前帖子打开相关面板' })
+  const request = ctx.llmCallsAt(0)
+  const body = JSON.parse(request.body)
+  const user = body.messages?.[1]?.content || ''
+  assert.ok(user.length <= 12000, `request chars: ${user.length}`)
+  assert.match(user, /<current-topic>/)
+  await exported.planActions({ command: '不要读取当前帖子内容，只打开插件设置' })
+  const negatedUser = JSON.parse(ctx.llmCallsAt(1).body).messages?.[1]?.content || ''
+  assert.doesNotMatch(negatedUser, /<current-topic>/)
+})
+
+test('动作计划：模型上下文只包含白名单路由字段，不带原始 URL 查询参数', async () => {
+  const reply = { choices: [{ message: { content: '{"version":1,"summary":"回首页","steps":[{"action":"site.navigate","args":{"target":"home"}}]}' } }] }
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1?p=3&token=route-secret', { _llmReply: reply })
+  await load(ctx)
+  ctx.w.eval(actionCode)
+  await sleep(30)
+  const exported = ctx.w.LSB.__core.plugins.get('ai-copilot').exports
+  const actionContext = exported.actionContext('打开插件设置')
+  assert.equal(actionContext.route.type, 'topic')
+  assert.equal(actionContext.route.id, 1)
+  assert.equal(actionContext.route.page, 3)
+  assert.equal(actionContext.route.sort, null)
+  assert.equal(actionContext.route.tab, null)
+  assert.equal('href' in actionContext.route, false)
+  await exported.planActions({ command: '打开插件设置' })
+  assert.doesNotMatch(JSON.stringify(ctx.lastLlm()), /route-secret/)
+})
+
 test('动作计划：非法 JSON、未知动作和额外执行字段都被本地拒绝', async () => {
   const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
     _llmReplies: [

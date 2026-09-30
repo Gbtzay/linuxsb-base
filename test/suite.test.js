@@ -147,22 +147,39 @@ test('AI 副驾登记在 AI 总结之后，且不进入 LTS', () => {
   assert.equal(MEMBERS[summaryIndex + 1], 'ai-copilot')
   assert.equal(ORDER_LTS.includes('ai-copilot'), false)
   const code = readFileSync(new URL('../plugins/ai-copilot.user.js', import.meta.url), 'utf8')
-  assert.match(code, /@version\s+0\.6\.1/)
-  assert.match(code, /\bversion:\s*'0\.6\.1'/)
+  assert.match(code, /@version\s+0\.7\.0/)
+  assert.match(code, /\bversion:\s*'0\.7\.0'/)
   assert.match(code, /const ANALYSIS_VERSION\s*=\s*'2'/)
   assert.match(code, /const TRACKING_VERSION\s*=\s*'2'/)
   assert.match(code, /\bid:\s*'ai-copilot'/)
 })
 
+test('AI 动作提供方位于副驾之后、工作台之前且不进入 LTS', () => {
+  const copilot = MEMBERS.indexOf('ai-copilot')
+  assert.equal(MEMBERS[copilot + 1], 'ai-actions')
+  assert.equal(MEMBERS[copilot + 2], 'ai-workbench')
+  assert.equal(ORDER_LTS.includes('ai-actions'), false)
+  assert.equal(ORDER_LTS.includes('ai-workbench'), false)
+  const source = readFileSync(new URL('../plugins/ai-actions.user.js', import.meta.url), 'utf8')
+  assert.match(source, /id:\s*'ai-actions'/)
+  assert.doesNotMatch(ltsCode, /id:\s*'ai-actions'/)
+})
+
 test('AI 工作台登记在 AI 副驾之后且不进入 LTS', () => {
   const copilotIndex = MEMBERS.indexOf('ai-copilot')
-  assert.equal(MEMBERS[copilotIndex + 1], 'ai-workbench')
+  assert.equal(MEMBERS[copilotIndex + 2], 'ai-workbench')
   assert.equal(ORDER_LTS.includes('ai-workbench'), false)
   const source = readFileSync(new URL('../plugins/ai-workbench.user.js', import.meta.url), 'utf8')
-  assert.match(source, /@version\s+0\.1\.0/)
+  assert.match(source, /@version\s+0\.2\.0/)
   assert.match(source, /\bid:\s*'ai-workbench'/)
   assert.match(suiteCode, /\(ai-workbench\)/)
   assert.doesNotMatch(ltsCode, /id:\s*'ai-workbench'/)
+})
+
+test('动作代理版本与基座及工作台版本对齐', () => {
+  assert.match(readFileSync(new URL('../src/core.js', import.meta.url), 'utf8'), /VERSION = '0\.1\.43'/)
+  assert.match(readFileSync(new URL('../plugins/ai-copilot.user.js', import.meta.url), 'utf8'), /version:\s*'0\.7\.0'/)
+  assert.match(readFileSync(new URL('../plugins/ai-workbench.user.js', import.meta.url), 'utf8'), /version:\s*'0\.2\.0'/)
 })
 
 test('产物新鲜度：每个插件正文都来自当前源码', () => {
@@ -247,8 +264,8 @@ test('Greasy Fork：氢/氧对外名称与简介不带 RC', () => {
   assert.match(suiteCode, /@name\s+LINUX\.SB 氧\s*$/m)
   assert.match(baseCode, /@name:en\s+LINUX\.SB Hydrogen\s*$/m)
   assert.match(suiteCode, /@name:en\s+LINUX\.SB Oxygen\s*$/m)
-  assert.match(baseCode, /@version\s+0\.1\.42/)
-  assert.match(suiteCode, /@version\s+1\.0\.119/)
+  assert.match(baseCode, /@version\s+0\.1\.43/)
+  assert.match(suiteCode, /@version\s+1\.0\.120/)
   assert.match(baseCode, /@description\s+linux\.sb 脚本基座/)
   assert.match(suiteCode, /@description\s+linux\.sb 功能套件/)
   assert.doesNotMatch(baseCode, /【RC】/)
@@ -270,7 +287,7 @@ test('Greasy Fork：LTS 产物一段头、document-start、含氢 grant、不含
   assert.equal([...ltsCode.matchAll(/\/\/ ==UserScript==/g)].length, 1)
   assert.match(ltsCode, /@name\s+LINUX\.SB（LTS）/)
   assert.match(ltsCode, /@name:en\s+LINUX\.SB \(LTS\)/)
-  assert.match(ltsCode, /@version\s+1\.0\.119/)
+  assert.match(ltsCode, /@version\s+1\.0\.120/)
   assert.match(ltsCode, /冻新功能/)
   assert.doesNotMatch(ltsCode, /氢（RC）/)
   assert.doesNotMatch(ltsCode, /【RC】/)
@@ -280,7 +297,7 @@ test('Greasy Fork：LTS 产物一段头、document-start、含氢 grant、不含
   assert.doesNotMatch(ltsCode, /@updateURL/)
   assert.match(ltsCode, /id: 'skin'/)
   assert.match(ltsCode, /id: 'live-feed'/)
-  for (const id of ['local-bridge', 'title-quotes', 'forum-watch', 'ai-summary', 'my-archive', 'hot-floor-badge', 'perf-probe', 'hover-profile', 'topic-marks']) {
+  for (const id of ['local-bridge', 'title-quotes', 'forum-watch', 'ai-summary', 'ai-actions', 'ai-workbench', 'my-archive', 'hot-floor-badge', 'perf-probe', 'hover-profile', 'topic-marks']) {
     assert.doesNotMatch(ltsCode, new RegExp(`id: '${id}'`))
   }
   assert.match(ltsCode, /__LSB_CHANNEL__\s*=\s*'lts'/)

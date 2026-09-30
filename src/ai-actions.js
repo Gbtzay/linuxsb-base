@@ -127,6 +127,7 @@ export class ActionRegistry {
     if (!Number.isInteger(spec.version) || spec.version < 1) throw new Error('action.invalid-version')
     if (!ACTION_PERMISSIONS.has(spec.permission)) throw new Error('action.invalid-permission')
     if (typeof spec.execute !== 'function' || typeof spec.preview !== 'function') throw new Error('action.missing-handler')
+    if (spec.terminal != null && typeof spec.terminal !== 'boolean') throw new Error('action.invalid-terminal')
     if (this._actions.has(spec.id)) throw new Error(`action.duplicate:${spec.id}`)
     const record = {
       ...spec,
@@ -168,6 +169,7 @@ export class ActionRegistry {
         label: record.label,
         description: record.description,
         permission: record.permission,
+        terminal: Boolean(record.terminal),
         pages: record.pages ? [...record.pages] : null,
         args: resolvePublicSchema(record.args || {}, context),
       }))
@@ -177,14 +179,28 @@ export class ActionRegistry {
     return this.actions(context)
   }
 
-  validate(step, context = {}) {
+  validate(step, context = {}, { requireActionBinding = false, allowActionBinding = false } = {}) {
     if (!isRecord(step)) return fail('step.invalid', '步骤必须是对象', 'step')
-    if (Object.keys(step).some((key) => !['action', 'args'].includes(key))) {
+    if (Object.keys(step).some((key) => !['action', 'args', 'actionVersion', 'actionProvider'].includes(key))) {
       return fail('step.unknown-field', '步骤包含未知字段', 'step')
     }
     if (typeof step.action !== 'string') return fail('action.invalid', '动作 ID 必须是字符串', 'action')
     const record = this._actions.get(step.action)
     if (!record) return fail('action.unknown', `未知动作：${step.action}`, 'action')
+    const hasVersion = Object.prototype.hasOwnProperty.call(step, 'actionVersion')
+    const hasProvider = Object.prototype.hasOwnProperty.call(step, 'actionProvider')
+    if ((hasVersion || hasProvider) && !allowActionBinding && !requireActionBinding) {
+      return fail('step.unknown-field', '模型步骤不能声明本地动作绑定', hasVersion ? 'actionVersion' : 'actionProvider')
+    }
+    if (requireActionBinding && (!hasVersion || !hasProvider)) {
+      return fail('action.binding-required', '待执行步骤缺少本地动作绑定', 'actionVersion')
+    }
+    if (hasVersion && (!Number.isInteger(step.actionVersion) || step.actionVersion !== record.version)) {
+      return fail('action.version-mismatch', '动作版本已变化，请重新生成计划', 'actionVersion')
+    }
+    if (hasProvider && (typeof step.actionProvider !== 'string' || step.actionProvider !== record.owner)) {
+      return fail('action.provider-mismatch', '动作提供方已变化，请重新生成计划', 'actionProvider')
+    }
     if (!this._available(record, context)) return fail('action.unavailable', '此动作不适用于当前页面', 'action')
     const args = validateSchema(step.args || {}, record.args || {}, context)
     if (!args.ok) return args
@@ -197,7 +213,7 @@ export class ActionRegistry {
     return { ok: true, action: record, args: args.value }
   }
 
-  validatePlan(plan, context = {}) {
+  validatePlan(plan, context = {}, options = {}) {
     if (!isRecord(plan)) return { ok: false, errors: [fail('plan.invalid', '计划必须是对象', 'plan').error] }
     const errors = []
     if (Object.keys(plan).some((key) => !['version', 'summary', 'steps'].includes(key))) {
@@ -210,16 +226,26 @@ export class ActionRegistry {
     }
     const steps = []
     for (let index = 0; index < (Array.isArray(plan.steps) ? plan.steps.length : 0); index++) {
-      const result = this.validate(plan.steps[index], context)
+      const result = this.validate(plan.steps[index], context, options)
       if (!result.ok) errors.push({ ...result.error, path: `steps[${index}]${result.error.path ? `.${result.error.path}` : ''}` })
-      else steps.push({ action: plan.steps[index].action, args: result.args })
+      else {
+        if (result.action.terminal && index < plan.steps.length - 1) {
+          errors.push(fail('plan.terminal-not-last', '会离开当前页面的动作必须位于计划末尾', `steps[${index}]`).error)
+        }
+        steps.push({
+          action: plan.steps[index].action,
+          args: result.args,
+          actionVersion: result.action.version,
+          actionProvider: result.action.owner,
+        })
+      }
     }
     if (errors.length) return { ok: false, errors }
     return { ok: true, plan: { version: AI_PLAN_VERSION, summary: plan.summary, steps }, steps }
   }
 
   preview(step, context = {}) {
-    const result = this.validate(step, context)
+    const result = this.validate(step, context, { allowActionBinding: true })
     if (!result.ok) return result
     try {
       const text = String(result.action.preview(result.args, context) || '').trim()
@@ -231,7 +257,7 @@ export class ActionRegistry {
   }
 
   async execute(step, context = {}) {
-    const result = this.validate(step, context)
+    const result = this.validate(step, context, { allowActionBinding: true })
     if (!result.ok) throw new Error(result.error.code)
     const value = await result.action.execute(result.args, context)
     if (value === undefined || typeof value === 'function') throw new Error('result.invalid')

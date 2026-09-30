@@ -15,6 +15,7 @@ export const ORDER = [
   'title-quotes',
   'ai-summary',
   'ai-copilot',
+  'ai-actions',
   'ai-workbench',
   'data-migration',
   'my-archive',

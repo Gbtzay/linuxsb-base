@@ -42,6 +42,7 @@
     api.ai.registerAction({
       id: 'site.filter',
       version: 1,
+      terminal: true,
       order: 15,
       label: '列表筛选',
       description: '按固定排序筛选当前首页或版块列表',

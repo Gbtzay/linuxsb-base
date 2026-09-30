@@ -31,7 +31,9 @@ const centerVersion = center.match(/version:\s*'([\d.]+)'/)?.[1] || null
 check(versionOf(base) === coreVersion, `Hydrogen dist ${versionOf(base) || 'missing'} ≠ src/core.js ${coreVersion || 'missing'}`)
 check(suiteVersion === centerVersion, `Oxygen dist ${suiteVersion || 'missing'} ≠ suite center ${centerVersion || 'missing'}`)
 check(ltsVersion === suiteVersion, `LTS dist ${ltsVersion || 'missing'} ≠ Oxygen ${suiteVersion || 'missing'}`)
-check(!lts.includes("id: 'ai-copilot'"), 'LTS 产物不应包含 ai-copilot')
+for (const id of ['ai-summary', 'ai-copilot', 'ai-actions', 'ai-workbench']) {
+  check(!lts.includes(`id: '${id}'`), `LTS 产物不应包含 ${id}`)
+}
 
 for (const id of ORDER) {
   const source = read(`plugins/${id}.user.js`)
