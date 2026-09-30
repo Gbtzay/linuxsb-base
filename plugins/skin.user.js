@@ -38,6 +38,29 @@
 
   function setup(api) {
     let cfg = api.config()
+    const SORTS = Object.freeze(['post', 'comment', 'lucky', 'card', 'red_packet'])
+    api.ai.registerAction({
+      id: 'site.filter',
+      version: 1,
+      order: 15,
+      label: '列表筛选',
+      description: '按固定排序筛选当前首页或版块列表',
+      permission: 'read',
+      pages: ['home', 'forum'],
+      args: { sort: { type: 'enum', values: SORTS } },
+      validateArgs: (_args, context) => {
+        if (context.route?.type === 'forum' && !Number.isInteger(Number(context.route.id))) {
+          return { code: 'route.invalid', path: 'route.id', message: '当前版块路由无效' }
+        }
+        return null
+      },
+      preview: (args, context) => `按“${args.sort}”排序当前${context.route?.type === 'forum' ? '版块' : '首页'}列表`,
+      execute: (args, context) => ({
+        kind: 'navigation',
+        url: context.route?.type === 'forum' ? api.routes.forum(Number(context.route.id), { sort: args.sort }) : api.routes.homeSorted(args.sort),
+        label: '已应用列表筛选',
+      }),
+    })
     let searchHome = null
     let userCardHome = null
     const extrasHomes = new Map()

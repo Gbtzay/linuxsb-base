@@ -1,7 +1,7 @@
 export const AI_PLAN_VERSION = 1
 export const AI_MAX_STEPS = 5
 
-const ACTION_ID = /^[a-z][a-z0-9-]*(?:\.[a-z0-9-]+)+$/
+const ACTION_ID = /^[a-z][a-z0-9-]*(?:\.[A-Za-z0-9-]+)+$/
 const ACTION_PERMISSIONS = new Set(['read', 'ui'])
 const ARG_TYPES = new Set(['string', 'number', 'enum', 'boolean'])
 const PUBLIC_SCHEMA_KEYS = new Set(['type', 'optional', 'minLength', 'maxLength', 'min', 'max', 'integer', 'values'])

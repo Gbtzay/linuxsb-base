@@ -232,6 +232,23 @@ test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块，无时间轴',
   )
 })
 
+test('skin 登记列表筛选：只在首页/版块可见，停用后注销', async () => {
+  const { w } = makeHome()
+  await loadBase(w, PLUG('skin.user.js'))
+  const ids = w.LSB.__core.ai.actions({ route: { type: 'home' } }).map((x) => x.id)
+  assert.ok(ids.includes('site.filter'))
+  assert.equal(w.LSB.__core.ai.actions({ route: { type: 'topic' } }).some((x) => x.id === 'site.filter'), false)
+  const result = await w.LSB.__core.ai.execute(
+    { action: 'site.filter', args: { sort: 'comment' } },
+    { route: { type: 'home' } },
+  )
+  assert.equal(result.kind, 'navigation')
+  assert.equal(result.url, '/index.php?sort=comment')
+  assert.equal(result.label, '已应用列表筛选')
+  w.LSB.disable('skin')
+  assert.equal(w.LSB.__core.ai.actions({ route: { type: 'home' } }).some((x) => x.id === 'site.filter'), false)
+})
+
 test('氢壳右栏：注册外部视图后显示站点/AI，切换不销毁站点卡片', async () => {
   const { w, until } = makeSite()
   await loadBase(w, PLUG('skin.user.js'))
