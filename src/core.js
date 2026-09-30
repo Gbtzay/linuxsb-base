@@ -1,5 +1,6 @@
 import { Bus } from './bus.js'
 import { Net, Actions } from './net.js'
+import { ActionRegistry } from './ai-actions.js'
 import { makeStore, coreStore, RAW_PREFIX, rawKeys, rawGet, rawSet } from './store.js'
 import { UI } from './ui.js'
 import { DomWatcher } from './dom.js'
@@ -18,7 +19,7 @@ import {
   ltsDisplayVersion,
 } from './check-update.js'
 
-export const VERSION = '0.1.42'
+export const VERSION = '0.1.43'
 
 /** 权限清单：插件在 manifest.permissions 里声明，未声明即调用会抛错 */
 export const PERMISSIONS = {
@@ -76,6 +77,7 @@ export class Core {
       gmRequest: typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null,
     })
     this.actions = new Actions(this.net)
+    this.ai = new ActionRegistry()
     this.ui = new UI({
       title: isLtsChannel() ? 'LINUX.SB · LTS' : 'LINUX.SB · 氢',
       version: isLtsChannel() ? ltsDisplayVersion() || VERSION : VERSION,
@@ -449,6 +451,7 @@ export class Core {
     }
     this.bus.offOwner(rec.id)
     this.dom.offOwner(rec.id)
+    this.ai.dispose(rec.id)
   }
 
   disable(id) {
@@ -559,6 +562,21 @@ export class Core {
         return core.plugins.get(id)?.exports ?? null
       },
 
+      /* AI 只读动作注册表 */
+      ai: {
+        registerAction: (spec) => {
+          const permission = spec?.permission || 'read'
+          need(permission, '注册 AI 动作')
+          return own(core.ai.register(spec, rec.id))
+        },
+        actions: (context) => (need('read', '读取 AI 动作目录'), core.ai.actions(context)),
+        describe: (context) => (need('read', '读取 AI 动作目录'), core.ai.describe(context)),
+        validate: (step, context) => (need('read', '校验 AI 动作'), core.ai.validate(step, context)),
+        validatePlan: (plan, context) => (need('read', '校验 AI 计划'), core.ai.validatePlan(plan, context)),
+        preview: (step, context) => (need('read', '预览 AI 动作'), core.ai.preview(step, context)),
+        execute: (step, context) => (need('read', '执行 AI 动作'), core.ai.execute(step, context)),
+      },
+
       /* 存储 */
       store: {
         get: (k, d) => (need('storage', '读取存储'), store.get(k, d)),
@@ -588,6 +606,7 @@ export class Core {
       net: {
         doc: (path, opts) => (need('read', '发起站内请求'), core.net.doc(path, opts)),
         json: (path, opts) => (need('read', '发起站内请求'), core.net.json(path, opts)),
+        search: (query, field) => (need('read', '执行站内搜索'), core.net.search(query, field)),
         /**
          * 底层请求。权限判定按「去向 + 方法」双轴：
          *   站外任意方法   → net（脚本自身还需 @connect）
@@ -667,6 +686,7 @@ export class Core {
           return own(core.ui.registerTab({ id: opt.id || rec.id, name: opt.name || rec.name, order: opt.order, render: opt.render }))
         },
         openPanel: (id) => (need('ui', '打开面板'), core.ui.openPanel(id)),
+        panels: () => (need('ui', '读取面板目录'), core.ui.panelCatalog()),
         /** 油猴扩展图标下的菜单命令；无 GM 时为空操作 */
         menuCommand: (title, fn) => (need('ui', '注册油猴菜单'), core.ui.menuCommand(title, fn)),
         postAction: (postEl, opt) => (need('ui', '注入楼层按钮'), core.ui.addPostAction(postEl, opt)),

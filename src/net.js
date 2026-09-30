@@ -179,6 +179,31 @@ export class Net {
     }
   }
 
+  /** 固定站内搜索语义：POST /search 后只接受同源的已知 redirect。 */
+  async search(query, field = 'title') {
+    const q = String(query || '').trim()
+    if (!q || q.length > 120 || /[\u0000-\u001f\u007f]/.test(q)) throw new Error('关键词长度或字符不合法')
+    if (!['title', 'body', 'reply'].includes(field)) throw new Error('搜索字段不合法')
+    const res = await this.form(ROUTES.post.search, { q, field })
+    let parsed
+    try {
+      parsed = JSON.parse(res.text || '{}')
+    } catch {
+      throw new Error('搜索接口返回异常')
+    }
+    let target
+    try {
+      target = new URL(parsed.redirect || '', this.origin)
+    } catch {
+      throw new Error('搜索接口返回了未知 redirect')
+    }
+    const targetPath = target.pathname + target.search
+    if (target.origin !== this.origin || !/^\/(?:index\.php|search)(?:\?|$)/.test(targetPath)) {
+      throw new Error('搜索接口返回了站外或未知 redirect')
+    }
+    return { url: targetPath, doc: await this.doc(targetPath) }
+  }
+
   /** 表单 POST，自动带 _csrf。fields 为普通对象或 FormData */
   async form(path, fields = {}, opts = {}) {
     const fd = fields instanceof FormData ? fields : new FormData()

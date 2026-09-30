@@ -71,8 +71,8 @@ test('启动后 snapshot / csrf / 面板就绪', () => {
   assert.match(launch.title, /氢/)
 })
 
-test('正式版氢号是 0.1.42，面板标题不带 RC', () => {
-  assert.equal(VERSION, '0.1.42')
+test('正式版氢号是 0.1.43，面板标题不带 RC', () => {
+  assert.equal(VERSION, '0.1.43')
   const core = boot()
   assert.equal(core.ui.title, 'LINUX.SB · 氢')
   assert.doesNotMatch(core.ui.title, /RC/)
@@ -244,6 +244,24 @@ test('侧栏视图：按 order 排序，visible 过滤，注销后不再提供',
   assert.equal(core.ui.shellAsideViews({})[0].label, '晚')
   api.ui.shellAsideView({ id: 'second', label: '第二', order: 20, render: () => {} })
   assert.deepEqual(core.ui.shellAsideViews({}).map((view) => view.id), ['second', 'late'])
+})
+
+test('动作提供方停用后注销，未声明 read/ui 权限不能登记对应动作', () => {
+  const core = boot()
+  let api
+  core.register({ id: 'action-provider', version: '1.0.0', permissions: ['events'] }, (a) => {
+    api = a
+  })
+  assert.throws(
+    () => api.ai.registerAction({ id: 'x.read', version: 1, permission: 'read', execute: () => ({}), preview: () => '' }),
+    /未声明 'read'/,
+  )
+  core.register({ id: 'good-provider', version: '1.0.0', permissions: ['read', 'ui', 'events'] }, (a) => {
+    a.ai.registerAction({ id: 'ui.test', version: 1, permission: 'ui', execute: () => ({ ok: true }), preview: () => '测试' })
+  })
+  assert.equal(core.ai.actions({}).some((x) => x.id === 'ui.test'), true)
+  core.disable('good-provider')
+  assert.equal(core.ai.actions({}).some((x) => x.id === 'ui.test'), false)
 })
 
 test('未声明依赖时不能偷看别人的 exports', () => {

@@ -168,6 +168,11 @@ export class UI {
     }
   }
 
+  /** 返回当前已注册面板的只读目录，供安全动作枚举使用。 */
+  panelCatalog() {
+    return this._tabs.map((tab) => ({ id: String(tab.id), label: String(tab.name || tab.id) }))
+  }
+
   /**
    * 注册一个氢壳右栏视图。skin 只消费这个通用协议，不感知视图业务。
    * 返回注销函数；插件停用时由 api.ui 自动清理。

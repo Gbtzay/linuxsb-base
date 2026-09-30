@@ -53,6 +53,22 @@ test('缺少 token 时拒绝写操作而不是裸发', async () => {
   await assert.rejects(() => net.form('/x', {}), /缺少 _csrf/)
 })
 
+test('Net.search：只 POST 固定 /search 并返回站内 redirect', async () => {
+  const { net, calls } = makeNet({
+    rate: 0,
+    responses: [
+      { status: 200, text: JSON.stringify({ ok: 1, redirect: '/index.php?q=%E7%BC%93%E5%AD%98&field=title' }) },
+      { status: 200, text: '<html><body><h1>搜索结果</h1></body></html>' },
+    ],
+  })
+  net.setCsrf('search-token')
+  const result = await net.search('缓存', 'title')
+  assert.equal(result.url, '/index.php?q=%E7%BC%93%E5%AD%98&field=title')
+  assert.equal(calls[0].method, 'POST')
+  assert.equal(new URL(calls[0].url).pathname, '/search')
+  await assert.rejects(() => net.search('\u0000', 'title'), /关键词/)
+})
+
 test('doc() 解析 HTML 并顺带续期 CSRF；并发同 URL 去重', async () => {
   const html = '<html><body><input name="_csrf" value="fresh"></body></html>'
   const { net, calls } = makeNet({ responses: [{ status: 200, text: html }] })
