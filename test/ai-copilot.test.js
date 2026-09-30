@@ -6,6 +6,7 @@ import { JSDOM } from 'jsdom'
 
 const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
 const summaryCode = readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8')
+const actionCode = readFileSync(new URL('../plugins/ai-actions.user.js', import.meta.url), 'utf8')
 const copilotPath = fileURLToPath(new URL('../plugins/ai-copilot.user.js', import.meta.url))
 const copilotCode = existsSync(copilotPath) ? readFileSync(copilotPath, 'utf8') : ''
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
@@ -125,6 +126,46 @@ test('AI 副驾：公开工作台接口不依赖 debug RPC', async () => {
   assert.equal(Array.isArray(overview.items), true)
   assert.equal(typeof overview.activeCount, 'number')
   assert.equal(ctx.w.LSB.bus.hasHandler('ai-copilot:debug'), true)
+})
+
+test('动作计划：解析 fenced JSON，目录和预览来自本地，模型不能声明已执行', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReply: {
+      choices: [{
+        message: {
+          content: '```json\n{"version":1,"summary":"回首页","steps":[{"action":"site.navigate","args":{"target":"home"}}]}\n```',
+        },
+      }],
+    },
+  })
+  await load(ctx)
+  ctx.w.eval(actionCode)
+  await sleep(30)
+  const exported = ctx.w.LSB.__core.plugins.get('ai-copilot').exports
+  const record = await exported.planActions({ command: '回到首页' })
+  assert.equal(record.plan.version, 1)
+  assert.equal(record.plan.steps[0].action, 'site.navigate')
+  assert.match(record.previews[0].text, /首页/)
+  assert.equal(record.plan.executed, undefined)
+  assert.doesNotMatch(JSON.stringify(ctx.lastLlm()), /apiKey|_csrf|cookie/i)
+  assert.doesNotMatch(JSON.stringify(ctx.lastLlm().body), /帖子正文|楼层内容/)
+})
+
+test('动作计划：非法 JSON、未知动作和额外执行字段都被本地拒绝', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    _llmReplies: [
+      { choices: [{ message: { content: '{"version":1,"summary":"x","steps":[{"action":"site.missing","args":{}}]}' } }] },
+      { choices: [{ message: { content: '不是 JSON' } }] },
+      { choices: [{ message: { content: '{"version":1,"summary":"x","executed":true,"steps":[{"action":"site.navigate","args":{"target":"home"}}]}' } }] },
+    ],
+  })
+  await load(ctx)
+  ctx.w.eval(actionCode)
+  await sleep(30)
+  const exported = ctx.w.LSB.__core.plugins.get('ai-copilot').exports
+  await assert.rejects(() => exported.planActions({ command: '执行未知动作' }), /未知动作|计划/)
+  await assert.rejects(() => exported.planActions({ command: '根据这篇帖子打开相关面板' }), /JSON|计划/)
+  await assert.rejects(() => exported.planActions({ command: '声明已经执行' }), /未知字段|计划/)
 })
 
 function hugeOpHtml(len = 30000) {
