@@ -1,7 +1,9 @@
 import { num, text, idFrom } from './util.js'
 
 /**
- * 站点适配层：把 bbs1org（linux.sb v8.6.x / v8.7.5 / v8.9.2 / v9.0）的 HTML 结构收敛成结构化对象。
+ * 站点适配层：把 BBS1ORG 的 HTML 结构收敛成结构化对象。
+ * 当前目标部署 linux.sb 已实测为 v99.0；同一组稳定选择器也在 bbs1.org v10.3
+ * 的公开帖子页核对过。历史 fixture 仍保留旧版本名，用来覆盖曾经出现过的差异。
  *
  * 只有这一个文件知道选择器。站点改版时只改这里，依附插件不受影响。
  * 选择器依据 linux.sb 实测页面（/topic/:id、/、/user/:id）；v8.7.5 帖内楼层也是

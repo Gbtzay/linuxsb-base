@@ -232,6 +232,40 @@ test('氢壳：首页叠壳、藏顶栏、迁入搜索、版块，无时间轴',
   )
 })
 
+test('氢壳右栏：注册外部视图后显示站点/AI，切换不销毁站点卡片', async () => {
+  const { w, until } = makeSite()
+  await loadBase(w, PLUG('skin.user.js'))
+  const card = w.document.querySelector('#lsb-shell-aside .sidebar-card')
+  assert.ok(card, '夹具应有可迁移的站点卡片')
+  Object.defineProperty(w, 'innerWidth', { value: 1200, configurable: true })
+  w.dispatchEvent(new w.Event('resize'))
+  w.LSB.register(
+    { id: 'aside-demo', version: '1.0.0', permissions: ['ui', 'events', 'read'] },
+    (api) => {
+      api.ui.shellAsideView({
+        id: 'demo',
+        label: 'AI',
+        render(host) {
+          host.innerHTML = '<div data-demo>AI 内容</div>'
+          return () => {
+            host.textContent = ''
+          }
+        },
+      })
+    },
+  )
+  assert.equal(await until(() => w.document.querySelector('[data-lsb-shell-aside-tab="demo"]')), true)
+  const siteCard = w.document.querySelector('#lsb-shell-aside .sidebar-card')
+  assert.equal(siteCard, card)
+  const aiTab = w.document.querySelector('[data-lsb-shell-aside-tab="demo"]')
+  aiTab.click()
+  assert.equal(w.document.querySelector('[data-lsb-shell-aside-pane="site"]').hidden, true)
+  assert.match(w.document.querySelector('[data-demo]').textContent, /AI 内容/)
+  w.document.querySelector('[data-lsb-shell-aside-tab="site"]').click()
+  assert.equal(w.document.querySelector('[data-lsb-shell-aside-pane="site"]').hidden, false)
+  assert.equal(w.document.querySelector('#lsb-shell-aside .sidebar-card'), card)
+})
+
 test('氢壳：个人卡晚于壳出现时仍迁入左栏（LTS document-start 首屏竞态）', async () => {
   const { w, tick, until } = makeHome()
   const native = w.document.querySelector('aside.sidebar .sidebar-card.user-card')

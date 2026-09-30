@@ -71,8 +71,8 @@ test('启动后 snapshot / csrf / 面板就绪', () => {
   assert.match(launch.title, /氢/)
 })
 
-test('正式版氢号是 0.1.41，面板标题不带 RC', () => {
-  assert.equal(VERSION, '0.1.41')
+test('正式版氢号是 0.1.42，面板标题不带 RC', () => {
+  assert.equal(VERSION, '0.1.42')
   const core = boot()
   assert.equal(core.ui.title, 'LINUX.SB · 氢')
   assert.doesNotMatch(core.ui.title, /RC/)
@@ -230,6 +230,20 @@ test('插件间 RPC 与命名空间事件', async () => {
   core.bus.emit('metrics:updated', { n: 3 }, { source: 'provider' })
   assert.deepEqual(heard, { n: 3 })
   assert.equal(provider.state, 'active')
+})
+
+test('侧栏视图：按 order 排序，visible 过滤，注销后不再提供', () => {
+  const core = boot()
+  let api
+  core.register({ id: 'aside-provider', version: '1.0.0' }, (a) => {
+    api = a
+    a.ui.shellAsideView({ id: 'late', label: '晚', order: 20, visible: () => true, render: () => {} })
+    a.ui.shellAsideView({ id: 'early', label: '早', order: 10, visible: () => false, render: () => {} })
+  })
+  assert.deepEqual(core.ui.shellAsideViews({}).map((view) => view.id), ['late'])
+  assert.equal(core.ui.shellAsideViews({})[0].label, '晚')
+  api.ui.shellAsideView({ id: 'second', label: '第二', order: 20, render: () => {} })
+  assert.deepEqual(core.ui.shellAsideViews({}).map((view) => view.id), ['second', 'late'])
 })
 
 test('未声明依赖时不能偷看别人的 exports', () => {

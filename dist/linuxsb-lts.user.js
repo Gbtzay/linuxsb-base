@@ -2,7 +2,7 @@
 // @name         LINUX.SB（LTS）
 // @name:en      LINUX.SB (LTS)
 // @namespace    https://linux.sb/
-// @version      1.0.118
+// @version      1.0.119
 // @description  【LTS】一份脚本含基座与精简功能包。请先卸掉「LINUX.SB 氢」和「LINUX.SB 氧」。冻新功能，只修阻断。
 // @description:en  [LTS] Base + feature pack in one script. Uninstall Hydrogen and Oxygen first. Feature-frozen.
 // @author       xB70sR71
@@ -49,7 +49,7 @@
     return
   }
   W.__LSB_CHANNEL__ = 'lts'
-  W.__LSB_LTS_VERSION__ = "1.0.118";
+  W.__LSB_LTS_VERSION__ = "1.0.119";
 (() => {
   var __defProp = Object.defineProperty;
   var __export = (target, all) => {
@@ -1126,6 +1126,7 @@
       this.title = title;
       this.version = version;
       this._tabs = [];
+      this._shellAsideViews = [];
       this._panel = null;
       this._active = null;
       this._styleDone = false;
@@ -1214,6 +1215,37 @@
         this._tabs = this._tabs.filter((t) => t !== tab);
         if (this._panel) this._renderTabs();
       };
+    }
+    /**
+     * 注册一个氢壳右栏视图。skin 只消费这个通用协议，不感知视图业务。
+     * 返回注销函数；插件停用时由 api.ui 自动清理。
+     */
+    registerShellAsideView({ id, label, order = 100, visible, render }) {
+      if (!id || typeof render !== "function") throw new Error("侧栏视图需要 id/render");
+      const record = {
+        id: String(id),
+        label: String(label || id),
+        order: Number.isFinite(Number(order)) ? Number(order) : 100,
+        visible: typeof visible === "function" ? visible : () => true,
+        render
+      };
+      const old = this._shellAsideViews.find((item) => item.id === record.id);
+      if (old) this._shellAsideViews = this._shellAsideViews.filter((item) => item !== old);
+      this._shellAsideViews.push(record);
+      this._shellAsideViews.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+      return () => {
+        this._shellAsideViews = this._shellAsideViews.filter((item) => item !== record);
+      };
+    }
+    /** 返回当前上下文可见的氢壳右栏视图。 */
+    shellAsideViews(context = {}) {
+      return this._shellAsideViews.filter((item) => {
+        try {
+          return item.visible(context) !== false;
+        } catch {
+          return false;
+        }
+      });
     }
     /** 右下角圆形入口按钮 */
     mountLauncher() {
@@ -1797,7 +1829,7 @@
   }
 
   // src/core.js
-  var VERSION = "0.1.41";
+  var VERSION = "0.1.42";
   var PERMISSIONS = {
     read: "读取页面结构与站内 GET 请求",
     write: "代表当前用户发起写操作（回复/点赞/收藏等）",
@@ -2417,7 +2449,11 @@
                 if (opt.render) opt.render(host);
               }
             });
-          }
+          },
+          /** 注册氢壳右栏的通用外部视图。 */
+          shellAsideView: (opt) => (need("ui", "注册侧栏视图"), own(core.ui.registerShellAsideView(opt))),
+          /** 读取当前可见的氢壳右栏视图。 */
+          shellAsideViews: (context) => (need("ui", "读取侧栏视图"), core.ui.shellAsideViews(context))
         },
         /* 数据主权（admin 权限） */
         admin: {
@@ -5438,7 +5474,7 @@ html.lsb-shell-boot{
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.56',
+    version: '1.1.57',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -5464,6 +5500,9 @@ html.lsb-shell-boot{
     let userCardHome = null
     const extrasHomes = new Map()
     const asideHomes = new Map()
+    const asideViews = new Map()
+    let asideActiveId = 'site'
+    let asideResizeBound = false
     let themeToggleHome = null
     let colorSchemeHome = null
     let onlineObs = null
@@ -5636,12 +5675,27 @@ html.lsb-shell-boot{
         }
         .lsb-shell-theme .color-scheme-top-link svg{width:17px;height:17px;display:block}
         #lsb-shell-aside{
-          display:none;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
-          width:var(--lsb-shell-aside);z-index:7999;overflow:auto;padding:12px 10px 16px;
+          display:none;flex-direction:column;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
+          width:var(--lsb-shell-aside);z-index:7999;overflow:hidden;padding:0;
           background:var(--bg,#f4f5f7);color:var(--text,#222);
           border-left:1px solid var(--line-soft,#e8e8e8);
           font-family:${FONT_SANS};
         }
+        #lsb-shell-aside-tabs{
+          display:flex;align-items:center;gap:4px;min-height:40px;padding:6px 10px;
+          border-bottom:1px solid var(--line-soft,#e8e8e8);background:color-mix(in srgb,var(--panel,#fff) 72%,transparent);
+        }
+        #lsb-shell-aside-tabs[hidden]{display:none!important}
+        #lsb-shell-aside-tabs [data-lsb-shell-aside-tab]{
+          flex:1 1 0;min-width:0;height:28px;padding:0 8px;border:0;border-radius:var(--lsb-radius-sm);
+          background:transparent;color:var(--text-muted,#888);font:inherit;font-size:12px;cursor:pointer;
+        }
+        #lsb-shell-aside-tabs [data-lsb-shell-aside-tab][aria-selected="true"]{
+          background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600;
+        }
+        .lsb-shell-aside-panes{flex:1 1 auto;height:auto;min-height:0}
+        [data-lsb-shell-aside-pane]{height:100%;min-height:0;box-sizing:border-box;overflow:auto;padding:12px 10px 16px}
+        [data-lsb-shell-aside-pane][hidden]{display:none!important}
         #lsb-shell-aside .sidebar-card{
           margin:0 0 10px;padding:10px 10px 8px;border-radius:var(--lsb-radius);
           background:color-mix(in srgb,var(--panel,#fff) 78%,transparent);
@@ -5762,7 +5816,7 @@ html.lsb-shell-boot{
         @media(min-width:1100px){
           html.lsb-skin-shell-on{padding-right:var(--lsb-shell-aside)}
           html.lsb-skin-shell-topic{padding-right:var(--lsb-shell-aside)}
-          html.lsb-skin-shell-on #lsb-shell-aside{display:block}
+          html.lsb-skin-shell-on #lsb-shell-aside{display:flex}
           html.lsb-skin-shell-on #lsb-shell-timeline{display:none!important}
           html.lsb-skin-shell-on .image-lightbox-overlay{right:var(--lsb-shell-aside)}
         }
@@ -5882,6 +5936,141 @@ html.lsb-shell-boot{
     function markNative(on) {
       document.querySelector('body > .top')?.classList.toggle('lsb-native-header-hidden', on)
       for (const el of nativeSidebars()) el.classList.toggle('lsb-native-sidebar-hidden', on)
+    }
+
+    function asideWide() {
+      try {
+        if (typeof window.matchMedia === 'function') return !!window.matchMedia('(min-width: 1100px)').matches
+      } catch {
+        /* jsdom and older embedded browsers may not implement matchMedia */
+      }
+      const width = Number(window.innerWidth || document.documentElement?.clientWidth || 0)
+      return width >= 1100
+    }
+
+    function asideContext() {
+      return {
+        page: api.page,
+        route: api.page,
+        snapshot: api.snapshot,
+        wide: asideWide(),
+      }
+    }
+
+    function asideSetActive(id, aside = document.querySelector('#lsb-shell-aside')) {
+      if (!(aside instanceof Element)) return
+      const exists = id === 'site' || asideViews.has(id)
+      asideActiveId = exists ? id : 'site'
+      for (const tab of aside.querySelectorAll('[data-lsb-shell-aside-tab]')) {
+        const active = tab.getAttribute('data-lsb-shell-aside-tab') === asideActiveId
+        tab.setAttribute('aria-selected', active ? 'true' : 'false')
+        tab.tabIndex = active ? 0 : -1
+      }
+      for (const pane of aside.querySelectorAll('[data-lsb-shell-aside-pane]')) {
+        pane.hidden = pane.getAttribute('data-lsb-shell-aside-pane') !== asideActiveId
+      }
+    }
+
+    function removeAsideView(id) {
+      const rec = asideViews.get(id)
+      if (!rec) return
+      try {
+        rec.dispose?.()
+      } catch (e) {
+        console.error('[LSB skin] 右栏视图清理失败', id, e)
+      }
+      rec.tab?.remove()
+      rec.pane?.remove()
+      asideViews.delete(id)
+      if (asideActiveId === id) asideActiveId = 'site'
+    }
+
+    function destroyAsideViews() {
+      for (const id of [...asideViews.keys()]) removeAsideView(id)
+      asideActiveId = 'site'
+    }
+
+    function syncAsideViews(el = document.getElementById('lsb-shell')) {
+      const aside = el?.querySelector?.('#lsb-shell-aside') || document.querySelector('#lsb-shell-aside')
+      if (!(aside instanceof Element)) return
+      const tabs = aside.querySelector('#lsb-shell-aside-tabs')
+      const panes = aside.querySelector('.lsb-shell-aside-panes')
+      const site = panes?.querySelector('[data-lsb-shell-aside-pane="site"]')
+      if (!(tabs instanceof Element) || !(panes instanceof Element) || !(site instanceof Element)) return
+
+      const wide = asideWide()
+      const context = asideContext()
+      const visible = wide ? api.ui.shellAsideViews(context) : []
+      const next = new Map(visible.map((view) => [view.id, view]))
+
+      for (const id of [...asideViews.keys()]) {
+        const view = next.get(id)
+        const current = asideViews.get(id)
+        if (!view || current.view !== view) removeAsideView(id)
+      }
+
+      let siteTab = tabs.querySelector('[data-lsb-shell-aside-tab="site"]')
+      if (!siteTab) {
+        siteTab = document.createElement('button')
+        siteTab.type = 'button'
+        siteTab.setAttribute('role', 'tab')
+        siteTab.setAttribute('data-lsb-shell-aside-tab', 'site')
+        siteTab.textContent = '站点'
+        siteTab.addEventListener('click', () => asideSetActive('site', aside))
+        tabs.append(siteTab)
+      }
+
+      for (const view of visible) {
+        let rec = asideViews.get(view.id)
+        if (!rec) {
+          const tab = document.createElement('button')
+          tab.type = 'button'
+          tab.setAttribute('role', 'tab')
+          tab.setAttribute('data-lsb-shell-aside-tab', view.id)
+          tab.textContent = view.label
+          const pane = document.createElement('section')
+          pane.setAttribute('role', 'tabpanel')
+          pane.setAttribute('data-lsb-shell-aside-pane', view.id)
+          pane.setAttribute('aria-label', view.label)
+          pane.tabIndex = 0
+          tab.addEventListener('click', () => asideSetActive(view.id, aside))
+          panes.append(pane)
+          let dispose = null
+          try {
+            dispose = view.render(pane, context)
+          } catch (e) {
+            pane.textContent = 'AI 视图加载失败'
+            console.error('[LSB skin] 右栏视图渲染失败', view.id, e)
+          }
+          rec = { view, tab, pane, dispose: typeof dispose === 'function' ? dispose : null }
+          asideViews.set(view.id, rec)
+        }
+        tabs.append(rec.tab)
+        panes.append(rec.pane)
+      }
+      tabs.append(siteTab)
+      // 站点页固定在首位；append 顺序用于浏览器键盘和读屏顺序。
+      tabs.insertBefore(siteTab, tabs.firstChild)
+      panes.insertBefore(site, panes.firstChild)
+      tabs.hidden = !wide || visible.length === 0
+      if (!wide) asideActiveId = 'site'
+      asideSetActive(asideActiveId, aside)
+    }
+
+    function bindAsideResize() {
+      if (asideResizeBound) return
+      asideResizeBound = true
+      window.addEventListener('resize', onAsideResize)
+    }
+
+    function unbindAsideResize() {
+      if (!asideResizeBound) return
+      window.removeEventListener('resize', onAsideResize)
+      asideResizeBound = false
+    }
+
+    function onAsideResize() {
+      if (cfg.shell) syncAsideViews()
     }
 
     function collectBoards() {
@@ -6635,7 +6824,12 @@ html.lsb-shell-boot{
             <button type="button" class="lsb-shell-settings" data-lsb-shell-settings>设置</button>
           </div>
         </aside>
-        <aside id="lsb-shell-aside" aria-label="站点信息"></aside>`
+        <aside id="lsb-shell-aside" aria-label="站点信息">
+          <nav id="lsb-shell-aside-tabs" role="tablist" aria-label="右栏视图" hidden></nav>
+          <div class="lsb-shell-aside-panes">
+            <section data-lsb-shell-aside-pane="site" data-lsb-shell-site aria-label="站点" tabindex="0"></section>
+          </div>
+        </aside>`
       el.querySelector('[data-lsb-shell-settings]').addEventListener('click', () => api.ui.openPanel('skin'))
       el.querySelector('#lsb-shell-rail').addEventListener('click', (e) => {
         const rpcBtn = e.target.closest('[data-lsb-rpc]')
@@ -6667,6 +6861,7 @@ html.lsb-shell-boot{
       } else {
         unbindWindow()
       }
+      syncAsideViews(el)
     }
 
     function fillShell() {
@@ -6676,7 +6871,7 @@ html.lsb-shell-boot{
       adoptTopExtras(el.querySelector('[data-lsb-shell-extras]'))
       adoptThemeToggle(el.querySelector('[data-lsb-shell-theme]'))
       adoptUserCard(el.querySelector('[data-lsb-shell-me]'))
-      adoptAsideCards(el.querySelector('#lsb-shell-aside'))
+      adoptAsideCards(el.querySelector('[data-lsb-shell-site]'))
       watchOnlineCard()
       watchTopExtras()
       setSection(el.querySelector('[data-lsb-shell-section="home"]'), '', [
@@ -7456,8 +7651,10 @@ html.lsb-shell-boot{
       unbindSpa()
       unbindHomeInfiniteScroll()
       unbindWindow()
+      unbindAsideResize()
       stopOnlineWatch()
       stopExtrasWatch()
+      destroyAsideViews()
       restoreAsideCards()
       restoreUserCard()
       restoreTopExtras()
@@ -7479,6 +7676,7 @@ html.lsb-shell-boot{
       }
       markNative(true)
       applyMarkers()
+      bindAsideResize()
       fillShell()
       bindSpa()
     }
@@ -7516,7 +7714,10 @@ html.lsb-shell-boot{
       applyAll()
       syncGmMenu()
     })
-    api.on('route:changed', () => scheduleRefresh(true))
+    api.on('route:changed', () => {
+      asideActiveId = 'site'
+      scheduleRefresh(true)
+    })
     api.on('plugin:activated', () => {
       invalidateTools()
       scheduleRefresh(false)
@@ -8379,7 +8580,7 @@ html.lsb-shell-boot{
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.118',
+    version: '1.0.119',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },

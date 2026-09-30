@@ -18,7 +18,7 @@ import {
   ltsDisplayVersion,
 } from './check-update.js'
 
-export const VERSION = '0.1.41'
+export const VERSION = '0.1.42'
 
 /** 权限清单：插件在 manifest.permissions 里声明，未声明即调用会抛错 */
 export const PERMISSIONS = {
@@ -689,6 +689,12 @@ export class Core {
             },
           })
         },
+        /** 注册氢壳右栏的通用外部视图。 */
+        shellAsideView: (opt) =>
+          (need('ui', '注册侧栏视图'), own(core.ui.registerShellAsideView(opt))),
+        /** 读取当前可见的氢壳右栏视图。 */
+        shellAsideViews: (context) =>
+          (need('ui', '读取侧栏视图'), core.ui.shellAsideViews(context)),
       },
 
       /* 数据主权（admin 权限） */

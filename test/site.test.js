@@ -425,3 +425,44 @@ test('v8.7.5：快照能读到 index.css 版本', () => {
   const snap = snapshot(w.document, new URL('https://linux.sb/topic/42'))
   assert.equal(snap.version, '8.7.5')
 })
+
+test('线上 BBS1ORG v99.0 / v10.3：右栏与帖子选择器保持兼容', () => {
+  const v99 = new JSDOM(
+    '<!doctype html><html><head>' +
+      '<link rel="canonical" href="https://linux.sb/topic/24563">' +
+      '<link rel="stylesheet" href="/app/assets/index.css?v=v99.0-stats-card-20260929-v2">' +
+      '</head><body>' +
+      '<div class="forum-layout forum-layout-has-sidebar"><aside class="sidebar" data-slot="sidebar.stack"><div class="sidebar-card">站点</div></aside>' +
+      '<main><h1 class="post-content-title">主题</h1><div class="breadcrumb"><a href="/forum/9">社区公告</a></div>' +
+      '<ul class="post-list topic-post-list">' +
+      '<li class="post-item post-entry" id="post-24563"><a class="post-title post-author" href="/user/1">楼主</a><div class="post-content">主楼</div></li>' +
+      '<li class="post-entry reply-pin-pinned reply-pin-duplicate" data-reply-pin="top-copy" id="reply-pin-top-219152"><div class="post-content">置顶副本</div></li>' +
+      '<li class="post-item post-entry reply-pin-original" id="post-219152" data-floor="1"><a class="post-title post-author" href="/user/2">甲</a><div class="post-content">原楼</div></li>' +
+      '</ul><div class="replies-login-visible">登录后查看回复</div></main></div></body></html>',
+    { url: 'https://linux.sb/topic/24563' },
+  ).window
+  assert.ok(v99.document.querySelector('aside.sidebar[data-slot="sidebar.stack"]'))
+  const live = snapshot(v99.document, new URL('https://linux.sb/topic/24563'))
+  assert.equal(live.version, '99.0')
+  assert.equal(live.topic.posts.length, 2, 'v99.0 置顶副本不能进入帖子上下文')
+  assert.equal(live.topic.op.floor, 0, 'v99.0 未标楼层的主楼保持未知')
+  assert.equal(live.topic.posts[1].floor, 1)
+  assert.equal(live.topic.loginRequired, true, '未登录回复区由页面状态标记为受限')
+
+  const v10 = new JSDOM(
+    '<!doctype html><html><head>' +
+      '<link rel="canonical" href="https://bbs1.org/topic/21">' +
+      '<link rel="stylesheet" href="/app/assets/index.css?v=v10.3">' +
+      '</head><body><aside class="sidebar" data-slot="sidebar.stack"></aside>' +
+      '<main><h1 class="post-content-title">主题</h1><div class="breadcrumb"><a href="/forum/1">程序</a></div>' +
+      '<ul class="post-list topic-post-list"><li class="post-item post-entry" id="post-21"><div class="post-content">主楼</div></li>' +
+      '<li class="post-item post-entry" id="post-87" data-floor="1"><div class="post-content">回帖</div></li></ul>' +
+      '<form class="ajax-reply-form"></form></main></body></html>',
+    { url: 'https://bbs1.org/topic/21' },
+  ).window
+  assert.ok(v10.document.querySelector('aside.sidebar[data-slot="sidebar.stack"]'))
+  const upstream = snapshot(v10.document, new URL('https://bbs1.org/topic/21'))
+  assert.equal(upstream.version, '10.3')
+  assert.equal(upstream.topic.posts.length, 2)
+  assert.equal(upstream.topic.loginRequired, false)
+})

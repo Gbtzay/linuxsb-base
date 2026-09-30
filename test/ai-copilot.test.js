@@ -108,6 +108,25 @@ async function load(ctx, { active = true } = {}) {
   return active ? ctx.w.LSB.bus.request('ai-copilot:debug') : rec
 }
 
+test('AI 副驾：公开工作台接口不依赖 debug RPC', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  const rec = ctx.w.LSB.info().plugins.find((item) => item.id === 'ai-copilot')
+  const exported = rec?.state === 'active' ? ctx.w.LSB.__core.plugins.get('ai-copilot').exports : null
+  assert.equal(typeof exported?.context, 'function')
+  assert.equal(typeof exported?.runConsoleQuery, 'function')
+  assert.equal(typeof exported?.runTopic, 'function')
+  assert.equal(typeof exported?.trackingOverview, 'function')
+  assert.equal(typeof exported?.providerState, 'function')
+  assert.equal(typeof exported?.renderMarkdown, 'function')
+  assert.equal(exported.providerState().configured, true)
+  assert.equal(exported.context().route.type, 'topic')
+  const overview = exported.trackingOverview()
+  assert.equal(Array.isArray(overview.items), true)
+  assert.equal(typeof overview.activeCount, 'number')
+  assert.equal(ctx.w.LSB.bus.hasHandler('ai-copilot:debug'), true)
+})
+
 function hugeOpHtml(len = 30000) {
   return topicHtml.replace(/<div class="post-content">/, `<div class="post-content"><p>${'啊'.repeat(len)}</p>`)
 }

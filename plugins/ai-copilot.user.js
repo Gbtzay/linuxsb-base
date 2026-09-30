@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·AI 帖子副驾
 // @namespace    https://linux.sb/
-// @version      0.6.0
+// @version      0.6.1
 // @description  帖子问答、讨论分析、新回复摘要、问题追踪、回复草稿与只读自然语言操作台。
 // @author       you
 // @match        https://linux.sb/*
@@ -22,7 +22,7 @@
   const manifest = {
     id: 'ai-copilot',
     name: 'AI 帖子副驾',
-    version: '0.6.0',
+    version: '0.6.1',
     description: '帖子问答、讨论分析、新回复摘要、问题追踪、回复草稿与只读自然语言操作台；不自动提交站内回复',
     author: 'you',
     requires: {
@@ -145,6 +145,9 @@
       views: asNumber(topic.views, 0),
       replies: asNumber(topic.replies, 0),
       pages: Math.max(1, asNumber(topic.pages, 1)),
+      replyForm: Boolean(topic.replyForm),
+      loginRequired: Boolean(topic.loginRequired),
+      repliesLocked: Boolean(topic.repliesLocked),
       posts: Array.isArray(topic.posts) ? topic.posts.map(normalizePost) : [],
     }
   }
@@ -948,6 +951,34 @@
         })
       }
       return rows.sort((a, b) => b.updatedAt - a.updatedAt || a.id - b.id).slice(0, CONSOLE_MAX_TOPICS)
+    }
+
+    /** 工作台使用的跨主题只读追踪摘要；默认隐藏归档项，不触发扫描或模型请求。 */
+    function trackingOverview({ includeArchived = false } = {}) {
+      const catalog = trackingTopicCatalog()
+      const byTopic = new Map(catalog.map((topic) => [topic.id, topic]))
+      const items = []
+      for (const topic of catalog) {
+        const state = loadTrackingState(topic.id)
+        for (const item of state.items) {
+          if (!includeArchived && item.archivedAt) continue
+          items.push({
+            ...item,
+            topicId: topic.id,
+            topicTitle: byTopic.get(topic.id)?.title || state.topicMeta.title || `主题 #${topic.id}`,
+            forumName: byTopic.get(topic.id)?.forumName || state.topicMeta.forumName || '',
+          })
+        }
+      }
+      items.sort((a, b) => b.updatedAt - a.updatedAt || a.topicId - b.topicId || String(a.id).localeCompare(String(b.id)))
+      return {
+        catalog,
+        items,
+        topicCount: catalog.length,
+        activeCount: items.filter((item) => !item.archivedAt).length,
+        pendingCount: items.filter((item) => !item.archivedAt && item.pendingEvidence?.length).length,
+        includeArchived: Boolean(includeArchived),
+      }
     }
 
     function consoleArchiveAuthorized(question) {
@@ -3186,6 +3217,26 @@
       running = null
     })
 
+    function runTopic(mode = 'ask', options = {}) {
+      const allowed = new Set(['ask', 'analyze', 'digest', 'draft'])
+      if (!allowed.has(mode)) throw new Error(`不支持的帖子副驾模式：${String(mode)}`)
+      return run(mode, options)
+    }
+
+    function openWorkbenchPanel(mode = 'ask') {
+      const allowed = new Set(['ask', 'analyze', 'digest', 'draft', 'track'])
+      if (!allowed.has(mode)) throw new Error(`不支持的帖子副驾面板：${String(mode)}`)
+      currentMode = mode
+      openPanel()
+    }
+
+    function providerState() {
+      return {
+        configured: Boolean(provider.configured()),
+        model: String(typeof provider.model === 'function' ? provider.model() : ''),
+      }
+    }
+
     api.handle('ai-copilot:debug', () => ({
       collectContext,
       normalize: normalizeTopic,
@@ -3235,7 +3286,16 @@
       state: () => ({ topicId: api.page.id, page: api.page.type }),
     }))
 
-    return {}
+    return {
+      context: () => api.util.clone(consoleContext()),
+      configured: () => Boolean(provider.configured()),
+      providerState,
+      renderMarkdown: (text) => provider.renderMarkdown(String(text || '')),
+      runConsoleQuery,
+      runTopic,
+      trackingOverview,
+      openPanel: openWorkbenchPanel,
+    }
   }
 
   const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window

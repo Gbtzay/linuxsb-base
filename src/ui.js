@@ -70,6 +70,7 @@ export class UI {
     this.title = title
     this.version = version
     this._tabs = [] // 插件注册的面板分页
+    this._shellAsideViews = [] // 氢壳右栏的通用外部视图
     this._panel = null
     this._active = null
     this._styleDone = false
@@ -165,6 +166,39 @@ export class UI {
       this._tabs = this._tabs.filter((t) => t !== tab)
       if (this._panel) this._renderTabs()
     }
+  }
+
+  /**
+   * 注册一个氢壳右栏视图。skin 只消费这个通用协议，不感知视图业务。
+   * 返回注销函数；插件停用时由 api.ui 自动清理。
+   */
+  registerShellAsideView({ id, label, order = 100, visible, render }) {
+    if (!id || typeof render !== 'function') throw new Error('侧栏视图需要 id/render')
+    const record = {
+      id: String(id),
+      label: String(label || id),
+      order: Number.isFinite(Number(order)) ? Number(order) : 100,
+      visible: typeof visible === 'function' ? visible : () => true,
+      render,
+    }
+    const old = this._shellAsideViews.find((item) => item.id === record.id)
+    if (old) this._shellAsideViews = this._shellAsideViews.filter((item) => item !== old)
+    this._shellAsideViews.push(record)
+    this._shellAsideViews.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))
+    return () => {
+      this._shellAsideViews = this._shellAsideViews.filter((item) => item !== record)
+    }
+  }
+
+  /** 返回当前上下文可见的氢壳右栏视图。 */
+  shellAsideViews(context = {}) {
+    return this._shellAsideViews.filter((item) => {
+      try {
+        return item.visible(context) !== false
+      } catch {
+        return false
+      }
+    })
   }
 
   /** 右下角圆形入口按钮 */

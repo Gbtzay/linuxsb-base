@@ -2,8 +2,8 @@
 // @name         LINUX.SB 氧
 // @name:en      LINUX.SB Oxygen
 // @namespace    https://linux.sb/
-// @version      1.0.118
-// @description  linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 21 个模块。必须先安装「LINUX.SB 氢」。
+// @version      1.0.119
+// @description  linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 22 个模块。必须先安装「LINUX.SB 氢」。
 // @description:en  Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen.
 // @author       xB70sR71
 // @license      MIT
@@ -29,11 +29,12 @@
 // · LSB·积分趋势 v1.0.2
 // · LSB·称号行情 v1.0.18
 // · LSB·AI 总结 v1.2.0
-// · LSB·AI 帖子副驾 v0.6.0
+// · LSB·AI 帖子副驾 v0.6.1
+// · LSB·AI 工作台 v0.1.0
 // · LSB·配置迁移 v1.0.0
 // · LSB·个人存档 v1.0.0
 // · LSB·年度报告 v1.0.1
-// · LSB·界面精修 v1.1.56
+// · LSB·界面精修 v1.1.57
 // · LSB·实时流 v1.2.18
 // · LSB·性能探针 v1.0.0
 //
@@ -5270,7 +5271,7 @@
 
 
 ;
-/* ══════════════ LSB·AI 帖子副驾 v0.6.0 (ai-copilot) ══════════════ */
+/* ══════════════ LSB·AI 帖子副驾 v0.6.1 (ai-copilot) ══════════════ */
 (function () {
   'use strict'
 
@@ -5284,7 +5285,7 @@
   const manifest = {
     id: 'ai-copilot',
     name: 'AI 帖子副驾',
-    version: '0.6.0',
+    version: '0.6.1',
     description: '帖子问答、讨论分析、新回复摘要、问题追踪、回复草稿与只读自然语言操作台；不自动提交站内回复',
     author: 'you',
     requires: {
@@ -5407,6 +5408,9 @@
       views: asNumber(topic.views, 0),
       replies: asNumber(topic.replies, 0),
       pages: Math.max(1, asNumber(topic.pages, 1)),
+      replyForm: Boolean(topic.replyForm),
+      loginRequired: Boolean(topic.loginRequired),
+      repliesLocked: Boolean(topic.repliesLocked),
       posts: Array.isArray(topic.posts) ? topic.posts.map(normalizePost) : [],
     }
   }
@@ -6210,6 +6214,34 @@
         })
       }
       return rows.sort((a, b) => b.updatedAt - a.updatedAt || a.id - b.id).slice(0, CONSOLE_MAX_TOPICS)
+    }
+
+    /** 工作台使用的跨主题只读追踪摘要；默认隐藏归档项，不触发扫描或模型请求。 */
+    function trackingOverview({ includeArchived = false } = {}) {
+      const catalog = trackingTopicCatalog()
+      const byTopic = new Map(catalog.map((topic) => [topic.id, topic]))
+      const items = []
+      for (const topic of catalog) {
+        const state = loadTrackingState(topic.id)
+        for (const item of state.items) {
+          if (!includeArchived && item.archivedAt) continue
+          items.push({
+            ...item,
+            topicId: topic.id,
+            topicTitle: byTopic.get(topic.id)?.title || state.topicMeta.title || `主题 #${topic.id}`,
+            forumName: byTopic.get(topic.id)?.forumName || state.topicMeta.forumName || '',
+          })
+        }
+      }
+      items.sort((a, b) => b.updatedAt - a.updatedAt || a.topicId - b.topicId || String(a.id).localeCompare(String(b.id)))
+      return {
+        catalog,
+        items,
+        topicCount: catalog.length,
+        activeCount: items.filter((item) => !item.archivedAt).length,
+        pendingCount: items.filter((item) => !item.archivedAt && item.pendingEvidence?.length).length,
+        includeArchived: Boolean(includeArchived),
+      }
     }
 
     function consoleArchiveAuthorized(question) {
@@ -8448,6 +8480,26 @@
       running = null
     })
 
+    function runTopic(mode = 'ask', options = {}) {
+      const allowed = new Set(['ask', 'analyze', 'digest', 'draft'])
+      if (!allowed.has(mode)) throw new Error(`不支持的帖子副驾模式：${String(mode)}`)
+      return run(mode, options)
+    }
+
+    function openWorkbenchPanel(mode = 'ask') {
+      const allowed = new Set(['ask', 'analyze', 'digest', 'draft', 'track'])
+      if (!allowed.has(mode)) throw new Error(`不支持的帖子副驾面板：${String(mode)}`)
+      currentMode = mode
+      openPanel()
+    }
+
+    function providerState() {
+      return {
+        configured: Boolean(provider.configured()),
+        model: String(typeof provider.model === 'function' ? provider.model() : ''),
+      }
+    }
+
     api.handle('ai-copilot:debug', () => ({
       collectContext,
       normalize: normalizeTopic,
@@ -8496,6 +8548,415 @@
       cacheKey,
       state: () => ({ topicId: api.page.id, page: api.page.type }),
     }))
+
+    return {
+      context: () => api.util.clone(consoleContext()),
+      configured: () => Boolean(provider.configured()),
+      providerState,
+      renderMarkdown: (text) => provider.renderMarkdown(String(text || '')),
+      runConsoleQuery,
+      runTopic,
+      trackingOverview,
+      openPanel: openWorkbenchPanel,
+    }
+  }
+
+  const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
+  if (w.LSB && w.LSB.register) w.LSB.register(manifest, setup)
+  else ;(w.LSB_PLUGINS = w.LSB_PLUGINS || []).push({ manifest, setup })
+})()
+
+
+;
+/* ══════════════ LSB·AI 工作台 v0.1.0 (ai-workbench) ══════════════ */
+(function () {
+  'use strict'
+
+  const manifest = {
+    id: 'ai-workbench',
+    name: 'AI 工作台',
+    version: '0.1.0',
+    description: '氢壳右栏的 AI 操作台、当前帖子副驾与追踪摘要；只读，不自动发帖或改变追踪状态',
+    author: 'you',
+    requires: {
+      base: '^0.1.0',
+      plugins: { 'ai-copilot': '^0.6.1' },
+    },
+    permissions: ['read', 'ui', 'events'],
+  }
+
+  const SECTION_LABELS = [
+    ['console', '操作台'],
+    ['topic', '当前帖子'],
+    ['tracking', '追踪'],
+  ]
+  const TOPIC_MODES = [
+    ['ask', '问答'],
+    ['analyze', '讨论分析'],
+    ['digest', '新回复'],
+    ['draft', '回复草稿'],
+  ]
+
+  function setup(api) {
+    const copilot = api.plugin('ai-copilot')
+    let disposed = false
+    let generation = 0
+    let mounted = null
+
+    const esc = (value) => api.util.esc(String(value ?? ''))
+    const safeHref = (value) => {
+      const href = String(value || '').trim()
+      return /^https?:\/\//i.test(href) || /^\/(?!\/)/.test(href) ? href : ''
+    }
+
+    function context() {
+      try {
+        return copilot?.context?.() || { route: api.page, currentTopic: null, currentPosts: [], catalog: [] }
+      } catch {
+        return { route: api.page, currentTopic: null, currentPosts: [], catalog: [] }
+      }
+    }
+
+    function isAlive(state, node, token) {
+      return !disposed && !state.disposed && mounted === state && generation === token && node?.isConnected
+    }
+
+    function settingHint(host, message = '请先在「AI 总结」设置页填写 API 端点与 Key。') {
+      host.innerHTML = `<div class="ai-workbench-empty"><p>${esc(message)}</p><button type="button" class="ai-workbench-btn ai-workbench-primary" data-ai-open-settings>打开 AI 总结设置</button></div>`
+      host.querySelector('[data-ai-open-settings]').onclick = () => api.ui.openPanel('ai-summary')
+    }
+
+    function renderCitations(host, rows) {
+      const citations = (Array.isArray(rows) ? rows : []).filter((row) => Number(row?.floor) > 0)
+      if (!citations.length) return
+      const box = document.createElement('div')
+      box.className = 'ai-workbench-citations'
+      const title = document.createElement('strong')
+      title.textContent = '引用楼层'
+      box.appendChild(title)
+      for (const row of citations) {
+        const line = document.createElement('div')
+        const href = row.known ? safeHref(row.href) : ''
+        if (href) {
+          const link = document.createElement('a')
+          link.href = href
+          link.textContent = `[#${row.floor}] ${row.authorName || '楼层'}`
+          line.appendChild(link)
+          if (row.excerpt) line.append(`：${row.excerpt}`)
+        } else {
+          line.textContent = `[#${row.floor}] 当前采集范围没有此楼层`
+        }
+        box.appendChild(line)
+      }
+      host.appendChild(box)
+    }
+
+    function renderRecord(host, record, state, token) {
+      if (!isAlive(state, host, token)) return
+      host.innerHTML = `
+        <div class="ai-workbench-facts"></div>
+        <div class="ai-workbench-result" data-ai-result></div>
+        <div class="ai-workbench-actions">
+          <button type="button" class="ai-workbench-btn" data-ai-copy>复制结果</button>
+        </div>`
+      const facts = [
+        record?.meta?.model,
+        record?.meta?.floors != null ? `${record.meta.floors} 楼` : null,
+        record?.meta?.pagesFetched != null ? `${record.meta.pagesFetched}/${record.meta.pagesTotal} 页` : null,
+        record?.meta?.analysisKind,
+        record?.meta?.empty ? '无匹配数据' : null,
+      ].filter(Boolean)
+      host.querySelector('.ai-workbench-facts').textContent = facts.join(' · ')
+      const result = host.querySelector('[data-ai-result]')
+      try {
+        result.innerHTML = copilot.renderMarkdown(String(record?.text || ''))
+      } catch {
+        result.textContent = String(record?.text || '')
+      }
+      renderCitations(host, record?.meta?.citations)
+      host.querySelector('[data-ai-copy]').onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(String(record?.text || ''))
+          api.ui.toast('结果已复制', { type: 'success' })
+        } catch {
+          api.ui.toast('复制失败，请手动选择文本', { type: 'error' })
+        }
+      }
+    }
+
+    function renderError(host, error) {
+      host.innerHTML = `<div class="ai-workbench-empty ai-workbench-error"></div><button type="button" class="ai-workbench-btn" data-ai-retry>重试</button>`
+      host.querySelector('.ai-workbench-error').textContent = String(error?.message || error || 'AI 请求失败')
+      return host.querySelector('[data-ai-retry]')
+    }
+
+    function renderConsole(state, host) {
+      if (!copilot?.configured?.()) {
+        settingHint(host)
+        return
+      }
+      host.innerHTML = `
+        <div class="ai-workbench-desc">自由提问当前帖子和所有活动追踪项；模型先生成受限计划，再由本地执行。</div>
+        <div class="ai-workbench-quick" data-ai-console-quick-list></div>
+        <textarea class="ai-workbench-input" data-ai-console-question rows="3" placeholder="例如：哪些追踪项最近有新证据？"></textarea>
+        <ol class="ai-workbench-stages" data-ai-console-stages>
+          <li data-stage="plan">计划</li><li data-stage="local">本地查询</li><li data-stage="answer">回答</li>
+        </ol>
+        <div class="ai-workbench-actions"><button type="button" class="ai-workbench-btn ai-workbench-primary" data-ai-console-run>运行查询</button></div>
+        <div data-ai-console-result></div>`
+      const quick = ['当前帖子有哪些未解决问题？', '哪些追踪项最近有新证据？', '哪些问题可能已经解决？', '给我汇总所有活动追踪项。']
+      const quickHost = host.querySelector('[data-ai-console-quick-list]')
+      for (const question of quick) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'ai-workbench-btn'
+        button.setAttribute('data-ai-console-quick', '')
+        button.textContent = question
+        button.onclick = () => {
+          host.querySelector('[data-ai-console-question]').value = question
+        }
+        quickHost.appendChild(button)
+      }
+      const run = async () => {
+        const question = host.querySelector('[data-ai-console-question]').value.trim()
+        if (!question) return
+        const button = host.querySelector('[data-ai-console-run]')
+        const resultHost = host.querySelector('[data-ai-console-result]')
+        const token = generation
+        button.disabled = true
+        const setStage = (stage) => {
+          if (!isAlive(state, host, token)) return
+          for (const item of host.querySelectorAll('[data-stage]')) {
+            const order = ['plan', 'local', 'answer'].indexOf(item.getAttribute('data-stage'))
+            const current = ['plan', 'local', 'answer'].indexOf(stage)
+            item.dataset.state = order === current ? 'active' : order < current ? 'done' : ''
+          }
+        }
+        setStage('plan')
+        try {
+          const record = await copilot.runConsoleQuery({ question, onStage: setStage })
+          if (!isAlive(state, host, token)) return
+          renderRecord(resultHost, record, state, token)
+        } catch (error) {
+          if (!isAlive(state, host, token)) return
+          const retry = renderError(resultHost, error)
+          retry.onclick = () => void run()
+        } finally {
+          if (isAlive(state, host, token)) button.disabled = false
+        }
+      }
+      host.querySelector('[data-ai-console-run]').onclick = () => void run()
+    }
+
+    function renderTopic(state, host) {
+      const ctx = context()
+      const topic = ctx.currentTopic
+      const route = ctx.route || {}
+      if (route.type !== 'topic' || !topic) {
+        host.innerHTML = '<div class="ai-workbench-empty">当前页面不是帖子页，帖子副驾暂不可用。</div>'
+        return
+      }
+      host.innerHTML = `
+        <div class="ai-workbench-topic-head"><strong data-ai-topic-title></strong><span data-ai-topic-meta></span></div>
+        <div class="ai-workbench-topic-nav" data-ai-topic-nav></div>
+        <div class="ai-workbench-topic-context" data-ai-topic-context></div>
+        <div data-ai-topic-controls></div>
+        <div data-ai-topic-result></div>`
+      host.querySelector('[data-ai-topic-title]').textContent = topic.title || `主题 #${route.id}`
+      host.querySelector('[data-ai-topic-meta]').textContent = ` · ${ctx.currentPosts?.length || topic.posts?.length || 0} 个可见楼层`
+      if (topic.loginRequired || topic.repliesLocked) {
+        host.querySelector('[data-ai-topic-context]').textContent = '当前页面只返回可见主楼，回复区需要登录；未知楼层不会被当作引用。'
+      } else {
+        host.querySelector('[data-ai-topic-context]').textContent = '结果只基于当前页面和已采集楼层。'
+      }
+      const nav = host.querySelector('[data-ai-topic-nav]')
+      const controls = host.querySelector('[data-ai-topic-controls]')
+      const resultHost = host.querySelector('[data-ai-topic-result]')
+      const selectMode = (mode) => {
+        for (const button of nav.querySelectorAll('[data-ai-topic-mode]')) {
+          button.classList.toggle('ai-workbench-primary', button.getAttribute('data-ai-topic-mode') === mode)
+        }
+        controls.innerHTML = ''
+        if (mode === 'ask') {
+          controls.innerHTML = '<textarea class="ai-workbench-input" data-ai-topic-question rows="3" placeholder="问问这篇帖子……"></textarea><div class="ai-workbench-actions"><button type="button" class="ai-workbench-btn ai-workbench-primary" data-ai-topic-run>询问</button></div>'
+        } else if (mode === 'analyze') {
+          controls.innerHTML = '<label class="ai-workbench-field">分析角度<select data-ai-topic-preset><option>观点分歧</option><option>方案对比</option><option>未解决问题</option></select></label><div class="ai-workbench-actions"><button type="button" class="ai-workbench-btn ai-workbench-primary" data-ai-topic-run>开始分析</button></div>'
+        } else if (mode === 'digest') {
+          controls.innerHTML = '<div class="ai-workbench-desc">只处理上次起点之后的新回复。</div><div class="ai-workbench-actions"><button type="button" class="ai-workbench-btn ai-workbench-primary" data-ai-topic-run>总结新回复</button></div>'
+        } else {
+          const posts = (ctx.currentPosts || []).filter((post) => post.content || post.floor === 0)
+          const options = posts.map((post) => `<option value="${esc(post.floor)}">${post.floor > 0 ? `#${post.floor}` : '主楼（楼层未知）'} · ${esc(post.authorName || '?')}</option>`).join('')
+          controls.innerHTML = `<div class="ai-workbench-desc">只生成草稿，复制后由你决定是否使用。</div><label class="ai-workbench-field">回应楼层<select data-ai-topic-floor>${options}</select></label><label class="ai-workbench-field">语气<select data-ai-topic-tone><option>客观</option><option>简洁</option><option>友好</option><option>技术向</option></select></label><div class="ai-workbench-actions"><button type="button" class="ai-workbench-btn ai-workbench-primary" data-ai-topic-run>生成草稿</button></div>`
+        }
+        controls.querySelector('[data-ai-topic-run]')?.addEventListener('click', () => {
+          const token = generation
+          const button = controls.querySelector('[data-ai-topic-run]')
+          button.disabled = true
+          resultHost.innerHTML = '<div class="ai-workbench-wait">正在处理…</div>'
+          const options = mode === 'ask'
+            ? { question: controls.querySelector('[data-ai-topic-question]').value.trim() }
+            : mode === 'analyze'
+              ? { preset: controls.querySelector('[data-ai-topic-preset]').value }
+              : mode === 'draft'
+                ? { targetFloor: Number(controls.querySelector('[data-ai-topic-floor]').value || 0), tone: controls.querySelector('[data-ai-topic-tone]').value, length: '中' }
+                : {}
+          void copilot.runTopic(mode, options)
+            .then((record) => {
+              if (!isAlive(state, host, token)) return
+              renderRecord(resultHost, record, state, token)
+            })
+            .catch((error) => {
+              if (!isAlive(state, host, token)) return
+              const retry = renderError(resultHost, error)
+              retry.onclick = () => controls.querySelector('[data-ai-topic-run]')?.click()
+            })
+            .finally(() => {
+              if (isAlive(state, host, token)) button.disabled = false
+            })
+        })
+      }
+      for (const [mode, label] of TOPIC_MODES) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'ai-workbench-btn'
+        button.setAttribute('data-ai-topic-mode', mode)
+        button.textContent = label
+        button.onclick = () => selectMode(mode)
+        nav.appendChild(button)
+      }
+      selectMode('ask')
+    }
+
+    function renderTracking(state, host) {
+      const overview = copilot.trackingOverview()
+      host.innerHTML = `
+        <div class="ai-workbench-track-summary"><strong>${overview.activeCount} 个活动问题</strong><span>${overview.pendingCount} 项待处理新证据</span></div>
+        <div class="ai-workbench-actions"><button type="button" class="ai-workbench-btn" data-ai-track-refresh>刷新摘要</button><button type="button" class="ai-workbench-btn ai-workbench-primary" data-ai-track-open>查看完整追踪面板</button></div>
+        <div data-ai-track-list></div>`
+      const list = host.querySelector('[data-ai-track-list]')
+      if (!overview.items.length) {
+        list.innerHTML = '<div class="ai-workbench-empty">暂无活动追踪项。</div>'
+      } else {
+        for (const item of overview.items.slice(0, 8)) {
+          const row = document.createElement('article')
+          row.className = 'ai-workbench-track-item'
+          const title = item.title ? `${item.title}：${item.question}` : item.question
+          row.innerHTML = `<strong></strong><span></span><small></small>`
+          row.querySelector('strong').textContent = title
+          row.querySelector('span').textContent = `状态：${item.status}`
+          row.querySelector('small').textContent = `${item.topicTitle} · 待处理新证据 ${item.pendingEvidence?.length || 0}`
+          list.appendChild(row)
+        }
+      }
+      host.querySelector('[data-ai-track-refresh]').onclick = () => renderTracking(state, host)
+      host.querySelector('[data-ai-track-open]').onclick = () => {
+        if (api.page.type === 'topic') copilot.openPanel('track')
+        else api.ui.toast('请进入帖子页打开完整追踪面板', { type: 'info' })
+      }
+    }
+
+    function mountState(state) {
+      const host = state.host
+      host.replaceChildren()
+      const root = document.createElement('div')
+      root.setAttribute('data-ai-workbench', '')
+      const nav = document.createElement('nav')
+      nav.className = 'ai-workbench-sections'
+      nav.setAttribute('role', 'tablist')
+      const panes = document.createElement('div')
+      panes.className = 'ai-workbench-panes'
+      state.sections = {}
+      for (const [id, label] of SECTION_LABELS) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'ai-workbench-section-tab'
+        button.setAttribute('role', 'tab')
+        button.setAttribute('data-ai-section-tab', id)
+        button.textContent = label
+        nav.appendChild(button)
+        const pane = document.createElement('section')
+        pane.setAttribute('data-ai-section', id)
+        pane.setAttribute('role', 'tabpanel')
+        pane.hidden = true
+        state.sections[id] = pane
+        panes.appendChild(pane)
+        button.onclick = () => select(id)
+      }
+      root.append(nav, panes)
+      host.appendChild(root)
+      state.root = root
+      function select(id) {
+        state.section = id
+        for (const button of nav.querySelectorAll('[data-ai-section-tab]')) {
+          const active = button.getAttribute('data-ai-section-tab') === id
+          button.setAttribute('aria-selected', active ? 'true' : 'false')
+          button.classList.toggle('ai-workbench-primary', active)
+        }
+        for (const [name, pane] of Object.entries(state.sections)) pane.hidden = name !== id
+        if (id === 'console') renderConsole(state, state.sections.console)
+        else if (id === 'topic') renderTopic(state, state.sections.topic)
+        else renderTracking(state, state.sections.tracking)
+      }
+      state.select = select
+      select('console')
+    }
+
+    function renderWorkbench(host, viewContext) {
+      const state = { host, viewContext, section: 'console', disposed: false, sections: {} }
+      mounted = state
+      mountState(state)
+      return () => {
+        state.disposed = true
+        if (mounted === state) mounted = null
+        host.replaceChildren()
+      }
+    }
+
+    api.ui.style(
+      '.ai-workbench-sections{display:flex;gap:4px;padding:8px 0;border-bottom:1px solid var(--line-soft,#eee)}' +
+        '.ai-workbench-section-tab,.ai-workbench-btn{border:1px solid var(--line,#ddd);border-radius:7px;background:var(--panel,#fff);color:inherit;font:inherit;font-size:12px;cursor:pointer;padding:5px 8px}' +
+        '.ai-workbench-section-tab{flex:1;min-width:0;border-color:transparent;background:transparent;color:var(--text-muted,#777)}' +
+        '.ai-workbench-primary{background:var(--brand-soft,#e8f4f2)!important;border-color:var(--brand,#5eaaa0)!important;color:var(--brand,#5eaaa0)!important;font-weight:600}' +
+        '.ai-workbench-panes{padding-top:10px}.ai-workbench-panes>section[hidden]{display:none!important}' +
+        '.ai-workbench-desc,.ai-workbench-topic-context,.ai-workbench-empty,.ai-workbench-wait{padding:7px 0;color:var(--text-muted,#777);font-size:12px;line-height:1.55}' +
+        '.ai-workbench-quick,.ai-workbench-topic-nav,.ai-workbench-actions{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}' +
+        '.ai-workbench-input{display:block;width:100%;box-sizing:border-box;resize:vertical;min-height:72px;padding:7px;border:1px solid var(--line,#ddd);border-radius:7px;background:var(--panel,#fff);color:inherit;font:inherit}' +
+        '.ai-workbench-stages{display:flex;gap:14px;margin:8px 0;padding:0;list-style:none;font-size:11px;color:var(--text-muted,#888)}' +
+        '.ai-workbench-stages li[data-state="active"]{color:var(--brand,#5eaaa0);font-weight:600}.ai-workbench-stages li[data-state="done"]{color:var(--success,#3aa08f)}' +
+        '.ai-workbench-facts{margin:8px 0;color:var(--text-muted,#777);font-size:11px}.ai-workbench-result{max-height:48vh;overflow:auto;line-height:1.65}' +
+        '.ai-workbench-result h1,.ai-workbench-result h2,.ai-workbench-result h3{font-size:14px}.ai-workbench-citations{margin-top:10px;padding-top:7px;border-top:1px solid var(--line-soft,#eee);font-size:11px}.ai-workbench-citations strong{display:block;margin-bottom:4px}.ai-workbench-citations a{color:var(--brand,#5eaaa0)}' +
+        '.ai-workbench-topic-head{display:flex;align-items:baseline;gap:4px;flex-wrap:wrap}.ai-workbench-topic-head strong{font-size:13px}.ai-workbench-topic-head span{font-size:11px;color:var(--text-muted,#777)}' +
+        '.ai-workbench-field{display:flex;align-items:center;justify-content:space-between;gap:7px;margin:8px 0;font-size:12px}.ai-workbench-field select{max-width:65%;padding:4px 6px;border:1px solid var(--line,#ddd);border-radius:6px;background:var(--panel,#fff);color:inherit}' +
+        '.ai-workbench-track-summary{display:flex;justify-content:space-between;gap:8px;align-items:baseline}.ai-workbench-track-summary span{font-size:11px;color:var(--text-muted,#777)}' +
+        '.ai-workbench-track-item{padding:8px 0;border-bottom:1px solid var(--line-soft,#eee)}.ai-workbench-track-item strong{display:block;font-size:12px;line-height:1.45}.ai-workbench-track-item span,.ai-workbench-track-item small{display:block;margin-top:3px;color:var(--text-muted,#777);font-size:11px}' +
+        '.ai-workbench-error{color:var(--danger,#c44)}',
+    )
+
+    api.ui.shellAsideView({
+      id: 'ai-workbench',
+      label: 'AI',
+      order: 20,
+      visible: (viewContext) => Boolean(viewContext?.wide),
+      render: renderWorkbench,
+    })
+
+    api.on('route:changed', () => {
+      generation += 1
+      if (!mounted || mounted.disposed) return
+      mounted.viewContext = context()
+      mounted.section = 'console'
+      mountState(mounted)
+    })
+
+    api.onDispose(() => {
+      disposed = true
+      generation += 1
+      if (mounted) {
+        mounted.disposed = true
+        mounted.host.replaceChildren()
+        mounted = null
+      }
+    })
 
     return {}
   }
@@ -9209,14 +9670,14 @@
 
 
 ;
-/* ══════════════ LSB·界面精修 v1.1.56 (skin) ══════════════ */
+/* ══════════════ LSB·界面精修 v1.1.57 (skin) ══════════════ */
 (function () {
   'use strict'
 
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '1.1.56',
+    version: '1.1.57',
     description: '氢壳 + 正文排版/列表密度/代码块/楼层优化/限宽阅读，分项开关',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -9242,6 +9703,9 @@
     let userCardHome = null
     const extrasHomes = new Map()
     const asideHomes = new Map()
+    const asideViews = new Map()
+    let asideActiveId = 'site'
+    let asideResizeBound = false
     let themeToggleHome = null
     let colorSchemeHome = null
     let onlineObs = null
@@ -9414,12 +9878,27 @@
         }
         .lsb-shell-theme .color-scheme-top-link svg{width:17px;height:17px;display:block}
         #lsb-shell-aside{
-          display:none;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
-          width:var(--lsb-shell-aside);z-index:7999;overflow:auto;padding:12px 10px 16px;
+          display:none;flex-direction:column;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
+          width:var(--lsb-shell-aside);z-index:7999;overflow:hidden;padding:0;
           background:var(--bg,#f4f5f7);color:var(--text,#222);
           border-left:1px solid var(--line-soft,#e8e8e8);
           font-family:${FONT_SANS};
         }
+        #lsb-shell-aside-tabs{
+          display:flex;align-items:center;gap:4px;min-height:40px;padding:6px 10px;
+          border-bottom:1px solid var(--line-soft,#e8e8e8);background:color-mix(in srgb,var(--panel,#fff) 72%,transparent);
+        }
+        #lsb-shell-aside-tabs[hidden]{display:none!important}
+        #lsb-shell-aside-tabs [data-lsb-shell-aside-tab]{
+          flex:1 1 0;min-width:0;height:28px;padding:0 8px;border:0;border-radius:var(--lsb-radius-sm);
+          background:transparent;color:var(--text-muted,#888);font:inherit;font-size:12px;cursor:pointer;
+        }
+        #lsb-shell-aside-tabs [data-lsb-shell-aside-tab][aria-selected="true"]{
+          background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600;
+        }
+        .lsb-shell-aside-panes{flex:1 1 auto;height:auto;min-height:0}
+        [data-lsb-shell-aside-pane]{height:100%;min-height:0;box-sizing:border-box;overflow:auto;padding:12px 10px 16px}
+        [data-lsb-shell-aside-pane][hidden]{display:none!important}
         #lsb-shell-aside .sidebar-card{
           margin:0 0 10px;padding:10px 10px 8px;border-radius:var(--lsb-radius);
           background:color-mix(in srgb,var(--panel,#fff) 78%,transparent);
@@ -9540,7 +10019,7 @@
         @media(min-width:1100px){
           html.lsb-skin-shell-on{padding-right:var(--lsb-shell-aside)}
           html.lsb-skin-shell-topic{padding-right:var(--lsb-shell-aside)}
-          html.lsb-skin-shell-on #lsb-shell-aside{display:block}
+          html.lsb-skin-shell-on #lsb-shell-aside{display:flex}
           html.lsb-skin-shell-on #lsb-shell-timeline{display:none!important}
           html.lsb-skin-shell-on .image-lightbox-overlay{right:var(--lsb-shell-aside)}
         }
@@ -9660,6 +10139,141 @@
     function markNative(on) {
       document.querySelector('body > .top')?.classList.toggle('lsb-native-header-hidden', on)
       for (const el of nativeSidebars()) el.classList.toggle('lsb-native-sidebar-hidden', on)
+    }
+
+    function asideWide() {
+      try {
+        if (typeof window.matchMedia === 'function') return !!window.matchMedia('(min-width: 1100px)').matches
+      } catch {
+        /* jsdom and older embedded browsers may not implement matchMedia */
+      }
+      const width = Number(window.innerWidth || document.documentElement?.clientWidth || 0)
+      return width >= 1100
+    }
+
+    function asideContext() {
+      return {
+        page: api.page,
+        route: api.page,
+        snapshot: api.snapshot,
+        wide: asideWide(),
+      }
+    }
+
+    function asideSetActive(id, aside = document.querySelector('#lsb-shell-aside')) {
+      if (!(aside instanceof Element)) return
+      const exists = id === 'site' || asideViews.has(id)
+      asideActiveId = exists ? id : 'site'
+      for (const tab of aside.querySelectorAll('[data-lsb-shell-aside-tab]')) {
+        const active = tab.getAttribute('data-lsb-shell-aside-tab') === asideActiveId
+        tab.setAttribute('aria-selected', active ? 'true' : 'false')
+        tab.tabIndex = active ? 0 : -1
+      }
+      for (const pane of aside.querySelectorAll('[data-lsb-shell-aside-pane]')) {
+        pane.hidden = pane.getAttribute('data-lsb-shell-aside-pane') !== asideActiveId
+      }
+    }
+
+    function removeAsideView(id) {
+      const rec = asideViews.get(id)
+      if (!rec) return
+      try {
+        rec.dispose?.()
+      } catch (e) {
+        console.error('[LSB skin] 右栏视图清理失败', id, e)
+      }
+      rec.tab?.remove()
+      rec.pane?.remove()
+      asideViews.delete(id)
+      if (asideActiveId === id) asideActiveId = 'site'
+    }
+
+    function destroyAsideViews() {
+      for (const id of [...asideViews.keys()]) removeAsideView(id)
+      asideActiveId = 'site'
+    }
+
+    function syncAsideViews(el = document.getElementById('lsb-shell')) {
+      const aside = el?.querySelector?.('#lsb-shell-aside') || document.querySelector('#lsb-shell-aside')
+      if (!(aside instanceof Element)) return
+      const tabs = aside.querySelector('#lsb-shell-aside-tabs')
+      const panes = aside.querySelector('.lsb-shell-aside-panes')
+      const site = panes?.querySelector('[data-lsb-shell-aside-pane="site"]')
+      if (!(tabs instanceof Element) || !(panes instanceof Element) || !(site instanceof Element)) return
+
+      const wide = asideWide()
+      const context = asideContext()
+      const visible = wide ? api.ui.shellAsideViews(context) : []
+      const next = new Map(visible.map((view) => [view.id, view]))
+
+      for (const id of [...asideViews.keys()]) {
+        const view = next.get(id)
+        const current = asideViews.get(id)
+        if (!view || current.view !== view) removeAsideView(id)
+      }
+
+      let siteTab = tabs.querySelector('[data-lsb-shell-aside-tab="site"]')
+      if (!siteTab) {
+        siteTab = document.createElement('button')
+        siteTab.type = 'button'
+        siteTab.setAttribute('role', 'tab')
+        siteTab.setAttribute('data-lsb-shell-aside-tab', 'site')
+        siteTab.textContent = '站点'
+        siteTab.addEventListener('click', () => asideSetActive('site', aside))
+        tabs.append(siteTab)
+      }
+
+      for (const view of visible) {
+        let rec = asideViews.get(view.id)
+        if (!rec) {
+          const tab = document.createElement('button')
+          tab.type = 'button'
+          tab.setAttribute('role', 'tab')
+          tab.setAttribute('data-lsb-shell-aside-tab', view.id)
+          tab.textContent = view.label
+          const pane = document.createElement('section')
+          pane.setAttribute('role', 'tabpanel')
+          pane.setAttribute('data-lsb-shell-aside-pane', view.id)
+          pane.setAttribute('aria-label', view.label)
+          pane.tabIndex = 0
+          tab.addEventListener('click', () => asideSetActive(view.id, aside))
+          panes.append(pane)
+          let dispose = null
+          try {
+            dispose = view.render(pane, context)
+          } catch (e) {
+            pane.textContent = 'AI 视图加载失败'
+            console.error('[LSB skin] 右栏视图渲染失败', view.id, e)
+          }
+          rec = { view, tab, pane, dispose: typeof dispose === 'function' ? dispose : null }
+          asideViews.set(view.id, rec)
+        }
+        tabs.append(rec.tab)
+        panes.append(rec.pane)
+      }
+      tabs.append(siteTab)
+      // 站点页固定在首位；append 顺序用于浏览器键盘和读屏顺序。
+      tabs.insertBefore(siteTab, tabs.firstChild)
+      panes.insertBefore(site, panes.firstChild)
+      tabs.hidden = !wide || visible.length === 0
+      if (!wide) asideActiveId = 'site'
+      asideSetActive(asideActiveId, aside)
+    }
+
+    function bindAsideResize() {
+      if (asideResizeBound) return
+      asideResizeBound = true
+      window.addEventListener('resize', onAsideResize)
+    }
+
+    function unbindAsideResize() {
+      if (!asideResizeBound) return
+      window.removeEventListener('resize', onAsideResize)
+      asideResizeBound = false
+    }
+
+    function onAsideResize() {
+      if (cfg.shell) syncAsideViews()
     }
 
     function collectBoards() {
@@ -10413,7 +11027,12 @@
             <button type="button" class="lsb-shell-settings" data-lsb-shell-settings>设置</button>
           </div>
         </aside>
-        <aside id="lsb-shell-aside" aria-label="站点信息"></aside>`
+        <aside id="lsb-shell-aside" aria-label="站点信息">
+          <nav id="lsb-shell-aside-tabs" role="tablist" aria-label="右栏视图" hidden></nav>
+          <div class="lsb-shell-aside-panes">
+            <section data-lsb-shell-aside-pane="site" data-lsb-shell-site aria-label="站点" tabindex="0"></section>
+          </div>
+        </aside>`
       el.querySelector('[data-lsb-shell-settings]').addEventListener('click', () => api.ui.openPanel('skin'))
       el.querySelector('#lsb-shell-rail').addEventListener('click', (e) => {
         const rpcBtn = e.target.closest('[data-lsb-rpc]')
@@ -10445,6 +11064,7 @@
       } else {
         unbindWindow()
       }
+      syncAsideViews(el)
     }
 
     function fillShell() {
@@ -10454,7 +11074,7 @@
       adoptTopExtras(el.querySelector('[data-lsb-shell-extras]'))
       adoptThemeToggle(el.querySelector('[data-lsb-shell-theme]'))
       adoptUserCard(el.querySelector('[data-lsb-shell-me]'))
-      adoptAsideCards(el.querySelector('#lsb-shell-aside'))
+      adoptAsideCards(el.querySelector('[data-lsb-shell-site]'))
       watchOnlineCard()
       watchTopExtras()
       setSection(el.querySelector('[data-lsb-shell-section="home"]'), '', [
@@ -11234,8 +11854,10 @@
       unbindSpa()
       unbindHomeInfiniteScroll()
       unbindWindow()
+      unbindAsideResize()
       stopOnlineWatch()
       stopExtrasWatch()
+      destroyAsideViews()
       restoreAsideCards()
       restoreUserCard()
       restoreTopExtras()
@@ -11257,6 +11879,7 @@
       }
       markNative(true)
       applyMarkers()
+      bindAsideResize()
       fillShell()
       bindSpa()
     }
@@ -11294,7 +11917,10 @@
       applyAll()
       syncGmMenu()
     })
-    api.on('route:changed', () => scheduleRefresh(true))
+    api.on('route:changed', () => {
+      asideActiveId = 'site'
+      scheduleRefresh(true)
+    })
     api.on('plugin:activated', () => {
       invalidateTools()
       scheduleRefresh(false)
@@ -12311,14 +12937,14 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '1.0.118',
+    version: '1.0.119',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'ui', 'events'],
   }
 
-  const MEMBERS = ["floor-stats","hot-floor-badge","resume-reading","read-mark","topic-marks","home-return","hover-profile","topic-preview","unread-sentinel","forum-watch","checkin-calendar","points-ledger","title-quotes","ai-summary","ai-copilot","data-migration","my-archive","annual-report","skin","live-feed","perf-probe"]
+  const MEMBERS = ["floor-stats","hot-floor-badge","resume-reading","read-mark","topic-marks","home-return","hover-profile","topic-preview","unread-sentinel","forum-watch","checkin-calendar","points-ledger","title-quotes","ai-summary","ai-copilot","ai-workbench","data-migration","my-archive","annual-report","skin","live-feed","perf-probe"]
 
   /** 基座错误日志的四类条目（module-error=主动上报，其余为自动捕获） */
   const ERROR_KINDS = ['module-error', 'plugin-error', 'uncaught', 'rejection']
