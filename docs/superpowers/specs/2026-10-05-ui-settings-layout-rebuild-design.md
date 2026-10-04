@@ -1,7 +1,7 @@
 # LINUX.SB UI 设置与布局重构设计
 
 日期：2026-10-05  
-状态：设计已确认，等待书面规格审阅  
+状态：设计已确认，真实 DOM 锚定补充后等待书面规格审阅
 范围：统一设置中心、全局玻璃阅读画布、Surface/布局、正文卡片、媒体背景。
 
 ## 决策摘要
@@ -139,6 +139,29 @@ CanvasSettings {
 - **narrow (<700px)**：单一可滚动全屏 Sheet；触摸热区至少 44px，禁止依赖 hover 的操作。
 
 窗口尺寸变化重新计算模式。宽屏保存的矩形迁移到新视口时重新 clamp；中窄屏不恢复过期的浮层几何。
+
+## 真实站点 DOM 锚定与右侧栏映射
+
+这套 UI 的几何和内容来源必须是站点当前存在的 DOM。玻璃壳、Sheet 和浮层只能包裹或搬运已解析的原生节点，不能用一个虚构的“当前上下文卡”替代站点右栏，也不能用重新拼接的摘要对象替代资料卡、帖子或站点信息卡。站点选择器继续只存在于 SiteAdapter；渲染层接收节点挂点和结构化模型，不再自行猜测站点布局。
+
+真实 fixture 的基线测量如下，作为 wide/mid/narrow 的几何契约：
+
+- 1440px 视口（浏览器内容区 1425px）时，`body > .top .bar` 和 `main.wrap` 都是 1200px；`.forum-main` 的左边缘为 149.5px，`aside.sidebar` 的左边缘为 1045.5px、宽度为 230px，中间间距为 24px。
+- 860px 视口（内容区 845px）时，`.forum-layout` 仍保留 517px 的正文列、24px 间距和 230px 的原生右栏。这个断点可以把右栏转成 Sheet，但 Sheet 的内容仍来自同一个 `aside.sidebar`，不得改成另一个摘要数据源。
+- 390px 视口（内容区 375px）时，原站把 `aside.sidebar` 改为单列：首页的 `home-mobile-sidebar` 将它放在正文之后，用户页的 `profile-mobile-sidebar` 将它放在正文之前，帖子页的右栏可能直接隐藏。三种情况都继续使用真实节点；没有节点时不生成空的替代栏。
+
+挂点和来源固定为以下关系：
+
+- 顶栏使用 `body > .top > .bar`；站点品牌、搜索和原生快捷入口都以此节点的实际布局为基准。资料卡的宽屏锚点必须与 `.forum-main` 的左边缘对齐，而不是与视口左边缘或一张概念卡对齐。
+- 路由内容使用 `main.wrap > .home-shell.performance-render-root > .forum-layout`。正文容器是 `.forum-main > .main-panel`；首页/列表使用 `ul.post-list > li.post-item`，帖子页使用 `ul.topic-post-list > li.post-entry`（兼容旧版 `ul.post-list > li.post-entry`）。卡片化只改变材料和边框，不改变这些节点的语义顺序。
+- 个人资料的唯一来源是 `aside.sidebar > .sidebar-card.user-card`。宽屏资料卡可通过 `[data-canvas-profile-slot]` 搬运到顶栏左侧，但必须搬运原节点、保存原父节点和相邻兄弟节点，并在销毁或原生回退时恢复；不能克隆一份资料卡造成链接、表单和未读状态分叉。
+- 站点信息来源是同一个 `aside.sidebar` 的直接子节点 `.sidebar-card:not(.user-card)`，按原生顺序保留版块列表、快捷功能、邀请中心、每日热帖、签到、统计和 IP 等卡片。资料卡被顶栏接管时只排除这一张被搬运的 `.user-card`，其余卡片不得被归并成“上下文”摘要。
+
+资料卡交互以真实节点为边界：wide 屏悬停只显示原生资料卡的预览层，点击箭头才锁定展开；mid/narrow 禁用 hover，使用明确的按钮打开。展开层用绝对定位锚定顶栏挂点，独立于文档流，因此 `.forum-main`、首个帖子节点和原生右栏的 `getBoundingClientRect()` 在展开前后必须保持不变。铃铛应复用资料卡中现有的通知链接（例如 `.user-links a[href*="/notify/"]` 或 `.notify-link`）；红点只绑定已读/未读状态，不创建第二个通知入口。
+
+站点信息 Surface 在 wide 屏可以表现为右侧玻璃栏，在 mid/narrow 屏可以变成底部或全屏 Sheet，但 Sheet 内仍直接挂载上述原生 `.sidebar-card` 节点，保留原有链接、按钮、统计和动态更新。`MutationObserver` 只负责在软跳或异步加载后重新同步真实 `aside.sidebar`；找不到右栏、关键卡片或身份不一致时隐藏新 Surface 并保留原生页面回退，不显示虚构占位文本。
+
+视觉验收必须同时检查选择器命中和几何不漂移：资料卡、站点信息卡、正文首卡的节点数量与原生 fixture 一致；wide 的资料卡左边缘等于正文列左边缘；资料卡展开不改变正文和帖子坐标；站点卡片的原生顺序、链接目标和可访问名称保持不变。任何一项失败都走原生回退，而不是以复制节点或静态 mock 数据补齐。
 
 ## 媒体分层与失败回退
 
