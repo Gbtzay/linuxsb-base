@@ -66,7 +66,9 @@
     }
     for (const el of nodes) {
       const id = (el.getAttribute('data-recipe-id') || '').trim() || `recipe-${recipes.length + issues.length + 1}`
-      const targetName = attrOrText(el, 'data-target-name', /(?:目标|产出|结果)\s*[:：]?\s*(.+?)(?:\s+(?:UR|SSR|SR|R|N)\b|$)/i)
+      const targetName = attrOrText(el, 'data-target-name', /(?:目标|产出|结果)\s*[:：]?\s*(.+?)(?:\s+(?:UR|SSR|SR|R|N)\b|$)/i) ||
+        textOf(el.querySelector('[data-gacha-target], .gacha-recipe-target, h1, h2, h3, h4, strong')).match(/^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)?.[1]?.trim() ||
+        textOf(el).match(/^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)?.[1]?.trim() || ''
       const targetRarity = attrOrText(el, 'data-target-rarity', /\b(UR|SSR|SR|R|N)\b/i).toUpperCase()
       const fee = numberAttrOrText(el, 'data-fee', /(?:费用|消耗|积分)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/)
       if (targetRarity !== 'UR') continue
@@ -112,8 +114,9 @@
       for (const outcome of el.querySelectorAll('[data-gacha-outcome]')) {
         const name = attrOrText(outcome, 'data-name', /^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)
         const rarity = attrOrText(outcome, 'data-rarity', /\b(UR|SSR|SR|R|N)\b/i).toUpperCase()
-        const probability = numberAttrOrText(outcome, 'data-probability', /([\d.]+)\s*%?/) 
-        const normalizedProbability = probability != null && /%/.test(outcome.getAttribute('data-probability') || '') ? probability / 100 : probability
+        const probability = numberAttrOrText(outcome, 'data-probability', /([\d.]+)\s*%?/)
+        const probabilitySource = outcome.getAttribute('data-probability') || textOf(outcome)
+        const normalizedProbability = probability != null && /%/.test(probabilitySource) ? probability / 100 : probability
         if (!name || !rarity || !Number.isFinite(normalizedProbability) || normalizedProbability < 0 || normalizedProbability > 1) {
           invalid = true
           continue

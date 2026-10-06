@@ -131,6 +131,27 @@ test('UR 规划器：解析 UR 配方、抽取池和称号库存', async () => {
   assert.deepEqual(plain(profile.issues), [])
 })
 
+test('UR 规划器：结构化字段缺失时使用配方和概率的可见文字', async () => {
+  const { dbg } = await bootPlanner()
+  const recipes = dbg.parseRecipes(`<section data-gacha-recipes>
+    <article data-gacha-recipe data-recipe-id="fallback">
+      <h3>夜航灯塔 UR</h3>
+      <p>费用 100</p>
+      <div data-gacha-material>蓝色火花 SSR ×2</div>
+    </article>
+  </section>`)
+  const gacha = dbg.parseGacha(`<section data-gacha-pool data-pool-label="SSR 池">
+    抽取 120
+    <div data-gacha-outcome>蓝色火花 SSR 50%</div>
+    <div data-gacha-outcome>其它 N 50%</div>
+  </section>`)
+
+  assert.equal(recipes.recipes[0].target.key, '夜航灯塔@UR')
+  assert.equal(recipes.recipes[0].fee, 100)
+  assert.equal(gacha.pools[0].drawCost, 120)
+  assert.equal(gacha.pools[0].outcomes[0].probability, 0.5)
+})
+
 test('UR 规划器：不完整页面和非 UR 数据进入 issues 而不是零值成功', async () => {
   const { dbg } = await bootPlanner()
   const recipes = dbg.parseRecipes(`<section data-gacha-recipes>
