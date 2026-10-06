@@ -493,7 +493,227 @@
     }
   }
 
+  const SOURCE_NAMES = {
+    recipes: '合成表',
+    gacha: '抽取概率',
+    inventory: '我的库存',
+    market: '称号行情',
+  }
+
   function setup(api) {
+    const sourceState = Object.fromEntries(Object.keys(SOURCE_NAMES).map((key) => [key, {
+      status: 'idle', fetchedAt: null, error: null, stale: false, issues: [],
+    }]))
+    let data = { recipes: [], gachaPools: [], inventory: {}, inventoryAvailable: false, market: null }
+    let hostRef = null
+    let refreshPromise = null
+    let hasRendered = false
+    let calculatedAt = null
+
+    function cloneData(value) {
+      try {
+        return JSON.parse(JSON.stringify(value))
+      } catch {
+        return null
+      }
+    }
+
+    function sourceMessage(error) {
+      if (error?.message) return String(error.message)
+      return String(error || '数据不足')
+    }
+
+    function classifyDocument(doc) {
+      const body = String(doc?.body?.textContent || doc?.documentElement?.textContent || '').trim()
+      if (/cloudflare|checking your browser|challenge/i.test(body)) return '挑战未完成'
+      if (/登录|请先登录|log\s*in|sign\s*in/i.test(body) && !doc?.querySelector('[data-gacha-recipe], [data-gacha-pool], [data-gacha-owned]')) return '需要登录'
+      return null
+    }
+
+    function sourceError(message) {
+      const error = new Error(message)
+      error.sourceMessage = message
+      return error
+    }
+
+    function setSource(key, patch) {
+      Object.assign(sourceState[key], patch)
+    }
+
+    function hasSourceData(key) {
+      if (key === 'recipes') return data.recipes.length > 0
+      if (key === 'gacha') return data.gachaPools.length > 0
+      if (key === 'inventory') return data.inventoryAvailable
+      return !!data.market
+    }
+
+    function restoreCache() {
+      const cached = api.store.get('snapshot', null)
+      if (!cached?.data) return
+      const saved = cached.data
+      data = {
+        recipes: Array.isArray(saved.recipes) ? saved.recipes : [],
+        gachaPools: Array.isArray(saved.gachaPools) ? saved.gachaPools : [],
+        inventory: saved.inventory && typeof saved.inventory === 'object' ? saved.inventory : {},
+        inventoryAvailable: saved.inventoryAvailable === true,
+        market: saved.market || null,
+      }
+      for (const key of Object.keys(SOURCE_NAMES)) {
+        if (hasSourceData(key)) setSource(key, { status: 'stale', stale: true, fetchedAt: cached.savedAt || null })
+      }
+    }
+
+    async function loadSources() {
+      const jobs = {
+        recipes: async () => {
+          const doc = await api.net.doc('/gacha_recipes', { signal: api.signal })
+          const failure = classifyDocument(doc)
+          if (failure) throw sourceError(failure)
+          const parsed = parseRecipes(doc)
+          if (!parsed.recipes.length) throw sourceError(parsed.issues[0]?.reason === 'recipes-not-found' ? '页面格式无法识别' : '数据不足')
+          return { value: parsed, partial: parsed.issues.length > 0 }
+        },
+        gacha: async () => {
+          const doc = await api.net.doc('/gacha', { signal: api.signal })
+          const failure = classifyDocument(doc)
+          if (failure) throw sourceError(failure)
+          const parsed = parseGacha(doc)
+          if (!parsed.pools.length) throw sourceError(parsed.issues[0]?.reason === 'pools-not-found' ? '页面格式无法识别' : '数据不足')
+          return { value: parsed, partial: parsed.issues.length > 0 }
+        },
+        inventory: async () => {
+          const doc = await api.net.doc('/gacha_profile', { signal: api.signal })
+          const failure = classifyDocument(doc)
+          if (failure) throw sourceError(failure)
+          const parsed = parseInventory(doc)
+          if (!doc.querySelector('[data-gacha-profile]') || parsed.issues.length && !Object.keys(parsed.inventory).length) {
+            throw sourceError(parsed.issues[0]?.reason === 'inventory-not-found' ? '页面格式无法识别' : '数据不足')
+          }
+          return { value: parsed, partial: parsed.issues.length > 0 }
+        },
+        market: async () => {
+          const market = await api.request('title-quotes:market-data')
+          if (!market || !Array.isArray(market.listings) || !market.titles || !Number.isFinite(Number(market.fetchedAt))) throw sourceError('数据不足')
+          return { value: market, fetchedAt: Number(market.fetchedAt), partial: false }
+        },
+      }
+      const entries = Object.entries(jobs)
+      const results = await Promise.allSettled(entries.map(async ([key, job]) => [key, await job()]))
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i]
+        const key = entries[i][0]
+        if (result.status === 'fulfilled') {
+          const loaded = result.value[1]
+          const parsed = loaded.value
+          if (key === 'recipes') data.recipes = parsed.recipes
+          else if (key === 'gacha') data.gachaPools = parsed.pools
+          else if (key === 'inventory') {
+            data.inventory = parsed.inventory
+            data.inventoryAvailable = true
+          } else data.market = parsed
+          setSource(key, {
+            status: loaded.partial ? 'partial' : 'ok',
+            fetchedAt: loaded.fetchedAt || Date.now(),
+            error: null,
+            stale: false,
+            issues: parsed.issues || [],
+          })
+        } else {
+          const message = sourceMessage(result.reason)
+          setSource(key, {
+            status: hasSourceData(key) ? 'stale' : 'unavailable',
+            error: message,
+            stale: hasSourceData(key),
+          })
+        }
+      }
+      calculatedAt = Date.now()
+      try {
+        api.store.set('snapshot', { savedAt: Date.now(), data: cloneData(data) })
+      } catch {
+        /* storage failure does not invalidate current in-memory results */
+      }
+    }
+
+    function refresh() {
+      if (refreshPromise) return refreshPromise
+      for (const key of Object.keys(SOURCE_NAMES)) setSource(key, { status: 'loading', error: null })
+      paint(hostRef)
+      refreshPromise = loadSources().finally(() => {
+        refreshPromise = null
+        paint(hostRef)
+      })
+      return refreshPromise
+    }
+
+    function esc(value) {
+      return api.util.esc(String(value ?? ''))
+    }
+
+    function sourceLabel(key) {
+      const state = sourceState[key]
+      if (state.status === 'loading') return '读取中…'
+      if (state.status === 'ok') return '已更新'
+      if (state.status === 'partial') return '部分可用'
+      if (state.status === 'stale') return '使用上次成功数据'
+      if (state.status === 'unavailable') return state.error || '数据不足'
+      return '未读取'
+    }
+
+    function routeText(route, key) {
+      if (!route || route.status === 'unavailable') return key === 'gacha' ? '数据不足' : '不可用'
+      const cost = Number.isFinite(route.cost) ? `预计 ${Math.round(route.cost * 100) / 100} 积分` : '成本未知'
+      if (route.status === 'insufficient') return `${cost} · 还差 ${Math.round((route.shortfall || 0) * 100) / 100} 积分`
+      if (route.currentPoints == null) return cost
+      return `${cost} · 剩余 ${Math.round((route.remaining || 0) * 100) / 100} 积分`
+    }
+
+    function routeHtml(route, key) {
+      const label = key === 'marketLow' ? '市场最低挂单' : key === 'marketMedian' ? '市场中位价估算' : '抽取路线'
+      const note = key === 'gacha' ? '期望值，不保证实际结果' : ''
+      const steps = route?.status === 'unavailable' ? '' : (route?.steps || []).slice(0, 10).map((step) => {
+        if (step.kind === 'market') return `<li>${esc(step.key)}：${esc(step.qty)} 个 × ${esc(step.price)}</li>`
+        if (step.kind === 'median') return `<li>${esc(step.key)}：中位价 ${esc(step.price)} × ${esc(step.qty)}</li>`
+        if (step.kind === 'inventory') return `<li>${esc(step.key)}：库存抵扣 ${esc(step.qty)}</li>`
+        if (step.kind === 'gacha') return `<li>期望抽取 ${esc(Math.round((step.expectedDraws || 0) * 100) / 100)} 次</li>`
+        return ''
+      }).filter(Boolean).join('')
+      const selectorKey = key === 'marketLow' ? 'market-low' : key === 'marketMedian' ? 'market-median' : 'gacha'
+      return `<div class="lsb-title-forge-planner-plan" data-title-forge-planner-plan="${esc(selectorKey)}"><strong>${esc(label)}</strong><span>${esc(routeText(route, key))}</span>${note ? `<em>${esc(note)}</em>` : ''}${steps ? `<details><summary>查看步骤</summary><ul>${steps}</ul></details>` : ''}</div>`
+    }
+
+    function modeHtml(modeKey, modeName, result) {
+      if (!result) return `<section data-title-forge-planner-mode="${esc(modeKey)}"><h3>${esc(modeName)}</h3><p>无法判断：合成表数据不足。</p></section>`
+      const summary = result.summary
+      let summaryText = '无法判断'
+      if (summary.state === 'feasible') summaryText = `当前可行：${summary.bestFeasible.target.name}，${routeText(summary.bestFeasible.route, summary.bestFeasible.route.reason === 'gacha' ? 'gacha' : summary.bestFeasible.route.reason === 'market-median' ? 'marketMedian' : 'marketLow')}`
+      else if (summary.state === 'insufficient' && summary.nearest) summaryText = `全部不足：${summary.nearest.target.name}，最小缺口 ${Math.round((summary.nearest.shortfall || 0) * 100) / 100} 积分`
+      const targetRows = result.targets.map((target) => `<article data-title-forge-planner-target><h4>${esc(target.target.name)} <small>${esc(target.recipe.id)}</small></h4>${routeHtml(target.routes.marketLow, 'marketLow')}${routeHtml(target.routes.marketMedian, 'marketMedian')}${routeHtml(target.routes.gacha, 'gacha')}</article>`).join('')
+      return `<section class="lsb-title-forge-planner-mode" data-title-forge-planner-mode="${esc(modeKey)}"><h3>${esc(modeName)}</h3><p class="lsb-title-forge-planner-summary">${esc(summaryText)}</p>${targetRows || '<p>无法判断：没有可解析的 UR 配方。</p>'}</section>`
+    }
+
+    function paint(host) {
+      if (!host) return
+      host.innerHTML = `<div class="lsb-title-forge-planner" data-title-forge-planner><div class="lsb-title-forge-planner-head"><strong>UR 合成规划</strong><span>当前积分：${esc(api.me.points == null ? '未知' : api.me.points)}</span><span>最后计算：${esc(calculatedAt ? new Date(calculatedAt).toLocaleString('zh-CN') : '尚未刷新')}</span><button type="button" class="lsb-btn is-primary" data-title-forge-planner-refresh>刷新数据</button></div><div class="lsb-title-forge-planner-sources">${Object.keys(SOURCE_NAMES).map((key) => `<div data-title-forge-planner-source="${esc(key)}"><b>${esc(SOURCE_NAMES[key])}</b><span>${esc(sourceLabel(key))}</span>${sourceState[key].error ? `<small>${esc(sourceState[key].error)}</small>` : ''}</div>`).join('')}</div>${!data.inventoryAvailable && (sourceState.inventory.status === 'unavailable' || sourceState.inventory.status === 'stale') ? `<div class="lsb-title-forge-planner-warning">计入当前库存：无法确认库存数据。</div>` : ''}${data.recipes.length ? (() => { const result = calculatePlans({ recipes: data.recipes, market: data.market || {}, gachaPools: data.gachaPools, inventory: data.inventory, points: api.me.points }); return modeHtml('no-inventory', '不计库存', result.modes.noInventory) + (data.inventoryAvailable ? modeHtml('inventory', '计入当前库存', result.modes.inventory) : `<section data-title-forge-planner-mode="inventory"><h3>计入当前库存</h3><p>无法确认当前库存。</p></section>`) })() : `${modeHtml('no-inventory', '不计库存', null)}<section data-title-forge-planner-mode="inventory"><h3>计入当前库存</h3><p>无法确认当前库存。</p></section>`}</div>`
+      const button = host.querySelector('[data-title-forge-planner-refresh]')
+      if (button) button.addEventListener('click', () => refresh())
+    }
+
+    restoreCache()
+    api.ui.style('.lsb-title-forge-planner{padding:8px 0;color:var(--text,#222)}.lsb-title-forge-planner-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.lsb-title-forge-planner-head strong{font-size:18px}.lsb-title-forge-planner-head span{font-size:12px;color:var(--muted,#777)}.lsb-title-forge-planner-head button{margin-left:auto}.lsb-title-forge-planner-sources{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin:12px 0}.lsb-title-forge-planner-sources>div{display:flex;flex-direction:column;gap:3px;padding:7px 9px;border:1px solid var(--line-soft,#eee);border-radius:7px}.lsb-title-forge-planner-sources span{font-size:12px;color:var(--muted,#777)}.lsb-title-forge-planner-sources small{color:var(--danger,#b44)}.lsb-title-forge-planner-warning{padding:8px;border:1px solid var(--warning,#c90);border-radius:7px;margin:8px 0}.lsb-title-forge-planner-mode{margin:12px 0;padding:10px;border:1px solid var(--line-soft,#eee);border-radius:9px}.lsb-title-forge-planner-mode h3{margin:0 0 6px}.lsb-title-forge-planner-summary{font-weight:600}.lsb-title-forge-planner-mode article{padding:8px 0;border-top:1px solid var(--line-soft,#eee)}.lsb-title-forge-planner-mode h4{margin:0 0 6px}.lsb-title-forge-planner-mode h4 small{font-weight:400;color:var(--muted,#777)}.lsb-title-forge-planner-plan{display:grid;grid-template-columns:150px 1fr;gap:5px;padding:4px 0;font-size:13px}.lsb-title-forge-planner-plan em{grid-column:2;color:var(--brand,#5eaaa0);font-size:12px}.lsb-title-forge-planner-plan details{grid-column:2}.lsb-title-forge-planner-plan ul{margin:4px 0 0;padding-left:18px}.lsb-title-forge-planner-plan span{color:var(--muted,#666)}@media(max-width:620px){.lsb-title-forge-planner-plan{grid-template-columns:1fr}.lsb-title-forge-planner-plan em,.lsb-title-forge-planner-plan details{grid-column:1}.lsb-title-forge-planner-head button{margin-left:0}}')
+    api.ui.tab({
+      name: 'UR 合成规划',
+      order: 67,
+      render(host) {
+        hostRef = host
+        paint(host)
+        if (!hasRendered) {
+          hasRendered = true
+          refresh()
+        }
+      },
+    })
+
     api.handle('title-forge-planner:debug', () => ({
       keyOf,
       parseRecipes,
@@ -508,6 +728,8 @@
       summarizeMode,
       calculatePlans,
       planResult,
+      refresh,
+      state: () => ({ sourceState: cloneData(sourceState), data: cloneData(data), calculatedAt }),
       issues: [],
     }))
   }

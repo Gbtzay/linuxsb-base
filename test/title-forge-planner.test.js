@@ -90,7 +90,9 @@ async function bootPlanner({
   fetchGacha = fixture('gacha.html'),
   fetchProfile = fixture('gacha-profile.html'),
 } = {}) {
-  const { w, tick } = makeDom(loggedInHome(points), 'https://linux.sb/', {})
+  const { w, tick } = makeDom(loggedInHome(points), 'https://linux.sb/', {
+    'lsb_base:title-quotes:market': fixtureDataWithPoints(points).market,
+  })
   const calls = []
   w.fetch = async (url, init = {}) => {
     const href = String(url)
@@ -282,4 +284,33 @@ test('UR 规划器：不完整页面和非 UR 数据进入 issues 而不是零�
   assert.ok(gacha.issues.length >= 1)
   assert.deepEqual(plain(profile.inventory), {})
   assert.ok(profile.issues.length >= 1)
+})
+
+test('UR 规划器面板：刷新后同时显示两种库存和三类路线', async () => {
+  const { w, calls, until } = await bootPlanner({ points: 500 })
+  w.LSB.open('title-forge-planner')
+  assert.ok(w.document.querySelector('[data-title-forge-planner]'))
+  assert.equal(await until(() => w.document.querySelector('[data-title-forge-planner-target]')), true)
+
+  const root = w.document.querySelector('[data-title-forge-planner]')
+  assert.ok(root.querySelector('[data-title-forge-planner-mode="no-inventory"]'))
+  assert.ok(root.querySelector('[data-title-forge-planner-mode="inventory"]'))
+  assert.ok(root.querySelector('[data-title-forge-planner-plan="market-low"]'))
+  assert.ok(root.querySelector('[data-title-forge-planner-plan="market-median"]'))
+  assert.ok(root.querySelector('[data-title-forge-planner-plan="gacha"]'))
+  assert.match(root.textContent, /当前积分/)
+  assert.equal(calls.some((x) => x.method === 'POST' || /_buy|_forge|gacha.*draw/i.test(x.href)), false)
+})
+
+test('UR 规划器面板：单个来源失败只禁用相关路线并显示状态', async () => {
+  const { w, until } = await bootPlanner({ fetchGacha: '<html><body>Cloudflare challenge</body></html>' })
+  w.LSB.open('title-forge-planner')
+  assert.equal(await until(() => {
+    const source = w.document.querySelector('[data-title-forge-planner-source="gacha"]')
+    return source && !/读取中/.test(source.textContent)
+  }), true)
+  const root = w.document.querySelector('[data-title-forge-planner]')
+  assert.match(root.querySelector('[data-title-forge-planner-source="gacha"]').textContent, /无法识别|数据不足|挑战未完成/)
+  assert.ok(root.querySelector('[data-title-forge-planner-plan="market-low"]'))
+  assert.match(root.textContent, /抽取路线.*数据不足|抽取.*不可用/)
 })
