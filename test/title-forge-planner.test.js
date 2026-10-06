@@ -210,6 +210,7 @@ test('UR 规划器：抽取路线处理重复结果并计算共享奖池期望�
   }
   const plan = dbg.expectedGachaCost(req, [pool], 0)
   assert.equal(plan.status, 'ok')
+  assert.equal(plan.expected, true)
   assert.equal(plan.expectedDraws, 4.666666666666667)
   assert.equal(plan.cost, 466.6666666666667)
 })

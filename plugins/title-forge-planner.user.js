@@ -428,6 +428,7 @@
       { kind: 'gacha', expected: true, expectedDraws: solved.draws, expectedCost: solved.cost, choices: solved.choices },
     ]
     const result = planResult('ok', Number(fee) + solved.cost, Number(fee), steps, 'gacha')
+    result.expected = true
     result.expectedDraws = solved.draws
     result.expectedCost = solved.cost
     result.poolChoices = solved.choices
