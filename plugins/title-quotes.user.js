@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·称号行情
 // @namespace    https://linux.sb/
-// @version      1.0.18
+// @version      1.0.19
 // @description  采集称号交易挂单的最低/最高与中位数；全场锚点折线，各称号可切挂单合成K或高低折线；交易页与全站浮层可切分析大盘。氢壳开着时走左栏，关壳才留右下钮。打开浮层时巡检加快。纯读，不提交购买。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -21,7 +21,7 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.18',
+    version: '1.0.19',
     description: '称号交易挂单高低价、全场锚点折线；各称号可切挂单合成K或高低折线；全站浮层；氢壳开着走左栏，关壳才留右下钮',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -615,6 +615,26 @@
         titles[k].sold = flow[k]?.sold ?? 0
         titles[k].fills = flow[k]?.fills ?? 0
       }
+      const market = {
+        fetchedAt: now,
+        listings: (listings || [])
+          .filter((x) => x && x.name && x.rarity != null && Number.isFinite(Number(x.price)))
+          .map((x) => ({
+            key: titleKey(x.name, x.rarity),
+            price: Number(x.price),
+            qty: Number(x.qty) > 0 ? Number(x.qty) : 1,
+          })),
+        titles: Object.fromEntries(
+          Object.entries(titles).map(([key, value]) => [key, {
+            rarity: value.rarity,
+            lo: value.lo,
+            hi: value.hi,
+            mid: value.mid,
+            n: value.n,
+          }]),
+        ),
+      }
+      api.store.set('market', market)
       const anchors = pickAnchors(listings, titles)
       return pushSnap({ anchors, titles, flow }, now)
     }
@@ -1648,6 +1668,7 @@
         '.lsb-title-quotes-float.is-collapsed .lsb-title-quotes-float-body,.lsb-title-quotes-float.is-collapsed .lsb-title-quotes-float-resize{display:none}',
     )
 
+    api.handle('title-quotes:market-data', () => api.store.get('market', null))
     api.handle('title-quotes:debug', () => ({
       parseCards,
       parsePageCount,
@@ -1682,6 +1703,7 @@
       reset: () => {
         set([])
         api.store.set('book', null)
+        api.store.set('market', null)
       },
       snap: () => cycle(true),
       intervalMs: pollMs,

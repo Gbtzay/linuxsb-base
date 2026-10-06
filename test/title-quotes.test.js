@@ -219,6 +219,27 @@ test('称号行情：asc+desc 合并、listing_id 去重', async () => {
   assert.equal(titles['氪金大佬@SSR'].hi, 588)
 })
 
+test('称号行情：公开最近成功采集的市场挂单给合成规划器', async () => {
+  const { w, dbg } = await boot()
+  const now = 1_700_000_000_000
+  dbg.reset()
+  dbg.ingestListings([
+    { id: 'a', name: '全站偶像', rarity: 'SSR', price: 260, qty: 2 },
+    { id: 'b', name: '全站偶像', rarity: 'SSR', price: 300, qty: 1 },
+  ], now)
+
+  const market = await w.LSB.bus.request('title-quotes:market-data')
+  assert.equal(market.fetchedAt, now)
+  assert.deepEqual(JSON.parse(JSON.stringify(market.listings)), [
+    { key: '全站偶像@SSR', price: 260, qty: 2 },
+    { key: '全站偶像@SSR', price: 300, qty: 1 },
+  ])
+  assert.deepEqual(JSON.parse(JSON.stringify(market.titles['全站偶像@SSR'])), {
+    rarity: 'SSR', lo: 260, hi: 300, mid: 280, n: 3,
+  })
+  assert.equal(Object.hasOwn(market.listings[0], 'id'), false)
+})
+
 test('称号行情：四锚点；不足 4 个不硬凑；最高最低不进中位', async () => {
   const { dbg } = await boot()
   const html =
