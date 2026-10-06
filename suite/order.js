@@ -13,6 +13,7 @@ export const ORDER = [
   'checkin-calendar',
   'points-ledger',
   'title-quotes',
+  'title-forge-planner',
   'ai-summary',
   'ai-copilot',
   'ai-actions',

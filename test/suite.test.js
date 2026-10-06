@@ -142,6 +142,20 @@ test('套件收录完整：plugins/ 下每个模块都在 ORDER 里，且产物�
   }
 })
 
+test('UR 合成规划：紧跟称号行情进入 Oxygen 且不进入 LTS', () => {
+  const i = MEMBERS.indexOf('title-quotes')
+  assert.equal(MEMBERS[i + 1], 'title-forge-planner')
+  assert.equal(ORDER_LTS.includes('title-forge-planner'), false)
+  const source = readFileSync(new URL('../plugins/title-forge-planner.user.js', import.meta.url), 'utf8')
+  assert.match(source, /@version\s+0\.1\.0/)
+  assert.match(source, /version:\s*'0\.1\.0'/)
+  assert.match(source, /'title-quotes':\s*'\^1\.0\.19'/)
+  assert.match(source, /permissions:\s*\['read',\s*'storage',\s*'ui',\s*'events'\]/)
+  assert.doesNotMatch(ltsCode, /id:\s*'title-forge-planner'/)
+  assert.match(readFileSync(new URL('../build-suite.mjs', import.meta.url), 'utf8'), /SUITE_VERSION = '2\.0\.23'/)
+  assert.match(readFileSync(new URL('../suite/suite-center.js', import.meta.url), 'utf8'), /version:\s*'2\.0\.23'/)
+})
+
 test('AI 副驾登记在 AI 总结之后，且不进入 LTS', () => {
   const summaryIndex = MEMBERS.indexOf('ai-summary')
   assert.equal(MEMBERS[summaryIndex + 1], 'ai-copilot')
@@ -265,7 +279,7 @@ test('Greasy Fork：氢/氧对外名称与简介不带 RC', () => {
   assert.match(baseCode, /@name:en\s+LINUX\.SB Hydrogen\s*$/m)
   assert.match(suiteCode, /@name:en\s+LINUX\.SB Oxygen\s*$/m)
   assert.match(baseCode, /@version\s+0\.1\.43/)
-  assert.match(suiteCode, /@version\s+1\.0\.120/)
+  assert.match(suiteCode, /@version\s+2\.0\.23/)
   assert.match(baseCode, /@description\s+linux\.sb 脚本基座/)
   assert.match(suiteCode, /@description\s+linux\.sb 功能套件/)
   assert.doesNotMatch(baseCode, /【RC】/)
@@ -287,7 +301,7 @@ test('Greasy Fork：LTS 产物一段头、document-start、含氢 grant、不含
   assert.equal([...ltsCode.matchAll(/\/\/ ==UserScript==/g)].length, 1)
   assert.match(ltsCode, /@name\s+LINUX\.SB（LTS）/)
   assert.match(ltsCode, /@name:en\s+LINUX\.SB \(LTS\)/)
-  assert.match(ltsCode, /@version\s+1\.0\.120/)
+  assert.match(ltsCode, /@version\s+2\.0\.23/)
   assert.match(ltsCode, /冻新功能/)
   assert.doesNotMatch(ltsCode, /氢（RC）/)
   assert.doesNotMatch(ltsCode, /【RC】/)
