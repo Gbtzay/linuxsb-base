@@ -293,6 +293,7 @@ test('UR 规划器面板：刷新后同时显示两种库存和三类路线', as
   assert.equal(await until(() => w.document.querySelector('[data-title-forge-planner-target]')), true)
 
   const root = w.document.querySelector('[data-title-forge-planner]')
+  assert.match(root.querySelector('[data-title-forge-planner-source="recipes"]').textContent, /最后更新/)
   assert.ok(root.querySelector('[data-title-forge-planner-mode="no-inventory"]'))
   assert.ok(root.querySelector('[data-title-forge-planner-mode="inventory"]'))
   assert.ok(root.querySelector('[data-title-forge-planner-plan="market-low"]'))

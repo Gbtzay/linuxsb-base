@@ -652,11 +652,12 @@
 
     function sourceLabel(key) {
       const state = sourceState[key]
+      const time = state.fetchedAt ? ` · 最后更新 ${new Date(state.fetchedAt).toLocaleString('zh-CN')}` : ''
       if (state.status === 'loading') return '读取中…'
-      if (state.status === 'ok') return '已更新'
-      if (state.status === 'partial') return '部分可用'
-      if (state.status === 'stale') return '使用上次成功数据'
-      if (state.status === 'unavailable') return state.error || '数据不足'
+      if (state.status === 'ok') return `已更新${time}`
+      if (state.status === 'partial') return `部分可用${time}`
+      if (state.status === 'stale') return `使用上次成功数据${time}`
+      if (state.status === 'unavailable') return `${state.error || '数据不足'}${time}`
       return '未读取'
     }
 
