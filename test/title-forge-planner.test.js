@@ -194,6 +194,51 @@ test('UR 规划器：下级配方可展开且循环不覆盖直接市场路线',
   assert.equal(result[0].route.reason, 'market-low')
 })
 
+test('UR 规划器：抽取路线处理重复结果并计算共享奖池期望值', async () => {
+  const { dbg } = await bootPlanner()
+  const req = [
+    { key: '蓝色火花@SSR', name: '蓝色火花', rarity: 'SSR', qty: 1 },
+    { key: '旧齿轮@SR', name: '旧齿轮', rarity: 'SR', qty: 1 },
+  ]
+  const pool = {
+    id: 'pool-1', label: '测试池', drawCost: 100,
+    outcomes: [
+      { key: '蓝色火花@SSR', probability: 0.5 },
+      { key: '旧齿轮@SR', probability: 0.25 },
+      { key: '其它@N', probability: 0.25 },
+    ],
+  }
+  const plan = dbg.expectedGachaCost(req, [pool], 0)
+  assert.equal(plan.status, 'ok')
+  assert.equal(plan.expectedDraws, 4.666666666666667)
+  assert.equal(plan.cost, 466.6666666666667)
+})
+
+test('UR 规划器：有积分足够的方案时优先返回可行最低路线，否则返回最小缺口', async () => {
+  const { dbg } = await bootPlanner()
+  const input = fixtureDataWithPoints(500)
+  const result = dbg.calculatePlans(input)
+  assert.equal(result.modes.noInventory.summary.state, 'feasible')
+  assert.equal(result.modes.noInventory.summary.bestFeasible.target.key, '夜航灯塔@UR')
+  assert.equal(result.modes.inventory.summary.state, 'feasible')
+  assert.ok(result.modes.inventory.summary.bestFeasible.route.cost < result.modes.noInventory.summary.bestFeasible.route.cost)
+
+  const short = dbg.calculatePlans(fixtureDataWithPoints(1))
+  assert.equal(short.modes.noInventory.summary.state, 'insufficient')
+  assert.ok(short.modes.noInventory.summary.nearest.shortfall > 0)
+})
+
+test('UR 规划器：不完整抽取概率不产生期望路线', async () => {
+  const { dbg } = await bootPlanner()
+  const plan = dbg.expectedGachaCost(
+    [{ key: '蓝色火花@SSR', name: '蓝色火花', rarity: 'SSR', qty: 1 }],
+    [{ id: 'bad', drawCost: 100, outcomes: [{ key: '蓝色火花@SSR', probability: 0.2 }] }],
+    0,
+  )
+  assert.equal(plan.status, 'unavailable')
+  assert.equal(plan.reason, 'probability-incomplete')
+})
+
 test('UR 规划器：结构化字段缺失时使用配方和概率的可见文字', async () => {
   const { dbg } = await bootPlanner()
   const recipes = dbg.parseRecipes(`<section data-gacha-recipes>

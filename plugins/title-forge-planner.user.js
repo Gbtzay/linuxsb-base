@@ -347,6 +347,151 @@
     return out.sort((a, b) => (a.route.cost ?? Infinity) - (b.route.cost ?? Infinity) || a.target.key.localeCompare(b.target.key, 'zh-CN') || String(a.recipe.id).localeCompare(String(b.recipe.id)))
   }
 
+  function expectedGachaCost(requirements, pools, fee) {
+    if (!Number.isFinite(Number(fee)) || Number(fee) < 0) return unavailable('fee-missing')
+    const rows = aggregateRequirements(requirements)
+    if (rows.some((row) => !Number.isInteger(row.qty) || row.qty < 1)) return unavailable('requirements-invalid', Number(fee))
+    const validPools = []
+    let sawIncomplete = false
+    for (const pool of pools || []) {
+      const drawCost = Number(pool?.drawCost)
+      if (!Number.isFinite(drawCost) || drawCost <= 0 || !Array.isArray(pool?.outcomes) || pool.outcomes.length === 0) {
+        sawIncomplete = true
+        continue
+      }
+      const outcomes = pool.outcomes.filter((outcome) => {
+        const p = Number(outcome?.probability)
+        return outcome?.key && Number.isFinite(p) && p >= 0 && p <= 1
+      })
+      const total = outcomes.reduce((sum, outcome) => sum + Number(outcome.probability), 0)
+      if (outcomes.length !== pool.outcomes.length || Math.abs(total - 1) > 1e-9 || pool.probabilityComplete === false) {
+        sawIncomplete = true
+        continue
+      }
+      validPools.push({ ...pool, drawCost, outcomes })
+    }
+    if (!validPools.length) return unavailable(sawIncomplete ? 'probability-incomplete' : 'gacha-unavailable', Number(fee))
+    const indexOf = new Map(rows.map((row, index) => [row.key, index]))
+    const memo = new Map()
+    const solve = (remaining) => {
+      const stateKey = remaining.join(',')
+      if (memo.has(stateKey)) return memo.get(stateKey)
+      if (remaining.every((qty) => qty === 0)) {
+        const done = { cost: 0, draws: 0, choices: [] }
+        memo.set(stateKey, done)
+        return done
+      }
+      let best = null
+      for (const pool of validPools) {
+        const transitions = new Map()
+        for (const outcome of pool.outcomes) {
+          const index = indexOf.get(outcome.key)
+          if (index == null || remaining[index] <= 0) continue
+          transitions.set(index, (transitions.get(index) || 0) + Number(outcome.probability))
+        }
+        const progressProbability = [...transitions.values()].reduce((sum, p) => sum + p, 0)
+        if (!(progressProbability > 0)) continue
+        let childCost = 0
+        let childDraws = 0
+        let valid = true
+        const nextStates = []
+        for (const [index, probability] of transitions) {
+          const next = remaining.slice()
+          next[index] -= 1
+          const child = solve(next)
+          if (!child) {
+            valid = false
+            break
+          }
+          childCost += probability * child.cost
+          childDraws += probability * child.draws
+          nextStates.push({ index, probability, state: next })
+        }
+        if (!valid) continue
+        const candidate = {
+          cost: (pool.drawCost + childCost) / progressProbability,
+          draws: (1 + childDraws) / progressProbability,
+          choices: [{ poolId: pool.id || null, label: pool.label || pool.id || '', state: stateKey, progressProbability }, ...nextStates.flatMap((next) => {
+            const child = solve(next.state)
+            return child?.choices || []
+          })],
+        }
+        if (!best || candidate.cost < best.cost || (candidate.cost === best.cost && candidate.draws < best.draws)) best = candidate
+      }
+      memo.set(stateKey, best)
+      return best
+    }
+    const solved = solve(rows.map((row) => row.qty))
+    if (!solved) return unavailable('gacha-unavailable', Number(fee))
+    const steps = [
+      { kind: 'fee', fee: Number(fee), cost: Number(fee) },
+      { kind: 'gacha', expected: true, expectedDraws: solved.draws, expectedCost: solved.cost, choices: solved.choices },
+    ]
+    const result = planResult('ok', Number(fee) + solved.cost, Number(fee), steps, 'gacha')
+    result.expectedDraws = solved.draws
+    result.expectedCost = solved.cost
+    result.poolChoices = solved.choices
+    return result
+  }
+
+  function summarizeMode(targets, points) {
+    const valid = (targets || []).filter((target) => target?.best && target.best.status !== 'unavailable' && Number.isFinite(target.best.cost))
+    const ordered = valid.slice().sort((a, b) => a.best.cost - b.best.cost || a.target.key.localeCompare(b.target.key, 'zh-CN') || String(a.recipe.id).localeCompare(String(b.recipe.id)))
+    const summaryEntry = (target) => target ? { ...target, route: target.best, cost: target.best.cost, shortfall: target.best.shortfall } : null
+    const nearest = summaryEntry(ordered[0])
+    if (points == null || !Number.isFinite(Number(points))) return { state: 'unknown', bestFeasible: null, nearest }
+    const feasible = ordered.filter((target) => target.best.cost <= Number(points))
+    if (feasible.length) return { state: 'feasible', bestFeasible: summaryEntry(feasible[0]), nearest }
+    return { state: ordered.length ? 'insufficient' : 'unknown', bestFeasible: null, nearest }
+  }
+
+  function buildTargetPlan(recipe, recipes, market, gachaPools, inventory, points) {
+    const direct = { requirements: missingInputs(recipe.inputs, inventory), fee: recipe.fee, steps: [] }
+    const expanded = expandRequirements(recipe, recipes, inventory, new Set())
+    const lowCandidates = [
+      addRecipeContext(marketCost(direct.requirements, market?.listings || [], direct.fee), direct, recipe),
+    ]
+    const medianCandidates = [
+      addRecipeContext(medianCost(direct.requirements, market?.titles || {}, direct.fee), direct, recipe),
+    ]
+    const gachaCandidates = [
+      addRecipeContext(expectedGachaCost(direct.requirements, gachaPools, direct.fee), direct, recipe),
+    ]
+    if (!expanded.issue) {
+      lowCandidates.push(addRecipeContext(marketCost(expanded.requirements, market?.listings || [], expanded.fee), expanded, recipe))
+      medianCandidates.push(addRecipeContext(medianCost(expanded.requirements, market?.titles || {}, expanded.fee), expanded, recipe))
+      gachaCandidates.push(addRecipeContext(expectedGachaCost(expanded.requirements, gachaPools, expanded.fee), expanded, recipe))
+    }
+    const routes = {
+      marketLow: applyPoints(bestRoute(lowCandidates), points),
+      marketMedian: applyPoints(bestRoute(medianCandidates), points),
+      gacha: applyPoints(bestRoute(gachaCandidates), points),
+    }
+    return {
+      target: recipe.target,
+      recipe,
+      routes,
+      best: applyPoints(bestRoute(Object.values(routes)), points),
+    }
+  }
+
+  function calculatePlans({ recipes = [], market = {}, gachaPools = [], inventory = {}, points = null } = {}) {
+    const buildMode = (owned) => {
+      const targets = (recipes || [])
+        .filter((recipe) => recipe?.target?.rarity === 'UR')
+        .map((recipe) => buildTargetPlan(recipe, recipes, market, gachaPools, owned, points))
+        .sort((a, b) => a.target.key.localeCompare(b.target.key, 'zh-CN') || String(a.recipe.id).localeCompare(String(b.recipe.id)))
+      return { targets, summary: summarizeMode(targets, points) }
+    }
+    return {
+      modes: {
+        noInventory: buildMode({}),
+        inventory: buildMode(inventory || {}),
+      },
+      points: points == null || !Number.isFinite(Number(points)) ? null : Number(points),
+    }
+  }
+
   function setup(api) {
     api.handle('title-forge-planner:debug', () => ({
       keyOf,
@@ -358,6 +503,9 @@
       medianCost,
       expandRequirements,
       planMarket,
+      expectedGachaCost,
+      summarizeMode,
+      calculatePlans,
       planResult,
       issues: [],
     }))
