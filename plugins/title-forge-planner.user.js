@@ -155,12 +155,210 @@
     return { inventory, issues }
   }
 
+  function aggregateRequirements(inputs) {
+    const out = new Map()
+    for (const input of inputs || []) {
+      if (!input || !input.key || !Number.isFinite(Number(input.qty)) || Number(input.qty) <= 0) continue
+      const qty = Number(input.qty)
+      const current = out.get(input.key)
+      if (current) current.qty += qty
+      else out.set(input.key, {
+        key: input.key,
+        name: input.name || String(input.key).split('@').slice(0, -1).join('@'),
+        rarity: input.rarity || String(input.key).split('@').pop() || '',
+        qty,
+      })
+    }
+    return [...out.values()]
+  }
+
+  function missingInputs(inputs, inventory = {}) {
+    const owned = inventory && typeof inventory === 'object' ? inventory : {}
+    return aggregateRequirements(inputs).flatMap((input) => {
+      const have = Number(owned[input.key])
+      const qty = Math.max(0, input.qty - (Number.isFinite(have) && have > 0 ? have : 0))
+      return qty > 0 ? [{ ...input, qty }] : []
+    })
+  }
+
+  function planResult(status, cost, fee, steps, reason, currentPoints = null) {
+    const points = currentPoints == null || !Number.isFinite(Number(currentPoints)) ? null : Number(currentPoints)
+    const amount = Number.isFinite(Number(cost)) ? Number(cost) : null
+    return {
+      status,
+      cost: amount,
+      fee: Number.isFinite(Number(fee)) ? Number(fee) : null,
+      steps: steps || [],
+      reason: reason || null,
+      currentPoints: points,
+      remaining: points != null && amount != null ? Math.max(0, points - amount) : null,
+      shortfall: points != null && amount != null ? Math.max(0, amount - points) : null,
+    }
+  }
+
+  function applyPoints(plan, points) {
+    if (!plan || plan.status === 'unavailable') {
+      return planResult(plan?.status || 'unavailable', plan?.cost, plan?.fee, plan?.steps, plan?.reason, points)
+    }
+    const out = planResult(plan.status, plan.cost, plan.fee, plan.steps, plan.reason, points)
+    if (out.currentPoints != null && out.cost != null && out.cost > out.currentPoints) out.status = 'insufficient'
+    return out
+  }
+
+  function unavailable(reason, fee = null, steps = [], points = null) {
+    return planResult('unavailable', null, fee, steps, reason, points)
+  }
+
+  function marketCost(requirements, listings, fee) {
+    if (!Number.isFinite(Number(fee)) || Number(fee) < 0) return unavailable('fee-missing')
+    const rows = aggregateRequirements(requirements)
+    const byKey = new Map()
+    for (let i = 0; i < (listings || []).length; i++) {
+      const listing = listings[i]
+      const price = Number(listing?.price)
+      const qty = Number(listing?.qty)
+      if (!listing?.key || !Number.isFinite(price) || price < 0 || !Number.isFinite(qty) || qty <= 0) continue
+      if (!byKey.has(listing.key)) byKey.set(listing.key, [])
+      byKey.get(listing.key).push({ key: listing.key, price, qty, index: i })
+    }
+    for (const group of byKey.values()) group.sort((a, b) => a.price - b.price || a.index - b.index)
+    const steps = [{ kind: 'fee', fee: Number(fee), cost: Number(fee) }]
+    let total = Number(fee)
+    for (const requirement of rows) {
+      let remaining = requirement.qty
+      for (const listing of byKey.get(requirement.key) || []) {
+        if (remaining <= 0) break
+        const qty = Math.min(remaining, listing.qty)
+        const cost = qty * listing.price
+        steps.push({ kind: 'market', key: requirement.key, price: listing.price, qty, cost })
+        total += cost
+        remaining -= qty
+      }
+      if (remaining > 0) return unavailable('market-insufficient', Number(fee), steps)
+    }
+    return planResult('ok', total, Number(fee), steps, 'market-low')
+  }
+
+  function medianCost(requirements, titles, fee) {
+    if (!Number.isFinite(Number(fee)) || Number(fee) < 0) return unavailable('fee-missing')
+    const rows = aggregateRequirements(requirements)
+    const steps = [{ kind: 'fee', fee: Number(fee), cost: Number(fee) }]
+    let total = Number(fee)
+    for (const requirement of rows) {
+      const mid = Number(titles?.[requirement.key]?.mid)
+      if (!Number.isFinite(mid) || mid < 0) return unavailable('median-missing', Number(fee), steps)
+      const cost = mid * requirement.qty
+      steps.push({ kind: 'median', key: requirement.key, price: mid, qty: requirement.qty, cost })
+      total += cost
+    }
+    return planResult('ok', total, Number(fee), steps, 'market-median')
+  }
+
+  function recipeFor(key, recipes) {
+    return (recipes || []).find((recipe) => recipe?.target?.key === key) || null
+  }
+
+  function expandNode(recipe, recipes, trail, scale, leaves, steps) {
+    const recipeFee = Number(recipe?.fee)
+    if (!Number.isFinite(recipeFee) || recipeFee < 0) return { fee: 0, issue: 'fee-missing' }
+    steps.push({ kind: 'recipe', id: recipe.id, target: recipe.target, qty: scale, fee: recipeFee * scale })
+    let fee = recipeFee * scale
+    let issueReason = null
+    for (const input of recipe.inputs || []) {
+      const qty = Number(input.qty) * scale
+      const child = recipeFor(input.key, recipes)
+      if (!child) {
+        const current = leaves.get(input.key)
+        if (current) current.qty += qty
+        else leaves.set(input.key, { ...input, qty })
+        continue
+      }
+      if (trail.has(child.target.key)) {
+        issueReason ||= 'recipe-cycle'
+        steps.push({ kind: 'direct', key: input.key, name: input.name, rarity: input.rarity, qty })
+        const current = leaves.get(input.key)
+        if (current) current.qty += qty
+        else leaves.set(input.key, { ...input, qty })
+        continue
+      }
+      const nextTrail = new Set(trail)
+      nextTrail.add(child.target.key)
+      const nested = expandNode(child, recipes, nextTrail, qty, leaves, steps)
+      fee += nested.fee
+      issueReason ||= nested.issue
+    }
+    return { fee, issue: issueReason }
+  }
+
+  function expandRequirements(targetRecipe, recipes, inventory = {}, seen = new Set()) {
+    const leaves = new Map()
+    const steps = []
+    const trail = new Set(seen || [])
+    if (targetRecipe?.target?.key) trail.add(targetRecipe.target.key)
+    const expanded = expandNode(targetRecipe, recipes || [], trail, 1, leaves, steps)
+    const allRequirements = [...leaves.values()]
+    const requirements = missingInputs(allRequirements, inventory)
+    const owned = inventory && typeof inventory === 'object' ? inventory : {}
+    for (const input of allRequirements) {
+      const have = Number(owned[input.key])
+      const used = Math.min(input.qty, Number.isFinite(have) && have > 0 ? have : 0)
+      if (used > 0) steps.push({ kind: 'inventory', key: input.key, name: input.name, rarity: input.rarity, qty: used })
+    }
+    return {
+      requirements,
+      fee: expanded.fee,
+      steps,
+      issue: expanded.issue || null,
+      reason: expanded.issue || null,
+    }
+  }
+
+  function addRecipeContext(route, expansion, recipe) {
+    if (!route || route.status === 'unavailable') return route
+    const context = expansion?.steps?.length ? expansion.steps : [{ kind: 'recipe', id: recipe.id, target: recipe.target, qty: 1, fee: recipe.fee }]
+    return { ...route, steps: [...context, ...route.steps] }
+  }
+
+  function bestRoute(routes) {
+    const valid = (routes || []).filter((route) => route && route.status !== 'unavailable' && Number.isFinite(route.cost))
+    if (!valid.length) return routes?.find(Boolean) || unavailable('no-route')
+    return valid.slice().sort((a, b) => a.cost - b.cost || (a.reason === 'market-low' ? -1 : 1))[0]
+  }
+
+  function planMarket({ recipes = [], market = {}, inventory = {}, points = null } = {}) {
+    const out = []
+    for (const recipe of recipes || []) {
+      if (!recipe?.target?.key || recipe.target.rarity !== 'UR') continue
+      const direct = { requirements: missingInputs(recipe.inputs, inventory), fee: recipe.fee, steps: [] }
+      const directLow = addRecipeContext(marketCost(direct.requirements, market?.listings || [], direct.fee), direct, recipe)
+      const directMedian = addRecipeContext(medianCost(direct.requirements, market?.titles || {}, direct.fee), direct, recipe)
+      const expanded = expandRequirements(recipe, recipes, inventory, new Set())
+      const candidates = [directLow, directMedian]
+      if (!expanded.issue) {
+        candidates.push(addRecipeContext(marketCost(expanded.requirements, market?.listings || [], expanded.fee), expanded, recipe))
+        candidates.push(addRecipeContext(medianCost(expanded.requirements, market?.titles || {}, expanded.fee), expanded, recipe))
+      }
+      const route = applyPoints(bestRoute(candidates), points)
+      out.push({ target: recipe.target, recipe, route, routes: {
+        marketLow: applyPoints(bestRoute([directLow, !expanded.issue ? candidates[2] : null]), points),
+        marketMedian: applyPoints(bestRoute([directMedian, !expanded.issue ? candidates[3] : null]), points),
+      } })
+    }
+    return out.sort((a, b) => (a.route.cost ?? Infinity) - (b.route.cost ?? Infinity) || a.target.key.localeCompare(b.target.key, 'zh-CN') || String(a.recipe.id).localeCompare(String(b.recipe.id)))
+  }
+
   function setup(api) {
     api.handle('title-forge-planner:debug', () => ({
       keyOf,
       parseRecipes,
       parseGacha,
       parseInventory,
+      missingInputs,
+      marketCost,
+      medianCost,
+      expandRequirements,
+      planMarket,
+      planResult,
       issues: [],
     }))
   }

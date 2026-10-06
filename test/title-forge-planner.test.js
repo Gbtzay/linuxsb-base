@@ -131,6 +131,69 @@ test('UR 规划器：解析 UR 配方、抽取池和称号库存', async () => {
   assert.deepEqual(plain(profile.issues), [])
 })
 
+test('UR 规划器：最低挂单按数量逐单取货，库存先抵扣', async () => {
+  const { dbg } = await bootPlanner()
+  const req = [{ key: '蓝色火花@SSR', name: '蓝色火花', rarity: 'SSR', qty: 4 }]
+  const listings = [
+    { key: '蓝色火花@SSR', price: 10, qty: 1 },
+    { key: '蓝色火花@SSR', price: 15, qty: 3 },
+    { key: '蓝色火花@SSR', price: 99, qty: 4 },
+  ]
+  const low = dbg.marketCost(req, listings, 100)
+  assert.equal(low.status, 'ok')
+  assert.equal(low.cost, 155)
+  assert.deepEqual(plain(low.steps.filter((s) => s.kind === 'market')), [
+    { kind: 'market', key: '蓝色火花@SSR', price: 10, qty: 1, cost: 10 },
+    { kind: 'market', key: '蓝色火花@SSR', price: 15, qty: 3, cost: 45 },
+  ])
+  assert.deepEqual(plain(dbg.missingInputs(req, { '蓝色火花@SSR': 1 })), [
+    { key: '蓝色火花@SSR', name: '蓝色火花', rarity: 'SSR', qty: 3 },
+  ])
+})
+
+test('UR 规划器：挂单不足或中位价缺失时路线不可用', async () => {
+  const { dbg } = await bootPlanner()
+  const req = [{ key: '缺货称号@SR', name: '缺货称号', rarity: 'SR', qty: 2 }]
+  assert.equal(dbg.marketCost(req, [{ key: '缺货称号@SR', price: 20, qty: 1 }], 0).status, 'unavailable')
+  assert.equal(dbg.medianCost(req, {}, 0).status, 'unavailable')
+})
+
+test('UR 规划器：下级配方可展开且循环不覆盖直接市场路线', async () => {
+  const { dbg } = await bootPlanner()
+  const root = {
+    id: 'ur-root',
+    target: { key: '终极@UR', name: '终极', rarity: 'UR' },
+    inputs: [{ key: '中间@SR', name: '中间', rarity: 'SR', qty: 1 }],
+    fee: 100,
+  }
+  const child = {
+    id: 'sr-child',
+    target: { key: '中间@SR', name: '中间', rarity: 'SR' },
+    inputs: [{ key: '基础@N', name: '基础', rarity: 'N', qty: 2 }],
+    fee: 20,
+  }
+  const expanded = dbg.expandRequirements(root, [root, child], {}, new Set())
+  assert.deepEqual(plain(expanded.requirements), [{ key: '基础@N', name: '基础', rarity: 'N', qty: 2 }])
+  assert.equal(expanded.fee, 120)
+
+  const cycle = {
+    ...child,
+    inputs: [{ key: '中间@SR', name: '中间', rarity: 'SR', qty: 1 }],
+  }
+  const result = dbg.planMarket({
+    recipes: [root, cycle],
+    market: {
+      listings: [{ key: '中间@SR', price: 30, qty: 1 }],
+      titles: { '中间@SR': { rarity: 'SR', mid: 30 } },
+    },
+    inventory: {},
+    points: 500,
+  })
+  assert.equal(result[0].route.status, 'ok')
+  assert.equal(result[0].route.cost, 130)
+  assert.equal(result[0].route.reason, 'market-low')
+})
+
 test('UR 规划器：结构化字段缺失时使用配方和概率的可见文字', async () => {
   const { dbg } = await bootPlanner()
   const recipes = dbg.parseRecipes(`<section data-gacha-recipes>
