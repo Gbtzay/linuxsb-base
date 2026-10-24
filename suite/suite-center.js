@@ -4,10 +4,10 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '2.0.35',
+    version: '2.0.36',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
-    requires: { base: '^0.2.3' },
+    requires: { base: '^2.4.1' },
     permissions: ['read', 'ui', 'events'],
   }
 

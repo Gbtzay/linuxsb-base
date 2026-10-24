@@ -270,9 +270,9 @@ test('AI 工作台登记在 AI 副驾之后且不进入 LTS', () => {
 })
 
 test('动作代理版本与基座及工作台版本对齐', () => {
-  assert.match(readFileSync(new URL('../src/core/core-version.js', import.meta.url), 'utf8'), /VERSION = '0\.2\.5'/)
-  assert.match(readFileSync(new URL('../package.json', import.meta.url), 'utf8'), /"version": "0\.2\.5"/)
-  assert.match(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'), /"version": "0\.2\.5"/)
+  assert.match(readFileSync(new URL('../src/core/core-version.js', import.meta.url), 'utf8'), /VERSION = '2\.4\.1'/)
+  assert.match(readFileSync(new URL('../package.json', import.meta.url), 'utf8'), /"version": "2\.4\.1"/)
+  assert.match(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'), /"version": "2\.4\.1"/)
   assert.match(readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8'), /@version\s+1\.4\.0/)
   assert.match(readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8'), /version:\s*'1\.4\.0'/)
   assert.match(readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8'), /base:\s*'\^0\.1\.53'/)
@@ -387,7 +387,7 @@ test('Greasy Fork：正式版对外名称与简介不带 RC，开发版带标记
   assert.match(releaseSuiteCode, /@name\s+LINUX\.SB 氧\s*$/m)
   assert.match(releaseBaseCode, /@name:en\s+LINUX\.SB Hydrogen\s*$/m)
   assert.match(releaseSuiteCode, /@name:en\s+LINUX\.SB Oxygen\s*$/m)
-  assert.match(releaseBaseCode, /@version\s+0\.2\.5/)
+  assert.match(releaseBaseCode, /@version\s+2\.4\.1/)
   assert.equal(releaseSuiteCode.match(/@version\s+([\d.]+)/)?.[1], configuredSuiteVersion)
   assert.match(releaseBaseCode, /@description\s+linux\.sb 脚本基座/)
   assert.match(releaseSuiteCode, /@description\s+linux\.sb 正式功能套件/)

@@ -119,8 +119,8 @@ test('插件网络层暴露同源重定向最终地址而非原请求路径', as
   }
 })
 
-test('正式版氢号是 0.2.5，面板标题不带 RC', () => {
-  assert.equal(VERSION, '0.2.5')
+test('正式版氢号是 2.4.1，面板标题不带 RC', () => {
+  assert.equal(VERSION, '2.4.1')
   const core = boot()
   assert.equal(core.ui.title, 'LINUX.SB · 氢')
   assert.doesNotMatch(core.ui.title, /RC/)
@@ -182,6 +182,22 @@ test('基座版本不匹配 → 拒绝激活', () => {
   })
   assert.equal(core.plugins.get('future').state, 'error')
   assert.match(core.plugins.get('future').error, /需要基座 \^9\.0\.0/)
+})
+
+test('2.x 氢兼容旧 0.1.x/0.2.x 插件声明', () => {
+  const core = boot()
+  let ran01 = false
+  let ran02 = false
+  core.register({ id: 'legacy-01', version: '1.0.0', requires: { base: '^0.1.0' } }, () => {
+    ran01 = true
+  })
+  core.register({ id: 'legacy-02', version: '1.0.0', requires: { base: '^0.2.3' } }, () => {
+    ran02 = true
+  })
+  assert.equal(ran01, true)
+  assert.equal(ran02, true)
+  assert.equal(core.plugins.get('legacy-01').state, 'active')
+  assert.equal(core.plugins.get('legacy-02').state, 'active')
 })
 
 test('pages 限定：不匹配页面直接跳过', () => {

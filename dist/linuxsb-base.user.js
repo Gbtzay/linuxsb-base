@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氢
 // @name:en      LINUX.SB Hydrogen
 // @namespace    https://linux.sb/
-// @version      0.2.5
+// @version      2.4.1
 // @description  linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧」一起使用。
 // @description:en  Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen for features.
 // @author       xB70sR71
@@ -2428,7 +2428,7 @@
   };
 
   // src/core/core-version.js
-  var VERSION = "0.2.5";
+  var VERSION = "2.4.1";
 
   // src/core/permissions.js
   var PERMISSIONS = {
@@ -3795,7 +3795,7 @@
     _canActivate(rec) {
       if (coreStore.get(`disabled:${rec.id}`, !1))
         return { ok: !1, fatal: !0, state: "disabled", reason: "用户已停用" };
-      let baseRange = rec.requires.base, legacyBaseBridge = /^\^0\.1\./.test(String(baseRange || "")) && /^0\.2\./.test(VERSION);
+      let baseRange = rec.requires.base, legacyBaseBridge = /^\^0\.(?:1|2)\./.test(String(baseRange || "")) && /^2\./.test(VERSION);
       if (baseRange && !satisfies(VERSION, baseRange) && !legacyBaseBridge)
         return { ok: !1, fatal: !0, state: "error", reason: `需要基座 ${baseRange}，当前 ${VERSION}` };
       if (rec.pages && !rec.pages.includes(this.snapshot.page.type))

@@ -2,7 +2,7 @@
 // @name         LINUX.SB（LTS）
 // @name:en      LINUX.SB (LTS)
 // @namespace    https://linux.sb/
-// @version      2.0.35
+// @version      2.0.36
 // @description  【LTS】一份脚本含基座与精简功能包。请先卸掉「LINUX.SB 氢」和「LINUX.SB 氧」。冻新功能，只修阻断。
 // @description:en  [LTS] Base + feature pack in one script. Uninstall Hydrogen and Oxygen first. Feature-frozen.
 // @author       xB70sR71
@@ -49,7 +49,7 @@
     return
   }
   W.__LSB_CHANNEL__ = 'lts'
-  W.__LSB_LTS_VERSION__ = "2.0.35";
+  W.__LSB_LTS_VERSION__ = "2.0.36";
 (() => {
   var __defProp = Object.defineProperty;
   var __export = (target, all) => {
@@ -2451,7 +2451,7 @@
   };
 
   // src/core/core-version.js
-  var VERSION = "0.2.5";
+  var VERSION = "2.4.1";
 
   // src/core/permissions.js
   var PERMISSIONS = {
@@ -3818,7 +3818,7 @@
     _canActivate(rec) {
       if (coreStore.get(`disabled:${rec.id}`, !1))
         return { ok: !1, fatal: !0, state: "disabled", reason: "用户已停用" };
-      let baseRange = rec.requires.base, legacyBaseBridge = /^\^0\.1\./.test(String(baseRange || "")) && /^0\.2\./.test(VERSION);
+      let baseRange = rec.requires.base, legacyBaseBridge = /^\^0\.(?:1|2)\./.test(String(baseRange || "")) && /^2\./.test(VERSION);
       if (baseRange && !satisfies(VERSION, baseRange) && !legacyBaseBridge)
         return { ok: !1, fatal: !0, state: "error", reason: `需要基座 ${baseRange}，当前 ${VERSION}` };
       if (rec.pages && !rec.pages.includes(this.snapshot.page.type))
@@ -15696,10 +15696,10 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '2.0.35',
+    version: '2.0.36',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
-    requires: { base: '^0.2.3' },
+    requires: { base: '^2.4.1' },
     permissions: ['read', 'ui', 'events'],
   }
 

@@ -416,10 +416,9 @@ export class Core {
       return { ok: false, fatal: true, state: 'disabled', reason: '用户已停用' }
     }
     const baseRange = rec.requires.base
-    // Platform v2 keeps the legacy facade source-compatible with the existing
-    // 0.1.x plugin line. New plugins may require ^0.2.x explicitly; old ^0.1.x
-    // declarations are accepted only on the 0.2.x compatibility bridge.
-    const legacyBaseBridge = /^\^0\.1\./.test(String(baseRange || '')) && /^0\.2\./.test(VERSION)
+    // Platform 2 keeps the legacy facade source-compatible with bundled and
+    // third-party plugins that still declare the old 0.1.x/0.2.x ranges.
+    const legacyBaseBridge = /^\^0\.(?:1|2)\./.test(String(baseRange || '')) && /^2\./.test(VERSION)
     if (baseRange && !satisfies(VERSION, baseRange) && !legacyBaseBridge) {
       return { ok: false, fatal: true, state: 'error', reason: `需要基座 ${baseRange}，当前 ${VERSION}` }
     }

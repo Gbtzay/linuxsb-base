@@ -20,7 +20,7 @@
 
 ### 模块自身质量要求
 
-- manifest 完整：`id` / `name` / `version` / `requires: { base: '^0.2.3' }` / `permissions` / 可配置项走 `config` schema；
+- manifest 完整：`id` / `name` / `version` / `requires: { base: '^2.4.1' }` / `permissions` / 可配置项走 `config` schema；仍声明旧 `^0.1.x` / `^0.2.x` 的插件由 2.x 兼容桥继续运行。
 - 对外提供 `<id>:debug` RPC（测试与年度报告等聚合模块的统一挂点）；
 - 至少一个测试用例（优先用 `test/fixtures/` 的真实页面快照）；
 - 遵循现有模式：正/负缓存 + in-flight 去重、水位线 diff、单键存储 + 容量/时效修剪、
@@ -59,7 +59,7 @@
 
 ## 2.2 正式版（当前）
 
-氢 **0.2.5** / 正式氧 **2.0.35** / LTS **2.0.35**。正式 Oxygen 收录 **20** 个非 AI 模块；开发版 Hydrogen + Oxygen 位于 `dist-dev/`，保留完整 AI API、skin AI 入口和 **25** 个套件模块，不构建开发版 LTS。正式 Hydrogen、Oxygen 与 LTS 均不含 AI 专用基座 API、AI 模块或 skin AI 卡片/快捷入口/事件桥接。Platform v2 已启用能力上下文、RequestBroker 与 ActionBroker；旧 `^0.1.x` 插件通过 legacy facade 兼容桥继续运行。不得改对外产品名隐喻（H₂O 等）。
+氢 **2.4.1** / 正式氧 **2.0.36** / LTS **2.0.36**。正式 Oxygen 收录 **20** 个非 AI 模块；开发版 Hydrogen + Oxygen 位于 `dist-dev/`，保留完整 AI API、skin AI 入口和 **25** 个套件模块，不构建开发版 LTS。正式 Hydrogen、Oxygen 与 LTS 均不含 AI 专用基座 API、AI 模块或 skin AI 卡片/快捷入口/事件桥接。Platform v2 已启用能力上下文、RequestBroker 与 ActionBroker；仍声明旧 `^0.1.x` / `^0.2.x` 的插件通过 2.x legacy facade 兼容桥继续运行。不得改对外产品名隐喻（H₂O 等）。
 
 Oxygen 中的 `title-quotes` 是只读称号行情数据源，交易页保留行情内嵌；`title-forge-planner` 是只读 UR 合成规划数据源，独立页签由 `points-title-workbench` 的统一「积分-称号」入口承接。工作台只读取配方、抽取概率、库存、积分和称号行情，不发送购买、抽取或合成请求；这三个模块都不进入 LTS。
 

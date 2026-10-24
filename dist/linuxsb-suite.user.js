@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氧
 // @name:en      LINUX.SB Oxygen
 // @namespace    https://linux.sb/
-// @version      2.0.35
+// @version      2.0.36
 // @description  linux.sb 正式功能套件：氢壳、实时流、未读哨兵、签到日历等 20 个非 AI 模块。
 // @description:en  Public feature pack for linux.sb with 20 non-AI modules. Requires LINUX.SB Hydrogen.
 // @author       xB70sR71
@@ -15809,10 +15809,10 @@
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '2.0.35',
+    version: '2.0.36',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
-    requires: { base: '^0.2.3' },
+    requires: { base: '^2.4.1' },
     permissions: ['read', 'ui', 'events'],
   }
 
