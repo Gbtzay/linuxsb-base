@@ -1,18 +1,15 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ORDER, ORDER_LTS } from './suite/order.js'
+import { readBuildProfile, readPluginBody, stripHeader, SUITE_VERSION } from './scripts/build-common.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+const profile = readBuildProfile()
+if (profile !== 'release') throw new Error('LTS 仅从正式版配置构建')
 const COLLISION =
   '请先在油猴里关掉或卸掉「LINUX.SB 氢」和「LINUX.SB 氧」，只留 LINUX.SB（LTS）。'
-
-function stripHeader(src) {
-  const header = src.match(/^\/\/ ==UserScript==\r?\n[\s\S]*?\/\/ ==\/UserScript==\r?\n*/)
-  if (!header) throw new Error('missing userscript header')
-  return { header: header[0], body: src.slice(header[0].length) }
-}
 
 function rewriteBaseHeader(header, version, description, descriptionEn) {
   return header
@@ -26,15 +23,14 @@ function rewriteBaseHeader(header, version, description, descriptionEn) {
 const missing = ORDER_LTS.filter((id) => !ORDER.includes(id))
 if (missing.length) throw new Error('ORDER_LTS 必须是 ORDER 的子集：' + missing.join(','))
 
-const base = readFileSync(join(__dirname, 'dist/linuxsb-base.user.js'), 'utf8')
-const suiteBanner = readFileSync(join(__dirname, 'dist/linuxsb-suite.user.js'), 'utf8')
+const basePath = join(__dirname, 'dist/linuxsb-base.user.js')
+if (!existsSync(basePath)) throw new Error('缺少 dist/linuxsb-base.user.js，请先执行 npm run build 或 node build.mjs --profile=release')
+const suitePath = join(__dirname, 'dist/linuxsb-suite.user.js')
+if (!existsSync(suitePath)) throw new Error('缺少 dist/linuxsb-suite.user.js，请先执行 build-suite.mjs --profile=release')
+const base = readFileSync(basePath, 'utf8')
 const baseParts = stripHeader(base)
-const version = suiteBanner.match(/@version\s+([\d.]+)/)?.[1]
-if (!version) throw new Error('suite @version missing')
-const mods = ORDER_LTS.map((id) => {
-  const raw = readFileSync(join(__dirname, 'plugins', `${id}.user.js`), 'utf8')
-  return stripHeader(raw).body
-})
+const version = SUITE_VERSION
+const mods = ORDER_LTS.map((id) => readPluginBody(id, profile))
 const suiteCenter = readFileSync(join(__dirname, 'suite', 'suite-center.js'), 'utf8').replace(
   '__SUITE_MEMBERS__',
   JSON.stringify(ORDER_LTS),

@@ -1,5 +1,5 @@
 /**
- * 三件套功能测试：断点续读 / 用户画像悬浮卡 / AI 总结
+ * 功能测试：断点续读 / AI 总结
  * 在 jsdom 里加载 dist 产物 + 对应插件，stub 网络后走真实交互路径。
  */
 import { test } from 'node:test'
@@ -7,10 +7,9 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}`, import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
-const userHtml = readFileSync(new URL('./fixtures/user1.html', import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 
 function makeSite({ preload = {} } = {}) {
@@ -295,62 +294,6 @@ test('续读：主楼没有 data-floor 时也能跳回主帖', async () => {
   const dbg = await w.LSB.bus.request('resume-reading:debug')
   assert.equal(dbg.jump(0), true)
   assert.ok(w.document.getElementById('post-1').classList.contains('lsb-flash'))
-})
-
-/* ─────────── 用户画像悬浮卡 ─────────── */
-
-function userPageStub(calls) {
-  return async (url) => {
-    calls.push(String(url))
-    return { status: 200, ok: true, url: String(url), text: async () => userHtml }
-  }
-}
-
-test('画像卡：悬停加载真实用户页数据；同 uid 走缓存不再请求', async () => {
-  const calls = []
-  const { w, until } = makeSite({
-    preload: { 'lsb_base:hover-profile:__config': { delayMs: 0, ttlHours: 24, negTtlMin: 5, showTopics: true } },
-  })
-  await loadBase(w, PLUG('hover-profile.user.js'))
-  w.fetch = userPageStub(calls)
-
-  const link = w.document.querySelector('a[href="/user/1"]')
-  link.dispatchEvent(new w.MouseEvent('mouseenter', { bubbles: false }))
-
-  const ok = await until(() => {
-    const c = w.document.querySelector('.lsb-hover-card.is-on')
-    return c && c.textContent.includes('痛失姓名的站长')
-  })
-  assert.ok(ok, '浮卡显示用户名')
-  assert.match(w.document.querySelector('.lsb-hover-card').textContent, /6238/, '积分来自解析层')
-  assert.equal(calls.length, 1, '只发了一次请求')
-  assert.match(calls[0], /\/user\/1$/)
-
-  // 缓存生效：换一个入口再次触发同一 uid
-  const dbg = await w.LSB.bus.request('hover-profile:debug')
-  await dbg.show(1)
-  assert.equal(calls.length, 1, '缓存命中，零请求')
-  assert.equal(dbg.cacheSize(), 1)
-})
-
-test('画像卡：请求失败进入负缓存，短时间不再重试', async () => {
-  const calls = []
-  const { w } = makeSite({
-    preload: { 'lsb_base:hover-profile:__config': { delayMs: 0, ttlHours: 24, negTtlMin: 5 } },
-  })
-  await loadBase(w, PLUG('hover-profile.user.js'))
-  w.fetch = async (url) => {
-    calls.push(String(url))
-    return { status: 404, ok: false, url: String(url), text: async () => '' }
-  }
-
-  const dbg = await w.LSB.bus.request('hover-profile:debug')
-  await assert.rejects(() => dbg.show(99999), /HTTP 404|解析失败|没有帖子|非 2xx/)
-  const afterFirst = calls.length
-  assert.ok(afterFirst >= 1)
-
-  await assert.rejects(() => dbg.show(99999))
-  assert.equal(calls.length, afterFirst, '负缓存内不发第二次请求')
 })
 
 /* ─────────── AI 总结 ─────────── */

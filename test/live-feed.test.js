@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}`, import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
@@ -404,6 +404,25 @@ test('实时流：精华 / 抽奖按新帖序数巡检，不当成回复流', as
   const luckyDbg = await lucky.w.LSB.bus.request('live-feed:debug')
   await lucky.until(() => luckyDbg.role() === 'leader', 3000)
   assert.equal(luckyDbg.baseline().sort, 'post', '抽奖流按帖 id，不能因缺时间戳整页漏报')
+
+  const red = makeSite(homeHtml, '/index.php?sort=red_packet', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  feedStub(red.w, () => homeHtml)
+  await loadBase(red.w, PLUG('live-feed.user.js'))
+  const redDbg = await red.w.LSB.bus.request('live-feed:debug')
+  await red.until(() => redDbg.role() === 'leader', 3000)
+  assert.equal(redDbg.baseline().sort, 'post', '红包 Tab 按帖 id，不能当成回复流')
+
+  const hot = makeSite(homeHtml, '/hot_discussions', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  feedStub(hot.w, () => homeHtml)
+  await loadBase(hot.w, PLUG('live-feed.user.js'))
+  const hotDbg = await hot.w.LSB.bus.request('live-feed:debug')
+  await hot.until(() => hotDbg.role() === 'leader', 3000)
+  assert.equal(hotDbg.mode(), 'list', '热议页应进入列表实时流')
+  assert.equal(hotDbg.baseline().sort, 'post')
 })
 
 test('实时流：route:changed 只重建基线，不立刻再 GET', async () => {
@@ -533,4 +552,18 @@ test('实时流：非主标签还回存档也立刻巡检', async () => {
   await tick(120)
   assert.equal(w.location.pathname, '/')
   assert.ok(calls.length > n, 'follower 还回存档也要立刻 cycle，不能因为 shouldPoll 为假而跳过')
+})
+
+test('实时流：淘帖专辑列表不得当主题流巡检', async () => {
+  const { w, until } = makeSite(homeHtml, '/topic_collections?tab=everyone', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  const calls = feedStub(w, () => homeHtml)
+  await loadBase(w, PLUG('live-feed.user.js'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  assert.equal(dbg.mode(), null, '淘帖页即使有 ul.post-list 也不进 list 模式')
+  const n = calls.length
+  await dbg.pollOnce()
+  assert.equal(calls.length, n, '不得去拉淘帖列表当首页流')
 })

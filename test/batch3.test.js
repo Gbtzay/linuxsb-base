@@ -67,7 +67,7 @@ test('签到日历：自动探测未签→提醒；一键签到组表单提交�
     if (init.method === 'POST') {
       posts.push({ url: u, body: init.body })
       checked = true
-      return { status: 200, ok: true, url: u, text: async () => 'ok' }
+      return { status: 200, ok: true, url: u, text: async () => '{"ok":1,"message":"签到完成"}' }
     }
     return {
       status: 200,
@@ -102,6 +102,11 @@ test('签到日历：自动探测未签→提醒；一键签到组表单提交�
 
   // 日历渲染出 ok 格子
   w.LSB.open('checkin-calendar')
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (dkey(yesterday).slice(0, 7) !== dkey(new Date()).slice(0, 7)) {
+    w.document.querySelector('[data-prev]').click()
+  }
   assert.ok(w.document.querySelectorAll('.lsb-cal-cell.is-ok').length >= 2)
 })
 
@@ -119,9 +124,25 @@ test('签到日历：HTTP 非 2xx 不把当天标成已签', async () => {
   await until(() => dbg.status() === 'open')
   const out = await dbg.doCheckin()
   assert.equal(out.done, false)
-  assert.match(String(out.reason), /http/)
+  assert.equal(out.outcome, 'unknown', '5xx 可能已到达站点，签到结果应待检查')
   assert.notEqual(dbg.recs()[dkey(new Date())]?.s, 'ok', '失败不得写入 ok')
   assert.equal(dbg.status(), 'open')
+})
+
+test('签到日历：HTTP 200 业务失败不把当天标成已签', async () => {
+  const { w, until } = makeSite()
+  w.fetch = async (url, init = {}) => {
+    const u = String(url)
+    if (init.method === 'POST') return { status: 200, ok: true, url: u, text: async () => '{"ok":0,"message":"CSRF 失效"}' }
+    return { status: 200, ok: true, url: u, text: async () => CHECKIN_OPEN }
+  }
+  await loadBase(w, PLUG('checkin-calendar.user.js'))
+  const dbg = await w.LSB.bus.request('checkin-calendar:debug')
+  await until(() => dbg.status() === 'open')
+  const out = await dbg.doCheckin()
+  assert.equal(out.outcome, 'failure')
+  assert.equal(out.message, 'CSRF 失效')
+  assert.notEqual(dbg.recs()[dkey(new Date())]?.s, 'ok')
 })
 
 test('签到日历：已签状态不再提醒、按钮置灰', async () => {
@@ -141,9 +162,10 @@ test('签到日历：已签状态不再提醒、按钮置灰', async () => {
 
 /* ─────────── 积分趋势 ─────────── */
 
-test('积分趋势：快照序列 → 折线图与增减列表；同值去重', async () => {
+test('积分趋势：快照序列 → 工作台折线图与增减列表；同值去重', async () => {
   const { w } = makeSite()
-  await loadBase(w, PLUG('points-ledger.user.js'))
+  w.fetch = async (url) => ({ status: 200, ok: true, url: String(url), text: async () => '<html><body></body></html>' })
+  await loadBase(w, PLUG('points-ledger.user.js'), PLUG('title-quotes.user.js'), PLUG('title-forge-planner.user.js'), PLUG('points-title-workbench.user.js'))
   const dbg = await w.LSB.bus.request('points-ledger:debug')
   dbg.reset()
 
@@ -152,9 +174,10 @@ test('积分趋势：快照序列 → 折线图与增减列表；同值去重', 
   dbg.add(now - 864e5, 4120)
   dbg.add(now, 4138)
 
-  w.LSB.open('points-ledger')
-  assert.ok(w.document.querySelector('.lsb-svg polyline'), '折线已绘制')
-  const txt = w.document.querySelector('.lsb-view').textContent
+  await w.LSB.bus.request('points-title-workbench:open')
+  w.document.querySelector('[data-workbench-tab="points"]').click()
+  assert.ok(w.document.querySelector('[data-workbench-view="points"] .lsb-svg polyline'), '折线已绘制')
+  const txt = w.document.querySelector('[data-workbench-view="points"]').textContent
   assert.match(txt, /\+20/)
   assert.match(txt, /\+18/)
 
@@ -176,17 +199,19 @@ test('积分趋势：间隔定时器已挂上（配置 intervalHours 不是一�
   assert.equal(dbg.armed(), true)
 })
 
-test('积分趋势：折线图带 viewBox，按栏宽缩放而不是裁掉右侧', async () => {
+test('积分趋势：工作台折线图带 viewBox，按栏宽缩放而不是裁掉右侧', async () => {
   const { w } = makeSite()
-  await loadBase(w, PLUG('points-ledger.user.js'))
+  w.fetch = async (url) => ({ status: 200, ok: true, url: String(url), text: async () => '<html><body></body></html>' })
+  await loadBase(w, PLUG('points-ledger.user.js'), PLUG('title-quotes.user.js'), PLUG('title-forge-planner.user.js'), PLUG('points-title-workbench.user.js'))
   const dbg = await w.LSB.bus.request('points-ledger:debug')
   dbg.reset()
   const now = Date.now()
   dbg.add(now - 2 * 864e5, 4100)
   dbg.add(now - 864e5, 4120)
   dbg.add(now, 4138)
-  w.LSB.open('points-ledger')
-  const svg = w.document.querySelector('.lsb-svg')
+  await w.LSB.bus.request('points-title-workbench:open')
+  w.document.querySelector('[data-workbench-tab="points"]').click()
+  const svg = w.document.querySelector('[data-workbench-view="points"] .lsb-svg')
   assert.ok(svg, '应有折线图')
   const vb = svg.getAttribute('viewBox') || ''
   assert.match(vb, /^0 0 \d+(\.\d+)? \d+(\.\d+)?$/, `需要 viewBox 才能随容器缩放，实际 viewBox="${vb}"`)
@@ -198,7 +223,7 @@ test('积分趋势：折线图带 viewBox，按栏宽缩放而不是裁掉右侧
     !wAttr || /%$/.test(wAttr),
     `width 应省略或用百分比，否则固定像素会裁掉右侧；实际 width="${wAttr}"`,
   )
-  const css = w.document.getElementById('lsb-style-points-ledger')?.textContent || ''
+  const css = [...w.document.querySelectorAll('style')].map((node) => node.textContent).join('\n')
   assert.match(css, /\.lsb-svg[\s\S]*width:\s*100%/, '样式要把 SVG 拉满内容栏')
 })
 
@@ -272,4 +297,72 @@ test('机会监控：forget 在未见过的版块键上不抛错', async () => {
   await loadBase(w, PLUG('forum-watch.user.js'))
   const dbg = await w.LSB.bus.request('forum-watch:debug')
   assert.doesNotThrow(() => dbg.forget(99999))
+})
+
+const FORUM_HTML_MARKS =
+  '<html><body><ul class="post-list">' +
+  '<li class="post-item"><a class="post-title" href="/topic/8001">发红包啦</a>' +
+  '<span class="red-packet-title-status">红包帖</span>' +
+  '<span data-performance-time="1787216186"></span></li>' +
+  '<li class="post-item"><a class="post-title" href="/topic/8002">发卡结束</a>' +
+  '<span class="virtual-card-title-status">结束</span>' +
+  '<span data-performance-time="1787216000"></span></li>' +
+  '<li class="post-item"><a class="post-title" href="/topic/8003">普通帖</a>' +
+  '<span data-performance-time="1787215900"></span></li>' +
+  '</ul></body></html>'
+
+test('机会监控：开关关时红包标记不入箱', async () => {
+  const calls = []
+  const { w, until } = makeSite({
+    'lsb_base:forum-watch:__config': {
+      forums: '5',
+      keywords: 'k8s',
+      intervalMin: 5,
+      jitterMs: 0,
+      notifyDesktop: false,
+      watchRedPacket: false,
+      watchVirtualCard: false,
+    },
+  })
+  w.fetch = async (url) => {
+    calls.push(String(url))
+    return { status: 200, ok: true, url: String(url), text: async () => FORUM_HTML_MARKS }
+  }
+  await loadBase(w, PLUG('forum-watch.user.js'))
+  const dbg = await w.LSB.bus.request('forum-watch:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await new Promise((r) => setTimeout(r, 200))
+  assert.equal(dbg.hits().length, 0, '标题没有 k8s，标记开关关着')
+  assert.ok(calls.some((u) => u.includes('/forum/5')))
+})
+
+test('机会监控：只开盯红包则 live 入箱，ended 不入；水位去重', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:forum-watch:__config': {
+      forums: '5',
+      keywords: '',
+      intervalMin: 5,
+      jitterMs: 0,
+      notifyDesktop: false,
+      watchRedPacket: true,
+      watchVirtualCard: false,
+    },
+  })
+  w.fetch = async (url) => ({
+    status: 200,
+    ok: true,
+    url: String(url),
+    text: async () => FORUM_HTML_MARKS,
+  })
+  await loadBase(w, PLUG('forum-watch.user.js'))
+  const dbg = await w.LSB.bus.request('forum-watch:debug')
+  assert.equal(dbg.probe().watchRedPacket, true)
+  assert.equal(dbg.probe().watchVirtualCard, false)
+  await until(() => dbg.role() === 'leader', 3000)
+  await until(() => dbg.hits().length === 1, 2000)
+  assert.equal(dbg.hits()[0].tid, 8001)
+  assert.equal(dbg.hits()[0].kw, '红包')
+  assert.deepEqual([...dbg.hits()[0].reasons], ['红包'])
+  await dbg.tick()
+  assert.equal(dbg.hits().length, 1)
 })

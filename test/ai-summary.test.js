@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
@@ -85,6 +85,205 @@ async function load(ctx) {
   await sleep(80)
   return ctx.w.LSB.bus.request('ai-summary:debug')
 }
+
+test('M12 provider 流式回答逐步回调，JSON 规划仍不流式', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  const bodies = []
+  ctx.w.TextDecoder = TextDecoder
+  ctx.w.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    bodies.push(body)
+    const text = body.stream ? 'data: {"choices":[{"delta":{"content":"中文"}}]}\n\ndata: {"choices":[{"delta":{"content":"回答"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n' : JSON.stringify({ choices: [{ message: { content: '{"plan":1}' } }] })
+    const bytes = new TextEncoder().encode(text)
+    return { status: 200, ok: true, url: String(url), body: new ReadableStream({ start(controller) {
+      for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.slice(i, i + 7))
+      controller.close()
+    } }), text: async () => text }
+  }
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  const deltas = []
+  const out = await provider.generate({ system: '回答', user: '问题', onDelta: (delta) => deltas.push(delta) })
+  assert.equal(out.text, '中文回答')
+  assert.deepEqual(deltas, ['中文', '回答'])
+  assert.equal(bodies[0].stream, true)
+  await provider.generate({ system: 'JSON 规划', user: '请求' })
+  assert.equal(bodies[1].stream, false)
+})
+
+test('M12 provider 明确不支持 stream 时仅降级一次，并兼容直接 JSON', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  const bodies = []
+  ctx.w.fetch = async (url, init) => {
+    bodies.push(JSON.parse(init.body))
+    const rejected = bodies.length === 1
+    return { status: rejected ? 400 : 200, ok: !rejected, url: String(url), text: async () => rejected ? '{"error":{"message":"stream is not supported"}}' : '{"choices":[{"message":{"content":"完整答案"}}]}' }
+  }
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  const deltas = []
+  const out = await provider.generate({ system: '回答', user: '问题', onDelta: (delta) => deltas.push(delta) })
+  assert.equal(out.text, '完整答案')
+  assert.deepEqual(bodies.map((body) => body.stream), [true, false])
+  assert.deepEqual(deltas, ['完整答案'])
+  bodies.length = 0
+  ctx.setCfg({ streamAnswers: false })
+  ctx.w.fetch = async (url, init) => {
+    bodies.push(JSON.parse(init.body))
+    return { status: 200, ok: true, url: String(url), text: async () => '{"choices":[{"message":{"content":"非流式"}}]}' }
+  }
+  await provider.generate({ user: '问题', onDelta: () => {} })
+  assert.equal(bodies[0].stream, false)
+})
+
+test('HTTP 403 HTML 响应显示短诊断，不展示 Cloudflare 原文', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const cloudflare = '<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>cf-ray=secret-token</body></html>'
+  await load(ctx)
+  ctx.w.fetch = async (url) => {
+    const target = String(url)
+    if (/linux\.sb/.test(target)) return { status: 200, ok: true, url: target, text: async () => topicHtml }
+    return { status: 403, ok: false, url: target, text: async () => cloudflare }
+  }
+  const dbg = await ctx.w.LSB.bus.request('ai-summary:debug')
+  await dbg.run({ force: true, flowId: 'summary-403-html' })
+  assert.equal(await until(() => Boolean(ctx.w.document.querySelector('.lsb-summary-panel'))), true)
+  const message = ctx.w.document.querySelector('.lsb-summary-panel .lsb-empty')?.textContent || ''
+  assert.match(message, /HTTP 403/)
+  assert.match(message, /端点|API Key|拒绝/)
+  assert.doesNotMatch(message, /<!DOCTYPE|<html|cf-ray=secret-token/i)
+  assert.ok(message.length < 220, `403 诊断文本过长：${message.length}`)
+})
+
+
+test('M12 provider Anthropic 流和部分失败不降级重发', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', { apiStyle: 'Anthropic', apiUrl: 'https://api.example.test/v1/messages' })
+  await load(ctx)
+  let requests = 0
+  const deltas = []
+  ctx.w.fetch = async (url, init) => {
+    requests++
+    assert.equal(JSON.parse(init.body).stream, true)
+    assert.equal(init.headers['x-api-key'], 'k')
+    return { status: 200, ok: true, url: String(url), text: async () => 'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"中文答案"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n' }
+  }
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  assert.equal((await provider.generate({ user: '问题', onDelta: (delta) => deltas.push(delta) })).text, '中文答案')
+  assert.deepEqual(deltas, ['中文答案'])
+  ctx.w.fetch = async (url) => {
+    requests++
+    return { status: 200, ok: true, url: String(url), text: async () => 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"部分答案"}}\n\n' }
+  }
+  await assert.rejects(provider.generate({ user: '问题', onDelta: () => {} }), /中断/)
+  assert.equal(requests, 2, '不完整的流只发出一次请求')
+})
+
+test('provider export：公开 configured 和 generate，但不附加总结风格', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', {
+    style: '立场地图',
+    customPrompt: '只总结旧功能',
+  })
+  await load(ctx)
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  assert.equal(provider.configured(), true)
+  assert.equal(provider.model(), 'deepseek-chat')
+  assert.match(provider.renderMarkdown('<img src=x>'), /&lt;img/)
+  const out = await provider.generate({
+    system: '你是帖子副驾。',
+    user: '<forum-content>正文</forum-content>',
+    timeout: 45000,
+  })
+  assert.equal(out.text, '【模型输出】')
+  const body = JSON.parse(ctx.lastLlm().body)
+  assert.equal(body.messages[0].content, '你是帖子副驾。')
+  assert.equal(body.messages[1].content, '<forum-content>正文</forum-content>')
+  assert.doesNotMatch(body.messages[0].content, /立场地图|旧功能/)
+})
+
+test('provider export：未配置端点或 Key 时 configured 返回 false', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1', { apiUrl: '', apiKey: '' })
+  await load(ctx)
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  assert.equal(provider.configured(), false)
+})
+
+test('M16 provider probe 读取流式能力并按端点和模型缓存', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  let calls = 0
+  ctx.w.TextDecoder = TextDecoder
+  ctx.w.fetch = async (url, init) => {
+    calls++
+    const body = JSON.parse(init.body)
+    assert.equal(body.stream, true)
+    assert.equal(body.messages[1].content, '连接自检：只返回 OK')
+    const payload = 'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+    const bytes = new TextEncoder().encode(payload)
+    return {
+      status: 200,
+      ok: true,
+      url: String(url),
+      body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close() } }),
+      text: async () => payload,
+    }
+  }
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  const first = await provider.probe({ force: true })
+  assert.equal(calls, 1)
+  assert.equal(first.result.text, 'OK')
+  assert.equal(first.result.capabilities.stream, true)
+  assert.equal(first.diagnostic.reasonCode, 'ok')
+  const second = await provider.probe()
+  assert.equal(calls, 1, '有效能力应在缓存命中时不重复请求')
+  assert.equal(second.cached, true)
+  assert.equal(provider.providerState().capabilities.stream, true)
+})
+
+test('M16 provider probe 流式拒绝后只降级一次 JSON，并保存脱敏状态', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  const bodies = []
+  ctx.w.fetch = async (url, init) => {
+    const body = JSON.parse(init.body)
+    bodies.push(body)
+    if (bodies.length === 1) {
+      return { status: 400, ok: false, url: String(url), text: async () => '{"error":{"message":"stream is not supported; token=secret"}}' }
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => '{"choices":[{"message":{"content":"OK"}}]}' }
+  }
+  const provider = ctx.w.LSB.__core.plugins.get('ai-summary').exports
+  const out = await provider.probe({ force: true })
+  assert.deepEqual(bodies.map((body) => body.stream), [true, false])
+  assert.equal(out.result.text, 'OK')
+  assert.equal(out.result.capabilities.json, true)
+  assert.equal(out.result.capabilities.stream, false)
+  assert.equal(out.diagnostic.reasonCode, 'stream-unsupported')
+  assert.doesNotMatch(JSON.stringify(provider.providerState()), /secret|token=/)
+})
+
+test('M16 设置页连接自检可取消且不携带页面或历史内容', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  await load(ctx)
+  let seenInit
+  let rejectFetch
+  ctx.w.fetch = async (url, init) => {
+    seenInit = init
+    return new Promise((_, reject) => { rejectFetch = reject })
+  }
+  ctx.w.LSB.open('ai-summary')
+  const button = ctx.w.document.querySelector('[data-ai-summary-probe]')
+  const cancel = ctx.w.document.querySelector('[data-ai-summary-probe-cancel]')
+  assert.ok(button)
+  button.click()
+  assert.equal(await until(() => Boolean(seenInit)), true)
+  assert.equal(cancel.hidden, false)
+  const requestBody = JSON.parse(seenInit.body)
+  assert.doesNotMatch(JSON.stringify(requestBody), /标题：|楼层|历史|引用|写操作/)
+  cancel.click()
+  assert.equal(await until(() => button.disabled === false), true)
+  assert.equal(seenInit.signal.aborted, true)
+  rejectFetch?.(new DOMException('Aborted', 'AbortError'))
+})
 
 /** 造一个主楼超长的帖子页 */
 function hugeOpHtml(len = 30000) {
@@ -197,6 +396,60 @@ test('缓存：重新生成按钮强制绕过缓存', async () => {
   assert.equal(ctx.llmCalls(), 1)
   await dbg.run({ force: true })
   assert.ok(await until(() => ctx.llmCalls() === 2), 'force 必须重算')
+})
+
+test('trace.v1：总结按采集、读取、回答边界发布安全阶段', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const events = []
+  ctx.w.LSB.bus.on('ai:trace', (event) => events.push(event))
+
+  await dbg.run({ flowId: 'summary-flow-1' })
+  assert.ok(await until(() => events.some((event) => event.stage === 'answer' && event.state === 'complete')))
+  assert.ok(events.length >= 4)
+  assert.equal(new Set(events.map((event) => event.flowId)).size, 1)
+  assert.equal(events[0].flowId, 'summary-flow-1')
+  const stages = events.map((event) => event.stage)
+  assert.ok(stages.indexOf('scope') < stages.indexOf('read'))
+  assert.ok(stages.indexOf('read') < stages.indexOf('answer'))
+  assert.ok(events.some((event) => event.stage === 'read' && event.state === 'complete' && event.counts.read > 0))
+  const serialized = JSON.stringify(events)
+  assert.doesNotMatch(serialized, /81459cee62|<body>|Bearer|思维链/)
+  assert.match(ctx.w.document.querySelector('[data-ai-summary-trace]')?.textContent || '', /读取帖子|生成总结/)
+})
+
+test('trace.v1：缓存命中只发布回答完成并标记缓存来源', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const events = []
+  ctx.w.LSB.bus.on('ai:trace', (event) => events.push(event))
+  await dbg.run()
+  assert.ok(await until(() => ctx.llmCalls() === 1))
+  events.length = 0
+
+  await dbg.run()
+  assert.equal(ctx.llmCalls(), 1)
+  assert.ok(await until(() => events.some((event) => event.stage === 'answer' && event.state === 'complete')))
+  assert.equal(events.some((event) => event.stage === 'answer' && event.state === 'active'), false)
+  assert.match(events.find((event) => event.stage === 'answer')?.summary || '', /缓存/)
+})
+
+test('trace.v1：模型失败发布固定原因码且不泄露原始错误', async () => {
+  const ctx = makeSite(topicHtml, 'https://linux.sb/topic/1')
+  const dbg = await load(ctx)
+  const events = []
+  ctx.w.LSB.bus.on('ai:trace', (event) => events.push(event))
+  const originalRaw = ctx.w.LSB.__core.net.raw.bind(ctx.w.LSB.__core.net)
+  ctx.w.LSB.__core.net.raw = async (path, options) => {
+    if (options?.external) throw new Error('CSRF=secret-token <body> hidden chain')
+    return originalRaw(path, options)
+  }
+
+  await dbg.run({ flowId: 'summary-failure-1' })
+  assert.ok(await until(() => events.some((event) => event.stage === 'answer' && event.state === 'failed')))
+  const failure = events.find((event) => event.stage === 'answer' && event.state === 'failed')
+  assert.ok(failure.reasonCode)
+  assert.doesNotMatch(JSON.stringify(failure), /secret-token|hidden chain|CSRF/)
 })
 
 /* ═══════════ 主楼判定 ═══════════ */

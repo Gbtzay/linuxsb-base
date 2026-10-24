@@ -1,43 +1,37 @@
 import { Bus } from './bus.js'
 import { Net, Actions } from './net.js'
-import { makeStore, coreStore, RAW_PREFIX, rawKeys, rawGet, rawSet } from './store.js'
+import { createCapabilityContext } from './runtime/capabilities.js'
+import { RequestBroker } from './runtime/request-broker.js'
+import { ActionBroker } from './runtime/action-broker.js'
+import { ActionRegistry } from './ai/actions.js'
+import { prepareConversation, buildConversationContext } from './ai/conversation.js'
+import { throwIfAborted } from './abort.js'
+import { buildEvidenceSnapshot, diffEvidenceSnapshots, mergeCitationReview } from './ai/evidence.js'
+import { createAnswerStream } from './ai/stream.js'
+import { normalizeEndpoint, classifyProbeResponse, redactDiagnostic } from './ai/diagnostics.js'
+import {
+  sanitizeTraceEvent,
+  validateTraceEvent,
+  transitionTrace,
+  normalizePlanVersion,
+  reasonCode,
+} from './ai/trace.js'
+import { makeStore, coreStore } from './store.js'
 import { UI } from './ui.js'
 import { DomWatcher } from './dom.js'
 import { Channel } from './channel.js'
 import * as site from './site.js'
-import { Election } from './election.js'
-import { satisfies, deepFreeze, clone, esc, num, text, sleep, throttle } from './util.js'
-import {
-  SCRIPTS,
-  gfJsonUrl,
-  parseStoreScript,
-  classifyVersion,
-  localOxygenVersion,
-  installHref,
-  isLtsChannel,
-  ltsDisplayVersion,
-} from './check-update.js'
-
-export const VERSION = '0.1.36'
-
-/** 权限清单：插件在 manifest.permissions 里声明，未声明即调用会抛错 */
-export const PERMISSIONS = {
-  read: '读取页面结构与站内 GET 请求',
-  write: '代表当前用户发起写操作（回复/点赞/收藏等）',
-  storage: '持久化自己的数据',
-  ui: '注册面板、注入界面元素',
-  net: '访问站外域名（需脚本自身 @connect）',
-  admin: '全库数据导出/导入（数据主权，仅迁移类工具应申请）',
-  events: '订阅与广播事件',
-}
-
-const DEFAULT_PERMISSIONS = ['read', 'storage', 'ui', 'events']
-
-/** 幂等方法（只读语义）：其余方法一律按写操作对待 */
-const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
-export function isIdempotent(method) {
-  return IDEMPOTENT_METHODS.has(String(method || 'GET').toUpperCase())
-}
+import { satisfies, deepFreeze, clone } from './util.js'
+import { createPluginApi } from './core/api-factory.js'
+import { isLtsChannel, ltsDisplayVersion } from './check-update.js'
+import { VERSION } from './core/core-version.js'
+export { VERSION } from './core/core-version.js'
+export { PERMISSIONS, DEFAULT_PERMISSIONS, isIdempotent } from './core/permissions.js'
+import { DEFAULT_PERMISSIONS, isIdempotent } from './core/permissions.js'
+import { renderLogTab } from './core/panels/log-tab.js'
+import { renderUpdateTab } from './core/panels/update-tab.js'
+import { renderPluginList } from './core/panels/plugin-list.js'
+import { renderBaseSettings } from './core/panels/base-settings.js'
 
 class PluginRecord {
   constructor(manifest, setup) {
@@ -51,16 +45,19 @@ class PluginRecord {
     this.pages = manifest.pages || null // ['topic','home'] 限定生效页面
     this.provides = manifest.provides || [] // 声明会 handle 的 RPC 名
     this.configSchema = manifest.config || null
+    this.configTabRenderer = null
     this.setup = setup
     this.state = 'registered' // registered|active|disabled|error|skipped
     this.error = null
     this.disposers = []
     this.exports = null
+    this.abortController = null
+    this.context = null
   }
 }
 
 export class Core {
-  constructor(opts = {}) {
+  constructor() {
     this.version = VERSION
     this.ready = false
     this.debug = !!coreStore.get('debug', false)
@@ -76,6 +73,20 @@ export class Core {
       gmRequest: typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : null,
     })
     this.actions = new Actions(this.net)
+    this.requestBroker = new RequestBroker({
+      transport: (url, options) => this.net.transport(url, options),
+      snapshot: () => this.snapshot || {},
+      origin: this.net.origin,
+      trace: (event) => this.log('runtime.request', safeStr(event)),
+    })
+    this.actionBroker = new ActionBroker({
+      snapshot: () => this.snapshot || {},
+      request: (intent) => this.requestBroker.request(intent),
+      trace: (event) => this.log('runtime.action', safeStr(event)),
+    })
+    if (typeof __LSB_BUILD_PROFILE__ === 'undefined' || __LSB_BUILD_PROFILE__ === 'dev') {
+      this.ai = new ActionRegistry({ broker: this.actionBroker })
+    }
     this.ui = new UI({
       title: isLtsChannel() ? 'LINUX.SB · LTS' : 'LINUX.SB · 氢',
       version: isLtsChannel() ? ltsDisplayVersion() || VERSION : VERSION,
@@ -84,7 +95,6 @@ export class Core {
     this.site = site
     this.channel = null
     this.snapshot = null
-    this._opts = opts
     this._bootOff = []
     this._errs = coreStore.get('errorlog', []) || []
   }
@@ -340,6 +350,18 @@ export class Core {
     return rec
   }
 
+  _renderConfigForm(rec, host) {
+    if (!rec.configSchema) {
+      host.innerHTML = '<div class="lsb-empty">该插件未声明配置项。</div>'
+      return
+    }
+    const store = makeStore(rec.id)
+    this.ui.buildForm(host, rec.configSchema, store.config(rec.configSchema), (v) => {
+      store.saveConfig(v)
+      this.bus.emit(`config:changed:${rec.id}`, v, { source: 'core' })
+    })
+  }
+
   /**
    * 有 config schema 的插件，设置页在 register 时就挂上。
    * pages 限定插件在非适用页是 skipped、setup 不会跑，但 API Key 这类配置
@@ -348,21 +370,11 @@ export class Core {
   _ensureConfigTab(rec) {
     if (!rec.configSchema || rec._configTabReady) return
     rec._configTabReady = true
-    const store = makeStore(rec.id)
     this.ui.registerTab({
       id: rec.id,
       name: rec.name,
       order: 50,
-      render: (host) => {
-        if (!rec.configSchema) {
-          host.innerHTML = '<div class="lsb-empty">该插件未声明配置项。</div>'
-          return
-        }
-        this.ui.buildForm(host, rec.configSchema, store.config(rec.configSchema), (v) => {
-          store.saveConfig(v)
-          this.bus.emit(`config:changed:${rec.id}`, v, { source: 'core' })
-        })
-      },
+      render: (host) => this._renderConfigForm(rec, host),
     })
   }
 
@@ -404,7 +416,11 @@ export class Core {
       return { ok: false, fatal: true, state: 'disabled', reason: '用户已停用' }
     }
     const baseRange = rec.requires.base
-    if (baseRange && !satisfies(VERSION, baseRange)) {
+    // Platform v2 keeps the legacy facade source-compatible with the existing
+    // 0.1.x plugin line. New plugins may require ^0.2.x explicitly; old ^0.1.x
+    // declarations are accepted only on the 0.2.x compatibility bridge.
+    const legacyBaseBridge = /^\^0\.1\./.test(String(baseRange || '')) && /^0\.2\./.test(VERSION)
+    if (baseRange && !satisfies(VERSION, baseRange) && !legacyBaseBridge) {
       return { ok: false, fatal: true, state: 'error', reason: `需要基座 ${baseRange}，当前 ${VERSION}` }
     }
     if (rec.pages && !rec.pages.includes(this.snapshot.page.type)) {
@@ -425,6 +441,11 @@ export class Core {
   }
 
   _activate(rec) {
+    rec.abortController = new AbortController()
+    rec.context = createCapabilityContext(
+      { id: rec.id, permissions: rec.permissions },
+      { signal: rec.abortController.signal },
+    )
     const api = this._makeApi(rec)
     try {
       rec.exports = rec.setup(api) || null
@@ -440,6 +461,17 @@ export class Core {
   }
 
   _dispose(rec) {
+    try {
+      rec.abortController?.abort()
+    } catch {
+      /* AbortController is best-effort; disposer cleanup still must run. */
+    }
+    try {
+      rec.context?.dispose()
+    } catch {
+      /* Capability context cleanup is best-effort; continue legacy cleanup. */
+    }
+    rec.context = null
     for (const fn of rec.disposers.splice(0)) {
       try {
         fn()
@@ -449,6 +481,7 @@ export class Core {
     }
     this.bus.offOwner(rec.id)
     this.dom.offOwner(rec.id)
+    this.ai?.dispose(rec.id)
   }
 
   disable(id) {
@@ -487,300 +520,7 @@ export class Core {
 
   /* ─────────── 插件 API（每插件一份，带权限校验与自动清理） ─────────── */
 
-  _makeApi(rec) {
-    const core = this
-    const has = (p) => rec.permissions.includes(p)
-    const need = (p, what) => {
-      if (!has(p)) throw new Error(`插件 ${rec.id} 未声明 '${p}' 权限，无法 ${what}`)
-    }
-    const own = (fn) => {
-      rec.disposers.push(fn)
-      return fn
-    }
-    const store = makeStore(rec.id)
-
-    const api = {
-      base: { version: VERSION, id: rec.id, debug: core.debug },
-      /** 页面快照（只读） */
-      get page() {
-        return core.snapshot.page
-      },
-      get me() {
-        return core.snapshot.me
-      },
-      get forums() {
-        return core.snapshot.forums
-      },
-      get snapshot() {
-        return core.snapshot
-      },
-
-      /* 事件 */
-      on(event, fn) {
-        need('events', '订阅事件')
-        const off = core.bus.on(event, fn, { owner: rec.id })
-        own(off)
-        return off
-      },
-      once(event, fn) {
-        need('events', '订阅事件')
-        const off = core.bus.once(event, fn, { owner: rec.id })
-        own(off)
-        return off
-      },
-      emit(event, payload, opts) {
-        need('events', '广播事件')
-        // 默认发到本插件私有命名空间 plugin:<id>:<event>；
-        // 要广播公共约定事件（如 'topic:scored'）请用 emitGlobal
-        return core.bus.emit(`plugin:${rec.id}:${event}`, payload, { ...opts, source: rec.id })
-      },
-      /** 广播到全局命名空间（需明确事件名，用于公共约定事件如 'topic:scored'） */
-      emitGlobal(event, payload, opts) {
-        need('events', '广播事件')
-        return core.bus.emit(event, payload, { ...opts, source: rec.id })
-      },
-      /** 提供能力给其它插件调用 */
-      handle(name, fn) {
-        need('events', '注册 RPC')
-        const off = core.bus.handle(name, fn, { owner: rec.id })
-        own(off)
-        return off
-      },
-      request(name, payload, opts) {
-        need('events', '调用 RPC')
-        return core.bus.request(name, payload, opts)
-      },
-      hasHandler: (name) => core.bus.hasHandler(name),
-      /** 读取另一插件的 exports（依赖需在 manifest.requires.plugins 声明） */
-      plugin(id) {
-        if (!(rec.requires.plugins || {})[id] && id !== rec.id) {
-          throw new Error(`插件 ${rec.id} 未在 requires.plugins 声明依赖 ${id}`)
-        }
-        return core.plugins.get(id)?.exports ?? null
-      },
-
-      /* 存储 */
-      store: {
-        get: (k, d) => (need('storage', '读取存储'), store.get(k, d)),
-        set: (k, v) => (need('storage', '写入存储'), store.set(k, v)),
-        del: (k) => (need('storage', '删除存储'), store.del(k)),
-        update: (k, fn, d) => (need('storage', '更新存储'), store.update(k, fn, d)),
-        keys: () => (need('storage', '列出存储'), store.keys()),
-        clear: () => (need('storage', '清空存储'), store.clear()),
-        watch: (fn) => {
-          need('storage', '监听存储')
-          return own(store.watch(fn))
-        },
-      },
-      /** 配置：读一次得到合并默认值的对象，save 后触发 config:changed */
-      config: () => {
-        need('storage', '读取配置')
-        return store.config(rec.configSchema || {})
-      },
-      saveConfig: (patch) => {
-        need('storage', '保存配置')
-        const v = store.saveConfig(patch)
-        core.bus.emit(`config:changed:${rec.id}`, v, { source: 'core' })
-        return v
-      },
-
-      /* 网络（读） */
-      net: {
-        doc: (path, opts) => (need('read', '发起站内请求'), core.net.doc(path, opts)),
-        json: (path, opts) => (need('read', '发起站内请求'), core.net.json(path, opts)),
-        /**
-         * 底层请求。权限判定按「去向 + 方法」双轴：
-         *   站外任意方法   → net（脚本自身还需 @connect）
-         *   站内非幂等方法 → write（POST/PUT/PATCH/DELETE 会改动站点状态）
-         *   站内 GET/HEAD  → read
-         * 补 write 这一档是因为：只有 read 却能 POST /reply_edit，
-         * 等于绕开 api.actions 的权限门——写操作必须一视同仁。
-         */
-        raw: (path, opts) => {
-          const external = opts?.external
-          if (external || !core.net.isSameOrigin(path)) {
-            need('net', '访问站外域名')
-          } else if (!isIdempotent(opts?.method)) {
-            need('write', `对站内发起 ${String(opts?.method || 'GET').toUpperCase()} 请求`)
-          } else {
-            need('read', '发起站内请求')
-          }
-          return core.net.raw(path, opts)
-        },
-        /** 分页抓取：await for (const doc of api.net.pages('/forum/1', 3)) */
-        async *pages(pathFn, maxPage = 1) {
-          need('read', '发起站内请求')
-          for (let p = 1; p <= maxPage; p++) {
-            yield { page: p, doc: await core.net.doc(typeof pathFn === 'function' ? pathFn(p) : pathFn) }
-          }
-        },
-      },
-
-      /* 站点动作（写） */
-      actions: new Proxy(
-        {},
-        {
-          get(_t, key) {
-            return (...args) => {
-              need('write', `执行写操作 ${String(key)}`)
-              const fn = core.actions[key]
-              if (typeof fn !== 'function') throw new Error(`未知动作 actions.${String(key)}`)
-              core.log('action', `${rec.id} → ${String(key)}`, args[0])
-              return fn.apply(core.actions, args)
-            }
-          },
-        },
-      ),
-
-      /* 解析器（纯函数，无权限要求） */
-      parse: {
-        list: site.parseList,
-        listItem: site.parseListItem,
-        topic: site.parseTopic,
-        post: site.parsePost,
-        user: site.parseUser,
-        notifications: site.parseNotifications,
-        likeTargets: site.parseLikeTargets,
-        detectPage: site.detectPage,
-        snapshot: site.snapshot,
-      },
-      routes: site.ROUTES,
-      sel: site.SEL,
-
-      /* UI */
-      ui: {
-        toast: (msg, opts) => (need('ui', '弹提示'), core.ui.toast(msg, opts)),
-        confirm: (msg, opts) => (need('ui', '弹确认框'), core.ui.confirm(msg, opts)),
-        style: (css) => (need('ui', '注入样式'), core.ui.injectStyle(css, `lsb-style-${rec.id}`)),
-        /** 切换到指定插件 Tab 并重渲染（面板需已打开） */
-        showTab: (id) => {
-          need('ui', '切换面板页')
-          core.ui.showTab(id)
-        },
-        /** 由 schema 生成表单（onSave 收到完整值对象） */
-        buildForm: (host, schema, values, onSave) => {
-          need('ui', '生成设置表单')
-          return core.ui.buildForm(host, schema, values, onSave)
-        },
-        tab: (opt) => {
-          need('ui', '注册设置页')
-          return own(core.ui.registerTab({ id: opt.id || rec.id, name: opt.name || rec.name, order: opt.order, render: opt.render }))
-        },
-        openPanel: (id) => (need('ui', '打开面板'), core.ui.openPanel(id)),
-        /** 油猴扩展图标下的菜单命令；无 GM 时为空操作 */
-        menuCommand: (title, fn) => (need('ui', '注册油猴菜单'), core.ui.menuCommand(title, fn)),
-        postAction: (postEl, opt) => (need('ui', '注入楼层按钮'), core.ui.addPostAction(postEl, opt)),
-        topLink: (opt) => (need('ui', '注入顶栏'), core.ui.addTopLink(opt)),
-        /** 由 configSchema 自动生成设置页 */
-        configTab: (opt = {}) => {
-          need('ui', '注册设置页')
-          // 不进 disposers：pages 跳过会 dispose，设置页必须在首页仍能打开
-          return core.ui.registerTab({
-            id: opt.id || rec.id,
-            name: opt.name || rec.name,
-            order: opt.order,
-            render: (host) => {
-              if (!rec.configSchema) {
-                host.innerHTML = '<div class="lsb-empty">该插件未声明配置项。</div>'
-                return
-              }
-              core.ui.buildForm(host, rec.configSchema, store.config(rec.configSchema), (v) => api.saveConfig(v))
-              if (opt.render) opt.render(host)
-            },
-          })
-        },
-      },
-
-      /* 数据主权（admin 权限） */
-      admin: {
-        /** 全库导出 */
-        exportAll: () => {
-          need('admin', '导出全部数据')
-          const data = {}
-          for (const k of rawKeys()) data[k] = rawGet(k)
-          return { app: "lsb", version: VERSION, exportedAt: Date.now(), count: Object.keys(data).length, data }
-        },
-        /** merge=true 时保留现有同名键，默认覆盖 */
-        importAll: (payload, opts = {}) => {
-          need('admin', '导入全部数据')
-          const merge = !!(opts && opts.merge)
-          if (!payload || payload.app !== "lsb" || typeof payload.data !== "object") {
-            throw new Error("备份文件格式不正确（缺少 app/data 字段）")
-          }
-          let imported = 0
-          let skipped = 0
-          for (const [k, v] of Object.entries(payload.data)) {
-            if (!k.startsWith(RAW_PREFIX)) continue // 拒绝越界写入
-            if (merge && rawGet(k) !== undefined) { skipped++; continue }
-            rawSet(k, v)
-            imported++
-          }
-          return { imported, skipped }
-        },
-      },
-
-      /* DOM */
-      dom: {
-        each: (selector, fn) => {
-          need('read', '监听 DOM')
-          return own(core.dom.onEach(selector, fn, { owner: rec.id }))
-        },
-        posts: () => [...document.querySelectorAll(site.SEL.postEntry)],
-        items: () => [...document.querySelectorAll(site.SEL.listItems)],
-      },
-
-      /* 跨标签页 */
-      tabs: {
-        post: (event, payload) => {
-          need('events', '跨标签广播')
-          core.channel?.post({ plugin: rec.id, event, payload })
-        },
-        on: (event, fn) => {
-          need('events', '跨标签订阅')
-          return own(core.bus.on(`tab:${rec.id}:${event}`, fn, { owner: rec.id }))
-        },
-      },
-
-      /* 选主（跨标签单例） */
-      election: (opts = {}) => {
-        need('events', '参与选主')
-        const el = new Election(api.tabs, {
-          onPromote: opts.onPromote,
-          onDemote: opts.onDemote,
-          jitter: opts.jitter ?? 800,
-          // 身份取自跨标签通道的实例 id：同一标签内多个模块各自选主互不干扰，
-          // 而跨标签比较时又稳定唯一（仲裁靠它比大小）。
-          id: core.channel?.id ? `${core.channel.id}:${rec.id}` : undefined,
-          beatMs: opts.beatMs,
-          leaderTimeoutMs: opts.leaderTimeoutMs,
-        })
-        el.start()
-        own(() => el.stop())
-        return el
-      },
-
-      /* 工具 */
-      util: { esc, num, text, sleep, throttle, clone, satisfies },
-      log: (...a) => core.log(rec.id, ...a),
-      /** 记录本模块的错误 → 持久化到基座错误日志（面板「运行日志」可见） */
-      error: (msg) => {
-        const e = msg instanceof Error ? msg : new Error(String(msg))
-        core._pushErr({
-          kind: 'module-error',
-          id: rec.id,
-          msg: String(e.message),
-          stack: String(e.stack || '').slice(0, 400),
-        })
-      },
-      /** 主动打点：非错误的运行时事件（持久化，便于事后回溯） */
-      track: (event, detail) => {
-        core._pushErr({ kind: 'track', id: rec.id, msg: event + (detail ? ' · ' + String(detail) : '') })
-      },
-      /** 注册清理逻辑（插件被停用时调用） */
-      onDispose: (fn) => own(fn),
-    }
-    return api
-  }
+  _makeApi(rec) { return createPluginApi(rec, this) }
 
   /* ─────────── 核心自带面板 ─────────── */
 
@@ -789,345 +529,31 @@ export class Core {
       id: '__core_logs',
       name: '运行日志',
       order: 2,
-      render: (host) => this._renderLogTab(host),
+      render: (host) => renderLogTab(host, this),
     })
     this.ui.registerTab({
       id: '__core_plugins',
       name: '插件',
       order: 0,
-      render: (host) => this._renderPluginList(host),
+      render: (host) => renderPluginList(host, this),
     })
     this.ui.registerTab({
       id: '__core_settings',
       name: '基座设置',
       order: 1,
-      render: (host) => {
-        const schema = {
-          rate: { type: 'number', label: '请求最小间隔 (ms)', desc: '所有插件共享同一队列，过低会触发站点限流', default: 900 },
-          urlPoll: { type: 'number', label: 'URL 变化轮询 (ms)', desc: '无限滚动时追踪 ?p= 变化；0 = 只靠 popstate 事件', default: 700 },
-          launcher: { type: 'switch', label: '显示右下角入口按钮', default: true },
-          debug: { type: 'switch', label: '调试日志', default: false },
-        }
-        const cur = {
-          rate: coreStore.get('rate', 900),
-          urlPoll: coreStore.get('urlPoll', 700),
-          launcher: coreStore.get('launcher', true),
-          debug: coreStore.get('debug', false),
-        }
-        this.ui.buildForm(host, schema, cur, (v) => {
-          coreStore.set('rate', Math.max(200, Number(v.rate) || 900))
-          coreStore.set('urlPoll', Math.max(0, Number(v.urlPoll) || 0))
-          coreStore.set('launcher', !!v.launcher)
-          coreStore.set('debug', !!v.debug)
-          this.net.rate = coreStore.get('rate', 900)
-          this.debug = !!v.debug
-        })
-        const info = document.createElement('div')
-        info.className = 'lsb-row-desc'
-        info.style.marginTop = '12px'
-        info.textContent = `页面：${this.snapshot.page.type} · 站点版本：${this.snapshot.version || '未知'} · 身份：${
-          this.snapshot.me.guest ? '访客' : `${this.snapshot.me.name || 'uid ' + this.snapshot.me.uid}`
-        } · CSRF：${this.snapshot.csrf ? '已获取' : '无'}`
-        host.appendChild(info)
-      },
+      render: (host) => renderBaseSettings(host, this),
     })
     this.ui.registerTab({
       id: '__core_updates',
       name: '检查更新',
       order: 3,
-      render: (host) => this._renderUpdateTab(host),
+      render: (host) => renderUpdateTab(host, this),
     })
   }
 
-  /** 运行日志面板：持久化错误 + 实时运行日志，可过滤/搜索/导出 */
-  _renderLogTab(host) {
-    host.replaceChildren()
-    if (!this._logViewState) this._logViewState = { showErr: true, showRun: false, q: '' }
-    const st = this._logViewState
-    const fmtT = (t) => new Date(t).toLocaleTimeString('zh-CN')
-
-    const render = () => {
-      const errs = this.errors()
-      let rows = []
-      if (st.showErr)
-        rows.push(
-          ...errs.map((e) => ({
-            t: e.t,
-            lvl: 'err',
-            who: e.id || e.kind,
-            txt: `[${e.kind}${e.phase ? '/' + e.phase : ''}] ${e.msg}${e.n > 1 ? ' ×' + e.n : ''} · ${e.page}`,
-            tip: [e.stack, e.where].filter(Boolean).join('\n'),
-          })),
-        )
-      if (st.showRun)
-        rows.push(
-          ...this.logs()
-            .slice(-200)
-            .reverse()
-            .map((l) => ({ t: l.ts, lvl: 'run', who: l.scope, txt: l.args.join(' '), tip: '' })),
-        )
-      if (st.q) rows = rows.filter((r) => (r.who + ' ' + r.txt).toLowerCase().includes(st.q))
-      rows.sort((a, b) => b.t - a.t)
-
-      wrap.innerHTML =
-        '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' +
-        '<label style="font-size:12px;display:flex;gap:4px;align-items:center"><input type="checkbox" data-e' +
-        (st.showErr ? ' checked' : '') + '> 错误 (' + errs.length + ')</label>' +
-        '<label style="font-size:12px;display:flex;gap:4px;align-items:center"><input type="checkbox" data-r' +
-        (st.showRun ? ' checked' : '') + '> 运行日志</label>' +
-        '<input type="search" placeholder="过滤…" data-q value="' +
-        esc(st.q).replace(/"/g, '&quot;') + '" style="flex:1;min-width:120px;padding:4px 7px;border:1px solid var(--line,#ddd);border-radius:6px;background:var(--bg,#fff);color:var(--text,#222)">' +
-        '<button class="lsb-btn" data-export>导出</button>' +
-        '<button class="lsb-btn" data-clear>清空错误</button></div>' +
-        '<div style="max-height:52vh;overflow:auto;border-top:1px solid var(--line-soft,#eee)">' +
-        (rows.length
-          ? rows
-              .map(
-                (r) =>
-                  '<div class="lsb-row"' + (r.tip ? ' title="' + esc(r.tip).replace(/"/g, '&quot;') + '"' : '') + '>' +
-                  '<span style="color:var(--text-muted,#888);font-size:11px;min-width:64px">' + fmtT(r.t) + '</span>' +
-                  '<span class="lsb-badge' + (r.lvl === 'err' ? ' is-err' : '') + '">' + esc(String(r.who)) + '</span>' +
-                  '<span style="margin-left:8px;font-size:12px;word-break:break-word">' + esc(r.txt) + '</span></div>',
-              )
-              .join('')
-          : '<div class="lsb-empty">暂无记录。</div>') +
-        '</div>'
-
-      wrap.querySelector('[data-e]').onchange = (e) => {
-        st.showErr = e.target.checked
-        render()
-      }
-      wrap.querySelector('[data-r]').onchange = (e) => {
-        st.showRun = e.target.checked
-        render()
-      }
-      wrap.querySelector('[data-q]').oninput = (e) => {
-        st.q = e.target.value.toLowerCase()
-        render()
-      }
-      wrap.querySelector('[data-clear]').onclick = async () => {
-        if (await this.ui.confirm('清空全部错误记录？')) {
-          this.clearErrors()
-          render()
-        }
-      }
-      wrap.querySelector('[data-export]').onclick = () => {
-        try {
-          const blob = new Blob([JSON.stringify({ errors: this.errors(), runLog: this.logs() }, null, 2)], {
-            type: 'application/json',
-          })
-          const a = document.createElement('a')
-          a.href = URL.createObjectURL(blob)
-          a.download = 'lsb-logs-' + Date.now() + '.json'
-          a.click()
-          setTimeout(() => URL.revokeObjectURL(a.href), 4000)
-        } catch (e) {
-          this.ui.toast('导出失败：' + e.message, { type: 'error' })
-        }
-      }
-    }
-
-    const wrap = document.createElement('div')
-    host.appendChild(wrap)
-    render()
-  }
-
-  _renderUpdateTab(host) {
-    const wrap = document.createElement('div')
-    host.appendChild(wrap)
-    let gen = 0
-    let inflight = null
-    const lts = isLtsChannel()
-
-    const scripts = lts
-      ? { lts: SCRIPTS.find((s) => s.id === 'lts') }
-      : {
-          hydrogen: SCRIPTS.find((s) => s.id === 'hydrogen'),
-          oxygen: SCRIPTS.find((s) => s.id === 'oxygen'),
-        }
-
-    const snapshot = () => {
-      if (lts) {
-        return { lts: { local: ltsDisplayVersion() || VERSION, missing: false } }
-      }
-      const ox = localOxygenVersion([...this.plugins.values()])
-      return {
-        hydrogen: { local: VERSION, missing: false },
-        oxygen: { local: ox, missing: !ox },
-      }
-    }
-
-    const paint = (states, { busy = false } = {}) => {
-      const loc = snapshot()
-      const badgeClass = (status) => {
-        if (status === 'behind' || status === 'fail' || status === 'invalid') return 'lsb-badge is-err'
-        if (status === 'equal') return 'lsb-badge is-on'
-        return 'lsb-badge'
-      }
-      const badgeText = (st) => {
-        if (!st || !st.status) return ''
-        return {
-          behind: '有更新',
-          equal: '已是最新',
-          ahead: '比商店新',
-          missing: '未安装',
-          invalid: '版本号无效',
-          fail: '查询失败',
-          unlisted: '',
-        }[st.status] || ''
-      }
-      const desc = (id, st) => {
-        const local = loc[id].local
-        if (!st || !st.status) return local ? `本地 ${local}` : ''
-        if (st.status === 'missing') return ''
-        if (st.status === 'unlisted') return 'LTS 商店页公布后即可对照'
-        if (st.status === 'behind' || st.status === 'ahead') return `本地 ${local} · 商店 ${st.store}`
-        if (st.status === 'equal') return `本地与商店同为 ${local}`
-        if (st.status === 'invalid') return [local, st.store].filter(Boolean).join(' · ')
-        if (st.status === 'fail') {
-          if (!st.connect) return '无法读取 Greasy Fork'
-          return id === 'lts' ? 'LTS 需要允许 greasyfork.org 跨域' : '氢需要允许 greasyfork.org 跨域'
-        }
-        return ''
-      }
-      const install = (id, st) => {
-        const script = scripts[id]
-        const show = st && (st.status === 'behind' || st.status === 'missing')
-        if (!show) return ''
-        const href = st.status === 'missing' ? script.installUrl : installHref(st.parsed, script.installUrl)
-        return `<a class="lsb-btn is-primary" data-install href="${esc(href)}" target="_blank" rel="noopener noreferrer">打开安装页</a>`
-      }
-      const row = (id) => {
-        const st = states[id] || (loc[id].missing ? { status: 'missing' } : null)
-        const local = loc[id].local
-        const bt = badgeText(st)
-        const ver = local ? `<span class="lsb-badge">v${esc(local)}</span>` : ''
-        const bd = bt ? `<span class="${badgeClass(st.status)}">${esc(bt)}</span>` : ''
-        const d = desc(id, st)
-        return `<div class="lsb-row" data-script="${id}">
-          <div class="lsb-row-main">
-            <div class="lsb-row-name">${esc(scripts[id].label)} ${ver}${bd}</div>
-            ${d ? `<div class="lsb-row-desc">${esc(d)}</div>` : ''}
-          </div>${install(id, st)}</div>`
-      }
-      const rows = lts ? row('lts') : row('hydrogen') + row('oxygen')
-      const footer = lts
-        ? '安装仍由油猴接管。请只留 LINUX.SB（LTS），不要同时开氢或氧。'
-        : '安装仍由油猴接管；两个都要装，先氢后氧。'
-      wrap.innerHTML =
-        '<div class="lsb-actions" style="border:0;padding:0 0 8px;justify-content:flex-start">' +
-        `<button class="lsb-btn is-primary" type="button" data-check${busy ? ' disabled' : ''}>${busy ? '查询中…' : '对照 Greasy Fork'}</button></div>` +
-        rows +
-        `<div class="lsb-row-desc">${footer}</div>`
-      const btn = wrap.querySelector('[data-check]')
-      if (btn && !busy) btn.onclick = () => run()
-    }
-
-    const loadOne = async (script) => {
-      try {
-        const json = await this.net.json(gfJsonUrl(script.gfId), { external: true })
-        const parsed = parseStoreScript(json)
-        if (!parsed) return { error: 'read' }
-        return { parsed }
-      } catch (e) {
-        const msg = String((e && e.message) || e)
-        return { error: /域名未放行|跨域请求被拒绝/.test(msg) ? 'connect' : 'read' }
-      }
-    }
-
-    const fromLoad = (res, local) => {
-      if (res.status !== 'fulfilled') {
-        return { status: 'fail', connect: false }
-      }
-      const v = res.value
-      if (v.error === 'connect') return { status: 'fail', connect: true }
-      if (v.error) return { status: 'fail', connect: false }
-      const status = classifyVersion(local, v.parsed.version)
-      return { status, store: v.parsed.version, parsed: v.parsed }
-    }
-
-    const run = () => {
-      if (lts) {
-        const script = scripts.lts
-        if (!script.gfId) {
-          paint({ lts: { status: 'unlisted' } })
-          return
-        }
-        if (inflight) return inflight
-        const my = ++gen
-        inflight = (async () => {
-          paint({}, { busy: true })
-          const loc = snapshot()
-          const settled = await Promise.allSettled([loadOne(script)])
-          if (my !== gen || !wrap.isConnected) return
-          const states = { lts: fromLoad(settled[0], loc.lts.local) }
-          if (states.lts.status === 'fail') this.log('core', '检查更新查询失败')
-          paint(states)
-        })().finally(() => {
-          if (inflight && my === gen) inflight = null
-        })
-        return inflight
-      }
-      if (inflight) return inflight
-      const my = ++gen
-      inflight = (async () => {
-        paint({ oxygen: snapshot().oxygen.missing ? { status: 'missing' } : null }, { busy: true })
-        const loc = snapshot()
-        const jobs = [loadOne(scripts.hydrogen)]
-        if (!loc.oxygen.missing) jobs.push(loadOne(scripts.oxygen))
-        const settled = await Promise.allSettled(jobs)
-        if (my !== gen || !wrap.isConnected) return
-        const hRes = settled[0]
-        const states = { hydrogen: fromLoad(hRes, loc.hydrogen.local) }
-        if (loc.oxygen.missing) states.oxygen = { status: 'missing' }
-        else states.oxygen = fromLoad(settled[1], loc.oxygen.local)
-        if (states.hydrogen.status === 'fail' || states.oxygen.status === 'fail') {
-          this.log('core', '检查更新查询失败')
-        }
-        paint(states)
-      })().finally(() => {
-        if (inflight && my === gen) inflight = null
-      })
-      return inflight
-    }
-
-    if (lts) {
-      paint(scripts.lts.gfId ? {} : { lts: { status: 'unlisted' } })
-    } else {
-      paint({ oxygen: snapshot().oxygen.missing ? { status: 'missing' } : null })
-    }
-  }
-
-  _renderPluginList(host) {
-    if (!this.plugins.size) {
-      host.innerHTML = '<div class="lsb-empty">尚未加载任何插件。安装依附脚本后会自动出现在这里。</div>'
-      return
-    }
-    for (const rec of this.plugins.values()) {
-      const row = document.createElement('div')
-      row.className = 'lsb-row'
-      const stateLabel = { active: '运行中', disabled: '已停用', error: '出错', skipped: '本页不适用', registered: '等待依赖' }[rec.state]
-      const cls = rec.state === 'active' ? ' is-on' : rec.state === 'error' ? ' is-err' : ''
-      row.innerHTML = `
-        <div class="lsb-row-main">
-          <div class="lsb-row-name">${esc(rec.name)} <span class="lsb-badge">v${esc(rec.version)}</span><span class="lsb-badge${cls}">${esc(stateLabel)}</span></div>
-          <div class="lsb-row-desc">${esc(rec.description || rec.id)}${rec.error ? ` · ${esc(rec.error)}` : ''}</div>
-          <div class="lsb-row-desc">权限：${esc(rec.permissions.join(' / '))}</div>
-        </div>`
-      const btn = document.createElement('button')
-      btn.className = 'lsb-btn'
-      btn.textContent = rec.state === 'disabled' ? '启用' : '停用'
-      btn.onclick = () => {
-        if (rec.state === 'disabled') this.enable(rec.id)
-        else this.disable(rec.id)
-        this.ui.toast('设置已生效，刷新页面后完全应用', { type: 'info' })
-        host.innerHTML = ''
-        this._renderPluginList(host)
-      }
-      row.appendChild(btn)
-      host.appendChild(row)
-    }
-  }
+  _renderLogTab(host) { return renderLogTab(host, this) }
+  _renderUpdateTab(host) { return renderUpdateTab(host, this) }
+  _renderPluginList(host) { return renderPluginList(host, this) }
 
   /** 对外只读信息，供插件/调试使用 */
   info() {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·AI 总结
 // @namespace    https://linux.sb/
-// @version      1.1.5
+// @version      1.4.0
 // @description  帖子页一键调用 OpenAI 或 Anthropic 接口总结全帖（可选汇总所有分页，结果按风格/范围分槽缓存）。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -24,10 +24,10 @@
   const manifest = {
     id: 'ai-summary',
     name: 'AI 总结',
-    version: '1.1.5',
+    version: '1.4.0',
     description: '调用 OpenAI 或 Anthropic 接口总结当前帖子；氢面板「AI 历史」可回看全部记录',
     author: 'you',
-    requires: { base: '^0.1.0' },
+    requires: { base: '^0.1.53' },
     permissions: ['read', 'storage', 'ui', 'events', 'net'],
     config: {
       apiUrl: { type: 'text', label: 'API 端点', default: '', desc: 'OpenAI：…/v1/chat/completions；Anthropic：…/v1/messages' },
@@ -55,6 +55,7 @@
         default: 120,
         desc: '长帖总结常需 30~90s；过小会在模型答完前被掐断',
       },
+      streamAnswers: { type: 'switch', label: '工作台流式回答', default: true, desc: '回答逐步显示；规划使用完整 JSON。端点不支持时可关闭。' },
       customPrompt: { type: 'textarea', label: '附加要求（追加在提示词后）', default: '', rows: 3 },
     },
   }
@@ -232,8 +233,98 @@
 
   function setup(api) {
     let cfg = api.config()
+    const diagnostics = api.ai.diagnostics
+    const CAPABILITY_CACHE_KEY = 'capabilities'
+    const CAPABILITY_CACHE_TTL = 24 * 60 * 60 * 1000
+    let probeInFlight = null
+    let providerCapabilities = null
+    let lastDiagnostic = null
+    let flowSequence = 0
+    let traceFlow = ''
+    let traceEvents = []
+
+    function newFlowId() {
+      flowSequence = (flowSequence + 1) % 1000000
+      const now = Date.now().toString(36)
+      const random = Math.random().toString(36).slice(2, 8)
+      return `summary-${now}-${flowSequence.toString(36)}-${random}`.slice(0, 100)
+    }
+
+    function flowIdFor(value) {
+      const candidate = String(value || '').trim()
+      return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/.test(candidate) ? candidate : newFlowId()
+    }
+
+    function renderTracePanel() {
+      const host = document.querySelector('[data-ai-summary-trace]')
+      if (!host) return
+      host.replaceChildren()
+      for (const event of traceEvents) {
+        const row = document.createElement('div')
+        row.className = 'lsb-summary-trace-event'
+        row.dataset.stage = event.stage
+        row.dataset.state = event.state
+        row.textContent = `${event.title}：${event.summary}`
+        host.appendChild(row)
+      }
+    }
+
+    function beginTrace(flowId) {
+      traceFlow = flowId
+      traceEvents = []
+      renderTracePanel()
+    }
+
+    function emitTrace(flowId, stage, state, {
+      title,
+      summary,
+      evidence = 'unverified',
+      counts = {},
+      citations = [],
+      reasonCode,
+    } = {}) {
+      const emit = api.ai?.trace?.emit
+      if (typeof emit !== 'function') return
+      const event = {
+        id: `${flowId}:${stage}`,
+        flowId,
+        stage,
+        state,
+        title: String(title || stage),
+        summary: String(summary || ''),
+        evidence,
+        counts: {
+          selected: Number(counts.selected) || 0,
+          read: Number(counts.read) || 0,
+          matched: Number(counts.matched) || 0,
+          citations: Number(counts.citations) || 0,
+        },
+        citations: Array.isArray(citations) ? citations : [],
+      }
+      if (reasonCode) event.reasonCode = reasonCode
+      try {
+        const safe = api.ai?.trace?.sanitize ? api.ai.trace.sanitize(event) : event
+        if (traceFlow === flowId) {
+          traceEvents.push(safe)
+          if (traceEvents.length > 8) traceEvents.splice(0, traceEvents.length - 8)
+          renderTracePanel()
+        }
+        emit(event)
+      } catch {
+        // Trace must never change the summary result or error path.
+      }
+    }
+
+    function collectTraceCounts(meta) {
+      const floors = Math.max(0, Number(meta?.floors) || 0)
+      const pages = Math.max(0, Number(meta?.pagesFetched) || 0)
+      return { selected: floors, read: floors, matched: pages, citations: 0 }
+    }
+
     api.on('config:changed:ai-summary', () => {
       cfg = api.config()
+      providerCapabilities = null
+      lastDiagnostic = null
       refreshButtons() // 换风格后按钮态要跟着变（新槽位可能还没有缓存）
     })
 
@@ -347,18 +438,11 @@
     }
 
     function isAnthropic() {
-      const pick = cfg.apiStyle || '自动'
-      if (pick === 'Anthropic') return true
-      if (pick === 'OpenAI') return false
-      try {
-        const u = new URL(cfg.apiUrl, location.href)
-        if (/(?:^|\.)anthropic\.com$/i.test(u.hostname)) return true
-        const path = u.pathname.replace(/\/+$/, '')
-        if (path.endsWith('/messages') && !path.endsWith('/chat/completions')) return true
-      } catch {
-        /* 端点填坏时按 OpenAI 发，错误会在请求时报出来 */
-      }
-      return false
+      return diagnostics.normalizeEndpoint({
+        apiUrl: cfg.apiUrl,
+        apiStyle: cfg.apiStyle,
+        model: cfg.model,
+      }, location.href).protocol === 'anthropic'
     }
 
     function extractText(j) {
@@ -375,12 +459,43 @@
       return null
     }
 
+    function httpFailureMessage(status, body) {
+      const code = Number(status)
+      const raw = String(body ?? '').trim()
+      const htmlLike = /<!doctype\s+html|<html[\s>]|cloudflare|just a moment|cf-ray/i.test(raw)
+      const common = code === 401 || code === 403
+        ? '端点或 API Key 被拒绝'
+        : code === 429
+          ? '请求过于频繁，请稍后重试'
+          : '服务端拒绝了请求'
+      if (htmlLike) return `HTTP ${code}：${common}；响应疑似是 Cloudflare 或网关页面，请检查 API 端点、代理和 Key`
+      let detail = ''
+      try {
+        const parsed = JSON.parse(raw)
+        detail = parsed?.error?.message || parsed?.message || ''
+      } catch {
+        /* 非 JSON 响应只保留有限的可读文本 */
+      }
+      detail = String(detail || raw)
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/(?:bearer\s+|api[_ -]?key\s*[:=]?|authorization\s*[:=]?|cookie\s*[:=]?|token\s*[:=]?|secret\s*[:=]?)[^\s,;]*/gi, '[已隐藏]')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 160)
+      return `HTTP ${code}：${detail || common}`
+    }
+
     /* ── 调用 LLM ── */
-    async function callLLM(content) {
-      const sys = SYSTEM[cfg.style] || SYSTEM['要点速览']
-      const user = cfg.customPrompt ? `${content}\n\n用户附加要求：${cfg.customPrompt}` : content
-      const timeout = Math.max(5, Number(cfg.timeoutSec) || 120) * 1000
+    async function generateModel({ system, user, timeout, signal, onDelta } = {}) {
+      api.ai.throwIfAborted(signal)
+      const sys = String(system || '')
+      const usr = String(user || '')
+      const timeoutMs =
+        timeout == null
+          ? Math.max(5, Number(cfg.timeoutSec) || 120) * 1000
+          : Math.max(5000, Number(timeout) || 0)
       const anthropic = isAnthropic()
+      const streaming = typeof onDelta === 'function' && cfg.streamAnswers !== false
       const headers = { 'content-type': 'application/json' }
       let body
       if (anthropic) {
@@ -390,41 +505,65 @@
           model: cfg.model,
           max_tokens: 4096,
           temperature: 0.4,
-          stream: false,
+          stream: streaming,
           system: sys,
-          messages: [{ role: 'user', content: user }],
+          messages: [{ role: 'user', content: usr }],
         }
       } else {
         headers.authorization = `Bearer ${cfg.apiKey}`
         body = {
           model: cfg.model,
           temperature: 0.4,
-          stream: false,
+          stream: streaming,
           messages: [
             { role: 'system', content: sys },
-            { role: 'user', content: user },
+            { role: 'user', content: usr },
           ],
         }
       }
-      const res = await api.net.raw(cfg.apiUrl, {
+      const startedAt = Date.now()
+      let streamMode = ''
+      let prefix = ''
+      let decoder = null
+      const receive = (chunk) => {
+        api.ai.throwIfAborted(signal)
+        if (streamMode === 'json') return
+        if (!streamMode) {
+          prefix += chunk
+          const start = prefix.replace(/^\uFEFF/, '').trimStart()
+          if (/^[\[{]/.test(start)) { streamMode = 'json'; prefix = ''; return }
+          if (!/^(?:data:|event:|id:|retry:|:)/.test(start)) return
+          streamMode = 'sse'
+          decoder = api.ai.createAnswerStream({ protocol: anthropic ? 'anthropic' : 'openai', onDelta })
+          decoder.push(prefix)
+          prefix = ''
+          return
+        }
+        decoder.push(chunk)
+      }
+      const request = (stream) => api.net.raw(cfg.apiUrl, {
         method: 'POST',
         external: true,
         // queue:false —— 不占用基座的站内限速队列。一次 LLM 调用可能挂 60s+，
         // 排队会让实时流/悬浮卡/哨兵的站内请求全部饿死。
         queue: false,
-        timeout,
+        timeout: timeoutMs,
+        signal,
+        onChunk: stream ? receive : undefined,
         headers,
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, stream }),
       })
-      if (!res.ok) {
-        let extra = String(res.text).slice(0, 180)
-        try {
-          const err = JSON.parse(res.text)
-          extra = err.error?.message || err.message || extra
-        } catch {
-          /* 原文切片即可 */
-        }
-        throw new Error(`HTTP ${res.status}：${extra}`)
+      let res = await request(streaming)
+      api.ai.throwIfAborted(signal)
+      if (streaming && !streamMode && [400, 422].includes(res.status) && /(?:stream[\s\S]{0,100}(?:not supported|unsupported|not allowed|unknown|unrecognized)|(?:unsupported|unknown|unrecognized|not supported)[\s\S]{0,100}stream)/i.test(String(res.text))) {
+        res = await request(false)
+        api.ai.throwIfAborted(signal)
+      }
+      if (!res.ok) throw new Error(httpFailureMessage(res.status, res.text))
+      if (streamMode === 'sse') {
+        const text = decoder.finish()
+        api.ai.throwIfAborted(signal)
+        return { text, meta: { model: cfg.model, ms: Date.now() - startedAt, streamed: true } }
       }
       let j
       try {
@@ -434,7 +573,246 @@
       }
       const text = extractText(j)
       if (!text) throw new Error('响应里没有找到文本：' + JSON.stringify(j).slice(0, 200))
-      return text
+      if (typeof onDelta === 'function') onDelta(text, text)
+      return { text, meta: { model: cfg.model, ms: Date.now() - startedAt } }
+    }
+
+    function capabilityFlags(value = {}) {
+      return {
+        json: Boolean(value.json),
+        stream: Boolean(value.stream),
+        cancel: Boolean(value.cancel),
+      }
+    }
+
+    function capabilityCache() {
+      const raw = api.store.get(CAPABILITY_CACHE_KEY, { version: 1, entries: {} })
+      if (!raw || typeof raw !== 'object' || raw.version !== 1 || !raw.entries || typeof raw.entries !== 'object') {
+        return { version: 1, entries: {} }
+      }
+      return raw
+    }
+
+    function saveCapability(key, result, diagnostic) {
+      const cache = capabilityCache()
+      cache.entries[key] = {
+        savedAt: Date.now(),
+        result: { capabilities: capabilityFlags(result?.capabilities), protocol: String(result?.protocol || '') },
+        diagnostic,
+      }
+      const keys = Object.keys(cache.entries)
+      for (const oldKey of keys.slice(0, Math.max(0, keys.length - 12))) delete cache.entries[oldKey]
+      api.store.set(CAPABILITY_CACHE_KEY, cache)
+    }
+
+    function cachedCapability(key, force) {
+      if (force) return null
+      const entry = capabilityCache().entries[key]
+      if (!entry || !Number.isFinite(Number(entry.savedAt)) || Date.now() - Number(entry.savedAt) > CAPABILITY_CACHE_TTL) return null
+      const diagnostic = diagnostics.redactDiagnostic(entry.diagnostic)
+      const result = {
+        protocol: String(entry.result?.protocol || diagnostic.protocol || ''),
+        capabilities: capabilityFlags(entry.result?.capabilities),
+      }
+      providerCapabilities = result.capabilities
+      lastDiagnostic = diagnostic
+      return { result, diagnostic, cached: true }
+    }
+
+    function probeHeaders() {
+      const anthropic = isAnthropic()
+      const headers = { 'content-type': 'application/json' }
+      if (anthropic) {
+        headers['x-api-key'] = cfg.apiKey
+        headers['anthropic-version'] = '2023-06-01'
+      } else {
+        headers.authorization = `Bearer ${cfg.apiKey}`
+      }
+      return headers
+    }
+
+    function probeBody(stream) {
+      const question = '连接自检：只返回 OK'
+      if (isAnthropic()) {
+        return {
+          model: cfg.model,
+          max_tokens: 16,
+          temperature: 0,
+          stream,
+          system: '只输出 OK，不要解释。',
+          messages: [{ role: 'user', content: question }],
+        }
+      }
+      return {
+        model: cfg.model,
+        temperature: 0,
+        stream,
+        messages: [
+          { role: 'system', content: '只输出 OK，不要解释。' },
+          { role: 'user', content: question },
+        ],
+      }
+    }
+
+    async function probeAttempt({ stream, signal }) {
+      let mode = ''
+      let prefix = ''
+      let jsonText = ''
+      let decoder = null
+      let sawDelta = false
+      const protocol = isAnthropic() ? 'anthropic' : 'openai'
+      const receive = (chunk) => {
+        api.ai.throwIfAborted(signal)
+        const text = String(chunk || '')
+        if (!text) return
+        if (mode === 'json') {
+          jsonText += text
+          return
+        }
+        prefix += text
+        const start = prefix.replace(/^\uFEFF/, '').trimStart()
+        if (/^[\[{]/.test(start)) {
+          mode = 'json'
+          jsonText = prefix
+          prefix = ''
+          return
+        }
+        if (!/^(?:data:|event:|id:|retry:|:)/.test(start)) return
+        mode = 'sse'
+        decoder = api.ai.createAnswerStream({
+          protocol,
+          onDelta: () => { sawDelta = true },
+          maxChars: 200,
+        })
+        decoder.push(prefix)
+        prefix = ''
+      }
+      const response = await api.net.raw(cfg.apiUrl, {
+        method: 'POST',
+        external: true,
+        queue: false,
+        timeout: Math.max(5000, Number(cfg.timeoutSec) || 120) * 1000,
+        signal,
+        onChunk: stream ? receive : undefined,
+        headers: probeHeaders(),
+        body: JSON.stringify(probeBody(stream)),
+      })
+      const unsupported = stream && !mode && [400, 422].includes(Number(response.status)) && /(?:stream[\s\S]{0,100}(?:not supported|unsupported|not allowed|unknown|unrecognized)|(?:unsupported|unknown|unrecognized|not supported)[\s\S]{0,100}stream)/i.test(String(response.text || ''))
+      if (unsupported) return { response, unsupported: true, mode: '', text: '' }
+      let text = ''
+      if (mode === 'sse') {
+        if (prefix) decoder.push(prefix)
+        text = decoder.finish()
+      } else {
+        text = jsonText || String(response.text || '')
+        let parsed
+        try { parsed = JSON.parse(text) } catch { throw new Error('probe-protocol-invalid') }
+        text = extractText(parsed) || ''
+        if (!text) throw new Error('probe-protocol-invalid')
+        mode = 'json'
+      }
+      return {
+        response,
+        unsupported: false,
+        mode,
+        sawDelta,
+        completed: true,
+        text,
+      }
+    }
+
+    async function probe({ signal, force = false } = {}) {
+      if (probeInFlight) return probeInFlight
+      const endpoint = diagnostics.normalizeEndpoint({
+        apiUrl: cfg.apiUrl,
+        apiStyle: cfg.apiStyle,
+        model: cfg.model,
+      }, location.href)
+      if (!String(cfg.apiKey || '').trim()) {
+        const diagnostic = diagnostics.redactDiagnostic({
+          protocol: endpoint.protocol,
+          outcome: 'invalid',
+          reasonCode: 'configured-missing',
+          statusClass: 'unknown',
+        })
+        lastDiagnostic = diagnostic
+        providerCapabilities = null
+        return { result: null, diagnostic, cached: false }
+      }
+      if (!endpoint.valid) {
+        const diagnostic = diagnostics.redactDiagnostic({
+          protocol: endpoint.protocol,
+          outcome: 'invalid',
+          reasonCode: 'endpoint-invalid',
+          statusClass: 'unknown',
+        })
+        lastDiagnostic = diagnostic
+        providerCapabilities = null
+        return { result: null, diagnostic, cached: false }
+      }
+      const cached = cachedCapability(endpoint.key, force)
+      if (cached) return cached
+      const run = (async () => {
+        const startedAt = Date.now()
+        const streamRequested = cfg.streamAnswers !== false
+        try {
+          api.ai.throwIfAborted(signal)
+          let attempt = await probeAttempt({ stream: streamRequested, signal })
+          let fallback = false
+          if (streamRequested && attempt.unsupported) {
+            fallback = true
+            attempt = await probeAttempt({ stream: false, signal })
+          }
+          api.ai.throwIfAborted(signal)
+          const classified = diagnostics.classifyProbeResponse({
+            protocol: endpoint.protocol,
+            status: attempt.response?.status,
+            contentType: attempt.mode === 'sse' ? 'text/event-stream' : 'application/json',
+            sawDelta: attempt.sawDelta,
+            completed: attempt.completed,
+            elapsedMs: Date.now() - startedAt,
+          })
+          const diagnostic = diagnostics.redactDiagnostic({
+            ...classified,
+            reasonCode: fallback ? 'stream-unsupported' : classified.reasonCode,
+          })
+          const result = {
+            text: attempt.text,
+            protocol: endpoint.protocol,
+            capabilities: capabilityFlags({
+              json: attempt.mode === 'json',
+              stream: attempt.mode === 'sse',
+              cancel: false,
+            }),
+          }
+          providerCapabilities = result.capabilities
+          lastDiagnostic = diagnostic
+          saveCapability(endpoint.key, result, diagnostic)
+          return { result, diagnostic, cached: false }
+        } catch (error) {
+          const aborted = Boolean(signal?.aborted) || error?.name === 'AbortError' || /abort|取消/i.test(String(error?.message || error))
+          const timeout = /timeout|超时/i.test(String(error?.message || error))
+          const diagnostic = diagnostics.redactDiagnostic({
+            protocol: endpoint.protocol,
+            outcome: aborted ? 'cancelled' : 'error',
+            reasonCode: aborted ? 'cancelled' : timeout ? 'timeout' : String(error?.message || '').includes('probe-protocol-invalid') ? 'protocol-invalid' : 'network',
+            statusClass: 'network',
+            elapsedMs: Date.now() - startedAt,
+          })
+          lastDiagnostic = diagnostic
+          providerCapabilities = aborted ? { json: false, stream: false, cancel: true } : null
+          return { result: null, diagnostic, cached: false }
+        }
+      })()
+      probeInFlight = run.finally(() => { probeInFlight = null })
+      return probeInFlight
+    }
+
+    async function callLLM(content) {
+      const sys = SYSTEM[cfg.style] || SYSTEM['要点速览']
+      const user = cfg.customPrompt ? `${content}\n\n用户附加要求：${cfg.customPrompt}` : content
+      const result = await generateModel({ system: sys, user })
+      return result.text
     }
 
     /* ── 结果 / 进度展示 ── */
@@ -480,6 +858,7 @@
           <div class="lsb-summary-wait">
             <div class="lsb-sum-status"></div>
             <div class="lsb-row-desc lsb-sum-clock"></div>
+            <div class="lsb-summary-trace" data-ai-summary-trace aria-live="polite"></div>
             <div class="lsb-row-desc">长帖可能需要一两分钟。完成后结果会显示在这里；点 × 只是先收起窗口。</div>
           </div>
         </div>`
@@ -502,6 +881,7 @@
       mask.onclick = (e) => {
         if (e.target === mask) hide()
       }
+      renderTracePanel()
     }
 
     function setWait(status) {
@@ -510,7 +890,7 @@
       else showWait(status)
     }
 
-    function show(text, meta, { fromCache = false } = {}) {
+    function show(text, meta, { fromCache = false, flowId = '' } = {}) {
       stopWaitClock()
       const { mask, panel } = openShell()
       const facts = [
@@ -529,7 +909,10 @@
           <span class="lsb-ver">${facts.join(' · ')}</span>
           <button class="lsb-panel-close">×</button>
         </div>
-        <div class="lsb-view"><div class="lsb-sum-text lsb-md"></div></div>
+        <div class="lsb-view">
+          <div class="lsb-sum-text lsb-md"></div>
+          <div class="lsb-summary-trace" data-ai-summary-trace aria-live="polite"></div>
+        </div>
         <div class="lsb-actions">
           <button class="lsb-btn" data-again>重新生成</button>
           <button class="lsb-btn" data-history>历史</button>
@@ -542,6 +925,12 @@
       } catch {
         box.textContent = text
       }
+      if (flowId) traceFlow = flowId
+      else {
+        traceFlow = ''
+        traceEvents = []
+      }
+      renderTracePanel()
       const close = () => {
         mask.remove()
         panel.remove()
@@ -577,7 +966,10 @@
           <strong>AI 总结失败</strong>
           <button class="lsb-panel-close">×</button>
         </div>
-        <div class="lsb-view"><div class="lsb-empty"></div></div>
+        <div class="lsb-view">
+          <div class="lsb-empty"></div>
+          <div class="lsb-summary-trace" data-ai-summary-trace aria-live="polite"></div>
+        </div>
         <div class="lsb-actions">
           <button class="lsb-btn" data-again>重试</button>
           <button class="lsb-btn is-primary" data-close>关闭</button>
@@ -596,11 +988,12 @@
         close()
         void run(null, { force: true })
       }
+      renderTracePanel()
     }
 
     /* ── 执行 ── */
     let running = false
-    async function run(btn, { force = false } = {}) {
+    async function run(btn, { force = false, flowId = '' } = {}) {
       if (!cfg.apiUrl || !cfg.apiKey) {
         api.ui.toast('请先在面板填写 API 端点与 Key', { type: 'error' })
         api.ui.openPanel('ai-summary')
@@ -612,26 +1005,70 @@
         return
       }
       running = true
+      const flow = flowIdFor(flowId)
+      beginTrace(flow)
       const old = btn?.textContent
       if (btn) {
         btn.textContent = '⏳ 总结中…'
         btn.disabled = true
       }
       showWait('正在采集本帖…')
+      let traceStage = 'scope'
+      emitTrace(flow, 'scope', 'active', {
+        title: '读取范围',
+        summary: cfg.fetchAll ? '已选择当前主题的全部分页' : `已选择当前主题第 ${api.page.page || 1} 页`,
+        evidence: 'verified',
+      })
+      emitTrace(flow, 'scope', 'complete', {
+        title: '读取范围',
+        summary: cfg.fetchAll ? '读取范围为当前主题的全部分页' : `读取范围为当前主题第 ${api.page.page || 1} 页`,
+        evidence: 'verified',
+      })
       try {
+        traceStage = 'read'
+        emitTrace(flow, 'read', 'active', {
+          title: '读取帖子',
+          summary: '正在从本地页面整理帖子内容',
+        })
         const { content, meta } = await collect()
+        const counts = collectTraceCounts(meta)
+        emitTrace(flow, 'read', 'complete', {
+          title: '读取帖子',
+          summary: `已读取 ${counts.read} 个楼层，覆盖 ${counts.matched} 页`,
+          evidence: 'verified',
+          counts,
+        })
+        traceStage = 'answer'
         const hit = cached()
         if (!force && hit && hit.meta.hash === meta.hash) {
-          show(hit.text, hit.meta, { fromCache: true })
+          emitTrace(flow, 'answer', 'complete', {
+            title: '生成总结',
+            summary: '已使用缓存的总结结果',
+            evidence: 'verified',
+            counts,
+          })
+          show(hit.text, { ...hit.meta, cached: true, source: 'cache' }, { fromCache: true, flowId: flow })
           return
         }
         setWait(`已采集 ${meta.floors} 楼 · 正在请求 ${cfg.model || '模型'}…`)
+        emitTrace(flow, 'answer', 'active', {
+          title: '生成总结',
+          summary: '正在请求模型生成总结',
+          evidence: 'unverified',
+          counts,
+        })
         const t0 = Date.now()
         const text = await callLLM(content)
         const record = {
           text,
           meta: { ...meta, model: cfg.model, style: cfg.style, ts: Date.now(), ms: Date.now() - t0 },
         }
+        emitTrace(flow, 'answer', 'complete', {
+          title: '生成总结',
+          summary: '模型已返回总结文本',
+          evidence: 'partial',
+          counts,
+        })
         api.store.set(cacheKey(), record)
         const ck = api.store.keys().filter((k) => k.startsWith('s:'))
         if (ck.length > 80) {
@@ -640,9 +1077,15 @@
             .sort((a, b) => a.ts - b.ts)
           for (const r of rows.slice(0, rows.length - 80)) api.store.del(r.k)
         }
-        show(text, record.meta)
+        show(text, record.meta, { flowId: flow })
         api.ui.toast('总结完成', { type: 'success' })
       } catch (e) {
+        emitTrace(flow, traceStage, 'failed', {
+          title: traceStage === 'read' ? '读取帖子' : '生成总结',
+          summary: traceStage === 'read' ? '帖子读取失败' : '总结请求失败',
+          evidence: 'unverified',
+          reasonCode: traceStage === 'read' ? 'read-failed' : 'trace-invalid',
+        })
         const msg = String(e.message || e)
         api.ui.toast(msg, { type: 'error', title: 'AI 总结失败' })
         showError(msg)
@@ -771,9 +1214,86 @@
     })
 
     /* ── 设置页（由 manifest.config 自动生成） ── */
-    api.ui.configTab({ name: 'AI 总结', order: 52 })
+    function diagnosticLabel(diagnostic) {
+      const labels = {
+        ok: '连接正常',
+        'configured-missing': '未配置端点或 Key',
+        'endpoint-invalid': '端点地址无效',
+        'protocol-invalid': '返回协议无法识别',
+        'http-auth': '认证失败（检查 API Key）',
+        'http-rate-limit': '请求被限流',
+        'http-server': '模型服务端错误',
+        'http-error': '模型端点返回错误',
+        'stream-unsupported': '流式不可用，已降级为整段回答',
+        timeout: '连接超时',
+        cancelled: '自检已取消',
+        network: '网络连接失败',
+      }
+      return labels[String(diagnostic?.reasonCode || '')] || '尚未自检'
+    }
+
+    function renderProbeSettings(host) {
+      const wrap = document.createElement('section')
+      wrap.className = 'lsb-summary-probe'
+      wrap.setAttribute('data-ai-summary-probe-panel', '')
+      const title = document.createElement('strong')
+      title.textContent = '连接自检'
+      const desc = document.createElement('div')
+      desc.className = 'lsb-row-desc'
+      desc.textContent = '只发送固定的最小测试文本，不读取当前页面、对话历史或引用。'
+      const actions = document.createElement('div')
+      actions.className = 'lsb-summary-probe-actions'
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'lsb-btn'
+      button.setAttribute('data-ai-summary-probe', '')
+      button.textContent = '连接自检'
+      const cancel = document.createElement('button')
+      cancel.type = 'button'
+      cancel.className = 'lsb-btn'
+      cancel.setAttribute('data-ai-summary-probe-cancel', '')
+      cancel.textContent = '取消自检'
+      cancel.hidden = true
+      const status = document.createElement('div')
+      status.className = 'lsb-summary-probe-status'
+      status.setAttribute('data-ai-summary-probe-status', '')
+      status.setAttribute('role', 'status')
+      status.textContent = diagnosticLabel(lastDiagnostic)
+      actions.append(button, cancel)
+      wrap.append(title, desc, actions, status)
+      host.appendChild(wrap)
+
+      let controller = null
+      button.onclick = async () => {
+        if (controller) return
+        controller = new AbortController()
+        button.disabled = true
+        cancel.hidden = false
+        status.textContent = '正在连接…'
+        try {
+          const outcome = await probe({ signal: controller.signal, force: true })
+          const diagnostic = outcome?.diagnostic || lastDiagnostic
+          const capabilities = outcome?.result?.capabilities || providerCapabilities
+          const suffix = capabilities
+            ? ` · JSON ${capabilities.json ? '可用' : '未验证'} · 流式 ${capabilities.stream ? '可用' : '未验证'} · ${diagnostic?.elapsedMs || 0} ms`
+            : ''
+          status.textContent = `${diagnosticLabel(diagnostic)}${suffix}`
+        } catch {
+          status.textContent = '连接失败，请检查配置后重试'
+        } finally {
+          controller = null
+          button.disabled = false
+          cancel.hidden = true
+        }
+      }
+      cancel.onclick = () => controller?.abort()
+    }
+
+    api.ui.configTab({ name: 'AI 总结', order: 52, render: renderProbeSettings })
     api.ui.style(
-      '.lsb-summary-wait{padding:8px 0 4px}.lsb-sum-status{font-weight:600;margin-bottom:8px}' +
+      '.lsb-summary-probe{margin-top:14px;padding-top:12px;border-top:1px solid var(--line-soft,#eee)}.lsb-summary-probe-actions{display:flex;gap:8px;margin-top:8px}.lsb-summary-probe-status{margin-top:8px;color:var(--text-muted,#777);font-size:12px;line-height:1.5}' +
+        '.lsb-summary-wait{padding:8px 0 4px}.lsb-sum-status{font-weight:600;margin-bottom:8px}' +
+        '.lsb-summary-trace{margin:8px 0;color:var(--text-muted,#777);font-size:12px}.lsb-summary-trace-event{margin:3px 0}.lsb-summary-trace-event[data-state="failed"]{color:var(--danger,#b44)}' +
         '.lsb-sum-text{line-height:1.7}' +
         '.lsb-sum-text h1,.lsb-sum-text h2,.lsb-sum-text h3,.lsb-sum-text h4,.lsb-sum-text h5,.lsb-sum-text h6{margin:.85em 0 .4em;font-weight:650;line-height:1.35}' +
         '.lsb-sum-text h1{font-size:1.32em}.lsb-sum-text h2{font-size:1.18em}.lsb-sum-text h3{font-size:1.06em}' +
@@ -797,12 +1317,27 @@
       collect,
       cached,
       cacheKey,
+      probe,
       renderMarkdown,
       run: (opts) => run(null, opts || {}),
       buttons: () => [...document.querySelectorAll('.lsb-op')].map((b) => b.textContent),
     }))
 
-    return {}
+    return {
+      configured: () => Boolean(String(cfg.apiUrl || '').trim() && String(cfg.apiKey || '').trim()),
+      model: () => String(cfg.model || ''),
+      providerState: () => ({
+        configured: Boolean(String(cfg.apiUrl || '').trim() && String(cfg.apiKey || '').trim()),
+        model: String(cfg.model || ''),
+        protocol: diagnostics.normalizeEndpoint({ apiUrl: cfg.apiUrl, apiStyle: cfg.apiStyle, model: cfg.model }, location.href).protocol,
+        capabilities: providerCapabilities ? capabilityFlags(providerCapabilities) : null,
+        lastDiagnostic: lastDiagnostic ? diagnostics.redactDiagnostic(lastDiagnostic) : null,
+      }),
+      probe,
+      renderMarkdown,
+      generate: ({ system, user, timeout, signal, onDelta } = {}) =>
+        generateModel({ system: String(system || ''), user: String(user || ''), timeout, signal, onDelta }),
+    }
   }
 
   const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window

@@ -43,10 +43,18 @@ export class DomWatcher {
     for (const rec of records) {
       for (const node of rec.addedNodes) {
         if (node.nodeType !== 1) continue
-        if (node.matches?.('li.post-entry')) posts.add(node)
-        else if (node.matches?.('li.post-item')) items.add(node)
-        for (const el of node.querySelectorAll?.('li.post-entry') || []) posts.add(el)
-        for (const el of node.querySelectorAll?.('li.post-item:not(.post-entry)') || []) items.add(el)
+        if (node.matches?.('li.post-entry') && !node.classList.contains('reply-pin-duplicate')) posts.add(node)
+        else if (
+          node.matches?.('li.post-item')
+          && !node.classList.contains('post-entry')
+          && !node.classList.contains('topic-collections-collection-row')
+        ) {
+          items.add(node)
+        }
+        for (const el of node.querySelectorAll?.('li.post-entry:not(.reply-pin-duplicate)') || []) posts.add(el)
+        for (const el of node.querySelectorAll?.('li.post-item:not(.post-entry):not(.topic-collections-collection-row)') || []) {
+          items.add(el)
+        }
         added.push(node)
       }
     }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·机会监控
 // @namespace    https://linux.sb/
-// @version      1.0.1
+// @version      1.0.2
 // @description  监听指定版块的新主题，标题命中关键词立即提醒（如「求助问答」里出现 k8s/tauri）。跨标签自动选主，只有一个标签在巡检。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -20,7 +20,7 @@
   const manifest = {
     id: 'forum-watch',
     name: '机会监控',
-    version: '1.0.1',
+    version: '1.0.2',
     description: '版块新帖关键词命中提醒；多标签选主去重',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -31,6 +31,8 @@
       intervalMin: { type: 'number', label: '巡检间隔 (分钟)', default: 5 },
       jitterMs: { type: 'number', label: '选主随机延迟 (ms)', default: 1000 },
       notifyDesktop: { type: 'switch', label: '桌面通知', default: false },
+      watchRedPacket: { type: 'switch', label: '盯红包（列表标记为活着）', default: false },
+      watchVirtualCard: { type: 'switch', label: '盯发卡（列表标记为活着）', default: false },
     },
   }
 
@@ -87,7 +89,8 @@
       inflight = (async () => {
         try {
           const kws = keywords()
-          if (!kws.length) return
+          const watchingMarks = !!(cfg.watchRedPacket || cfg.watchVirtualCard)
+          if (!kws.length && !watchingMarks) return
           // 整轮共用一份 seen 快照，循环末尾统一落盘：
           // 旧实现每个版块都 get/set 一次全量对象，版块多时白白多几轮序列化。
           const seen = seenGet()
@@ -103,13 +106,18 @@
             for (const it of items) {
               if (per[it.id]) continue
               per[it.id] = it.lastActiveTs || Date.now()
+              const reasons = []
               const kw = kws.find((k) => String(it.title).toLowerCase().includes(k))
-              if (kw) {
+              if (kw) reasons.push(kw)
+              if (cfg.watchRedPacket && it.marks?.redPacket === 'live') reasons.push('红包')
+              if (cfg.watchVirtualCard && it.marks?.virtualCard === 'live') reasons.push('发卡')
+              if (reasons.length) {
                 fresh.push({
                   tid: it.id,
                   title: it.title,
                   forumId: fid,
-                  kw,
+                  reasons,
+                  kw: reasons.join(' · '),
                   author: it.authorName,
                   ts: Date.now(),
                 })
@@ -226,7 +234,13 @@
         }
         seenSet(m)
       },
-      probe: () => ({ forums: forumIds(), kws: keywords(), ...probeData }),
+      probe: () => ({
+        forums: forumIds(),
+        kws: keywords(),
+        watchRedPacket: !!cfg.watchRedPacket,
+        watchVirtualCard: !!cfg.watchVirtualCard,
+        ...probeData,
+      }),
     }))
 
     return {}

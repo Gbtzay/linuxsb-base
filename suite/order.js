@@ -4,15 +4,22 @@ export const ORDER = [
   'hot-floor-badge',
   'resume-reading',
   'read-mark',
+  'topic-marks',
   'home-return',
-  'hover-profile',
   'topic-preview',
   'unread-sentinel',
   'forum-watch',
   'checkin-calendar',
   'points-ledger',
   'title-quotes',
+  'title-forge-planner',
+  'points-title-workbench',
+  // AI context chain: provider → copilot → actions → workbench.
   'ai-summary',
+  'ai-copilot',
+  'ai-actions',
+  'ai-write-actions',
+  'ai-workbench',
   'data-migration',
   'my-archive',
   'annual-report',
@@ -20,6 +27,10 @@ export const ORDER = [
   'live-feed',
   'perf-probe',
 ]
+/** 完整 AI 插件组：仅开发 Oxygen 收录，正式 Oxygen 与 LTS 排除。 */
+export const AI_MODULES = ['ai-summary', 'ai-copilot', 'ai-actions', 'ai-write-actions', 'ai-workbench']
+/** 公开正式版套件：保留所有非 AI 模块。 */
+export const ORDER_RELEASE = ORDER.filter((id) => !AI_MODULES.includes(id))
 /** LTS 精简集：与 ORDER 同序，不含砍掉的模块 */
 export const ORDER_LTS = [
   'floor-stats',

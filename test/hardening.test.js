@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}.user.js`, import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
 
@@ -154,25 +154,6 @@ test('非幂等请求默认不重试（避免重复回复/重复签到）', asyn
 
 /* ═══════════ 资源清理：停用即收摊 ═══════════ */
 
-test('停用清理：悬浮卡节点被移除，链接监听摘除', async () => {
-  const { w, until } = makeSite()
-  w.fetch = async (url) => ({ status: 200, ok: true, url: String(url), text: async () => topicHtml })
-  await loadBase(w, PLUG('hover-profile'))
-
-  const link = w.document.querySelector('a[href^="/user/"]')
-  assert.ok(link, '夹具里有用户链接')
-  link.dispatchEvent(new w.MouseEvent('mouseenter'))
-  assert.ok(await until(() => !!w.document.querySelector('.lsb-hover-card')), '浮卡已创建')
-
-  w.LSB.disable('hover-profile')
-  assert.equal(w.document.querySelector('.lsb-hover-card'), null, '停用后浮卡节点不残留')
-
-  // 摘掉监听后再次悬停不应重建
-  link.dispatchEvent(new w.MouseEvent('mouseenter'))
-  await new Promise((r) => setTimeout(r, 350))
-  assert.equal(w.document.querySelector('.lsb-hover-card'), null, '监听已摘除，不再重建浮卡')
-})
-
 test('停用清理：未读哨兵还原标题并停掉定时器', async () => {
   const seed = {}
   const { w, until } = makeSite()
@@ -200,6 +181,178 @@ test('停用清理：本地联动的健康巡检定时器被清掉', async () =>
   const after = calls
   await new Promise((r) => setTimeout(r, 1300)) // 跨过一个 healthSec 周期
   assert.equal(calls, after, '停用后不再发健康检查')
+})
+
+test('停用清理：AI 副驾面板、等待计时器和在途请求全部收摊', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  let release
+  let held = new Promise((resolve) => {
+    release = resolve
+  })
+  w.fetch = async (url) => {
+    if (!/linux\.sb/.test(String(url))) {
+      await held
+      return {
+        status: 200,
+        ok: true,
+        url: String(url),
+        text: async () => JSON.stringify({ choices: [{ message: { content: '草稿' } }] }),
+      }
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => topicHtml }
+  }
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-question]').value = '等待中的问题'
+  panel.querySelector('[data-send]').click()
+  assert.ok(await until(() => !!w.document.querySelector('.lsb-copilot-wait')), '副驾已经进入等待状态')
+
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '停用后面板被移除')
+  assert.equal(w.document.querySelector('.lsb-copilot-mask'), null, '停用后遮罩被移除')
+  release()
+  await new Promise((r) => setTimeout(r, 80))
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '在途请求完成也不能重新挂回面板')
+})
+
+test('停用清理：AI 副驾追踪重扫完成后不再写回面板', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  let release
+  const held = new Promise((resolve) => (release = resolve))
+  let started = false
+  w.fetch = async (url, init = {}) => {
+    if (/\/topic\/1\?p=2/.test(String(url))) {
+      started = true
+      await held
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => topicHtml }
+  }
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  const dbg = await w.LSB.bus.request('ai-copilot:debug')
+  dbg.createTrackingIssue(1, { title: '问题', question: '重扫中的问题', floors: [12], excerpt: '依据' })
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => started), '追踪重扫已开始')
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null)
+  release()
+  await new Promise((r) => setTimeout(r, 120))
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '停用后重扫完成不能重新挂回面板')
+})
+
+test('停用清理：AI 副驾追踪复核完成后不再写回面板', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  let release
+  let started = false
+  const held = new Promise((resolve) => (release = resolve))
+  w.fetch = async (url, init = {}) => {
+    if (!/linux\.sb/.test(String(url))) {
+      started = true
+      await held
+      return {
+        status: 200,
+        ok: true,
+        url: String(url),
+        text: async () => JSON.stringify({ choices: [{ message: { content: '- 状态建议：仍未解决\n- 判断依据：仍缺少信息 [#51]\n- 新增证据：[#51]' } }] }),
+      }
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => topicHtml }
+  }
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  const dbg = await w.LSB.bus.request('ai-copilot:debug')
+  const issue = dbg.createTrackingIssue(1, { title: '问题', question: '复核中的问题', floors: [12], excerpt: '依据' })
+  w.LSB.bus.emit('topic:posts-added', [{ postId: 9001, floor: 51, authorName: '新用户', content: '新证据', ts: 1 }], { source: 'test', raw: true })
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-review]')), '追踪卡片已显示复核按钮')
+  panel.querySelector('[data-track-review]').click()
+  assert.ok(await until(() => started), '追踪复核已开始')
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null)
+  release()
+  await new Promise((r) => setTimeout(r, 120))
+  assert.equal(w.document.querySelector('.lsb-copilot-panel'), null, '停用后复核完成不能重新挂回面板')
+  assert.equal(dbg.trackingState(1).items[0].id, issue.id)
+})
+
+test('停用清理：AI 副驾追踪导入预览和临时下载对象全部收摊', async () => {
+  const { w, until } = makeSite({
+    'lsb_base:ai-summary:__config': {
+      apiUrl: 'https://api.example.com/v1/chat/completions',
+      apiKey: 'k',
+    },
+    'lsb_base:ai-copilot:__config': {
+      fetchAll: false,
+      maxPages: 15,
+      maxChars: 12000,
+      sessionTurns: 6,
+    },
+  })
+  const revoked = []
+  let urlId = 0
+  w.URL.createObjectURL = () => `blob:tracking-${++urlId}`
+  w.URL.revokeObjectURL = (url) => revoked.push(url)
+  await loadBase(w, PLUG('ai-summary'), PLUG('ai-copilot'))
+  const dbg = await w.LSB.bus.request('ai-copilot:debug')
+  w.document.querySelector('.lsb-ai-copilot-top').click()
+  const panel = w.document.querySelector('.lsb-copilot-panel')
+  panel.querySelector('[data-mode="track"]').click()
+  assert.ok(await until(() => panel.querySelector('[data-track-import]')), '追踪导入控件已显示')
+
+  const input = panel.querySelector('[data-track-import]')
+  Object.defineProperty(input, 'files', {
+    configurable: true,
+    value: [new w.File([JSON.stringify(dbg.trackingExport(1))], 'tracking.json', { type: 'application/json' })],
+  })
+  input.dispatchEvent(new w.Event('change'))
+  assert.ok(await until(() => panel.querySelector('[data-track-import-preview]')), '导入预览已显示')
+
+  const originalAnchorClick = w.HTMLAnchorElement.prototype.click
+  w.HTMLAnchorElement.prototype.click = function () {}
+  panel.querySelector('[data-track-export-json]').click()
+  w.HTMLAnchorElement.prototype.click = originalAnchorClick
+  assert.deepEqual(revoked, [], '面板仍打开时临时 URL 尚未回收')
+
+  w.LSB.disable('ai-copilot')
+  assert.equal(w.document.querySelector('[data-track-import]'), null, '停用后文件输入被移除')
+  assert.equal(w.document.querySelector('[data-track-import-preview]'), null, '停用后导入预览被移除')
+  assert.deepEqual(revoked, ['blob:tracking-1'], '停用后回收未释放的下载 URL')
 })
 
 /* ═══════════ 定点缺陷 ═══════════ */

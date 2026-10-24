@@ -134,44 +134,6 @@
         }`
     }
 
-    /* ── 面板 ── */
-    api.ui.tab({
-      name: '积分趋势',
-      order: 65,
-      render(host) {
-        const all = get()
-        const cutoff = Date.now() - rangeDays * 864e5
-        const view = all.filter((x) => x.t >= cutoff)
-        host.innerHTML = `
-          <div class="lsb-cal-head">
-            <strong>积分趋势</strong>
-            <span class="lsb-row-desc">当前 ${api.me.points != null ? api.me.points : '?'} · 快照 ${all.length} 次</span>
-            <span style="margin-left:auto;display:flex;gap:6px">
-              ${[30, 90, 365].map(
-                (d) =>
-                  `<button class="lsb-btn${rangeDays === d ? ' is-primary' : ''}" data-range="${d}">${d}天</button>`,
-              ).join('')}
-              <button class="lsb-btn" data-refresh>立即快照</button>
-            </span>
-          </div>
-          <div class="lsb-chart-host">${chart(view.length >= 2 ? view : all)}</div>`
-        host.querySelectorAll('[data-range]').forEach((b) => {
-          b.onclick = () => {
-            rangeDays = Number(b.dataset.range)
-            api.ui.showTab('points-ledger')
-          }
-        })
-        const rf = host.querySelector('[data-refresh]')
-        rf.onclick = () =>
-          autoSnap(true)
-            .then((added) => {
-              api.ui.toast(added ? '已记录当前积分' : '数值未变化', { type: 'success' })
-              api.ui.showTab('points-ledger')
-            })
-            .catch((e) => api.ui.toast(e.message, { type: 'error' }))
-      },
-    })
-
     api.ui.style(
       '.lsb-chart-host{min-width:0;width:100%;overflow:hidden}' +
         '.lsb-svg{display:block;width:100%;height:auto;max-width:100%}',

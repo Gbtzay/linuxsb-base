@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
 const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCodeDev = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}.user.js`, import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
@@ -101,10 +102,14 @@ function makeSite(html, url, preload = {}) {
   return { w, tick, until }
 }
 
-async function loadBase(w, ...plugins) {
-  w.eval(baseCode)
+async function loadBaseWith(w, code, ...plugins) {
+  w.eval(code)
   for (const code of plugins) w.eval(code)
   await new Promise((r) => setTimeout(r, 30))
+}
+
+async function loadBase(w, ...plugins) {
+  await loadBaseWith(w, baseCode, ...plugins)
 }
 
 function feedStub(w, getHtml) {
@@ -505,6 +510,59 @@ test('老帖被顶起来：接上轮询里的原生未读点，高亮掉了点�
   assert.equal(row()?.querySelectorAll('a.unread-topic-notice').length, 1, '原生未读点不跟 2.6 秒高亮一起卸')
 })
 
+test('老帖新评论：看过帖子后软跳回首页，实时流不重复提醒且刷新评论数', async () => {
+  const OLD = listItem(4242, '软跳回首页的老帖', 1700000000, 3)
+  const NEW = listItem(4242, '软跳回首页的老帖', 1893457777, 7, { unread: true })
+  const home = homeHtml.replace('</ul>', OLD + '</ul>')
+  const topic = topicHtml
+    .replace('https://linux.sb/topic/1', 'https://linux.sb/topic/4242')
+    .replace('>358</span>', '>7</span>')
+  let serve = home
+  const { w, until } = makeSite(home, '/', {
+    'lsb_base:skin:__config': { topicSpa: true, uiMode: 'ios27' },
+    'lsb_base:skin:topicSpaNewWorldDefaultMigrationV1': true,
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false, highlightBumped: true },
+  })
+  w.scrollTo = () => {}
+  w.fetch = async (url) => {
+    const href = String(url)
+    const html = /\/topic\/4242(?:[?&#]|$)/.test(href) ? topic : serve
+    return { status: 200, ok: true, url: href, text: async () => html }
+  }
+  await loadBaseWith(w, baseCodeDev, PLUG('read-mark'), PLUG('skin'), PLUG('live-feed'))
+
+  const feed = await w.LSB.bus.request('live-feed:debug')
+  await until(() => feed.role() === 'leader', 3000)
+  await feed.pollOnce()
+  serve = home.replace(OLD, NEW)
+  await feed.pollOnce()
+
+  const row = () =>
+    [...w.document.querySelectorAll('li.post-item')].find((li) => li.querySelector('a.post-title[href*="/topic/4242"]'))
+  const repliesOf = (li) => [...li.querySelectorAll('.post-meta span')]
+    .map((el) => el.textContent.trim())
+    .filter((text) => /^\d[\d,]*$/.test(text))
+    .at(-1)
+  assert.equal(repliesOf(row()), '7', '实时流发现老帖新评论时应同步列表评论数')
+  assert.ok(row()?.classList.contains('lsb-live-bumped'), '新评论首次发现时应高亮')
+
+  row().querySelector('a.post-title').click()
+  assert.equal(await until(() => w.location.pathname === '/topic/4242' && !!w.document.querySelector('.topic-post-list')), true)
+  const marked = await w.LSB.bus.request('read-mark:debug')
+  assert.equal(marked.rec(4242)?.r, 7, '打开帖子应记录最新评论数，不能被软跳的初始楼层事件重复累加')
+
+  w.document.querySelector('.breadcrumb a[href="/"]')?.click()
+  assert.equal(await until(() => w.location.pathname === '/' && !!row()), true)
+  assert.equal(await until(() => repliesOf(row()) === '7', 1500), true)
+  assert.equal(row().classList.contains('lsb-live-bumped'), false, '读过最新评论后返回不应再次高亮')
+  assert.equal(await until(() => row().classList.contains('lsb-seen'), 1000), true, '返回后应恢复已读置灰状态')
+  assert.equal(
+    row().querySelectorAll('a.unread-topic-notice').length,
+    0,
+    `读过最新评论后应清除未读提示：rec=${JSON.stringify(marked.rec(4242))} replies=${repliesOf(row())} class=${row().className}`,
+  )
+})
+
 /* ═══════════ 帖子页翻页追补 ═══════════ */
 
 test('帖子页：新回复把帖子顶到新一页时，本轮立即追补而非等下个周期', async () => {
@@ -688,6 +746,78 @@ test('进出帖子后立刻回到列表模式，巡检不能插进已经卸掉�
   serve = homeHtml.replace('</ul>', listItem(99990022, '回家后的新帖', 1893456099, 0) + '</ul>')
   await dbg.pollOnce()
   assert.ok(dbg.pending() >= 1, '回首页后的巡检仍能发现新帖')
+})
+
+test('实时流：路由事件先于帖子 DOM 换入时，不得把帖子楼层当首页新帖子出口', async () => {
+  const homeWithLatePost = homeHtml.replace(
+    '</ul>',
+    listItem(999998, '不应写入帖子楼层的首页帖', 1893459998, 0) + '</ul>',
+  )
+  const { w, until } = makeSite(topicHtml, '/topic/1', {
+    'lsb_base:live-feed:__config': { jitterMs: 600000, autoInsert: true, pauseWhileTyping: false },
+  })
+  w.fetch = async (url) => {
+    const href = String(url)
+    const path = new URL(href, 'https://linux.sb').pathname
+    const html = path === '/' || path === '/index.php' ? homeWithLatePost : topicHtml
+    return { status: 200, ok: true, url: href, text: async () => html }
+  }
+  await loadBase(w, PLUG('live-feed'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  await until(() => dbg.role() === 'leader', 3000)
+  await dbg.pollOnce()
+  assert.equal(dbg.mode(), 'topic')
+
+  // 核心先看到 URL 已回首页，但 SPA 还没把帖子楼层替换成首页列表。
+  w.history.pushState({}, '', '/')
+  w.dispatchEvent(new w.PopStateEvent('popstate'))
+  Object.defineProperty(w.document, 'visibilityState', { configurable: true, get: () => 'visible' })
+  assert.equal(w.LSB.info().page.type, 'home')
+  assert.equal(dbg.mode(), null, 'DOM 仍是帖子页时不应捕获出首页列表上下文')
+
+  const floorsBefore = w.document.querySelectorAll('li.post-entry').length
+  await dbg.pollOnce()
+  assert.equal(dbg.lastFresh(), 0, '过渡窗口不得把首页响应当作帖子页新楼层')
+  assert.equal(
+    w.document.querySelector('a[href="/topic/999998"]'),
+    null,
+    '帖子 DOM 尚未换出时，首页响应不得插入帖子楼层列表',
+  )
+  assert.equal(w.document.querySelectorAll('li.post-entry').length, floorsBefore)
+})
+
+test('实时流：地址已回首页但路由事件尚未到达时，迟到帖子响应不得写入旧帖子出口', async () => {
+  const late = topicHtml.replace(
+    '</ul>',
+    '<li class="post-item post-entry" id="post-999993" data-floor="402">' +
+      '<div class="post-content"><p>地址切换后迟到的帖子评论</p></div></li></ul>',
+  )
+  const { w, tick, until } = makeSite(topicHtml, '/topic/1', {
+    'lsb_base:live-feed:__config': { jitterMs: 600000, autoInsert: true, pauseWhileTyping: false },
+  })
+  let release
+  w.fetch = async (url) => await new Promise((resolve) => {
+    release = (html) => resolve({ status: 200, ok: true, url: String(url), text: async () => html })
+  })
+  await loadBase(w, PLUG('live-feed'))
+  const dbg = await w.LSB.bus.request('live-feed:debug')
+  const first = dbg.pollOnce()
+  assert.equal(await until(() => typeof release === 'function'), true)
+  release(topicHtml)
+  await first
+  const before = w.document.querySelectorAll('li.post-entry').length
+
+  const second = dbg.pollOnce()
+  assert.equal(await until(() => typeof release === 'function'), true)
+  w.history.pushState({}, '', '/')
+  release(late)
+  await second
+  await tick(20)
+
+  assert.equal(w.location.pathname, '/')
+  assert.equal(w.document.querySelectorAll('li.post-entry').length, before,
+    '地址已回首页时旧帖子响应不得继续插入帖子楼层')
+  assert.equal(w.document.body.textContent.includes('地址切换后迟到的帖子评论'), false)
 })
 
 test('实时流（帖子）：站点已经插进楼中楼的回复，不再复制到回复栏下面', async () => {
