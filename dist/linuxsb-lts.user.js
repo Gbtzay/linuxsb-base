@@ -10116,7 +10116,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       if (!(boot instanceof Element)) return false
       const ids = new Set(String(boot.dataset.onlineUsersIds || '').split(',').map((id) => id.trim()).filter(Boolean))
       const label = boot.dataset.onlineUsersLabel || '在线'
-      syncOnlineUserCount(ids.size)
       for (const img of document.querySelectorAll('img.avatar-img')) {
         const host = img.parentElement
         if (!(host instanceof Element)) continue
@@ -10139,30 +10138,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         }
       }
       return true
-    }
-
-    function syncOnlineUserCount(count) {
-      const text = `${Math.max(0, Number(count) || 0)} 人`
-      for (const head of document.querySelectorAll('.online-users-card .online-users-head')) {
-        const title = head.querySelector('.online-users-title')
-        const countNode = head.querySelector('[data-online-users-count]')
-        if (countNode) {
-          countNode.textContent = text
-          continue
-        }
-        const existing = [...head.childNodes].find(
-          (node) => node.nodeType === 3 && /\d+\s*人/.test(node.textContent || ''),
-        )
-        if (existing) {
-          existing.textContent = String(existing.textContent || '').replace(/\d+\s*人/, text)
-          continue
-        }
-        const next = document.createElement('span')
-        next.dataset.onlineUsersCount = ''
-        next.textContent = text
-        if (title) title.after(document.createTextNode(' '), next)
-        else head.append(document.createTextNode(' '), next)
-      }
     }
 
     function syncOnlineUserBoot(sourceDoc) {
@@ -10189,7 +10164,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
 
     function onlineUserRefreshPath() {
       const url = new URL('/', location.href)
-      url.searchParams.set('lsb_online_users', String(Date.now()))
       return `${url.pathname}${url.search}`
     }
 

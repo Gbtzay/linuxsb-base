@@ -2075,10 +2075,12 @@ test('壳占位：关壳或停用皮肤后撤掉占位，原版顶栏能回来',
 
 function stubHtmlFetch(w, htmlFor) {
   const calls = []
-  w.fetch = async (url) => {
+  calls.inits = []
+  w.fetch = async (url, init = {}) => {
     const href = String(url)
     calls.push(href)
-    const html = typeof htmlFor === 'function' ? htmlFor(href) : htmlFor
+    calls.inits.push(init)
+    const html = typeof htmlFor === 'function' ? htmlFor(href, init) : htmlFor
     return {
       status: 200,
       ok: true,
@@ -2119,24 +2121,37 @@ function deferredHtmlFetch(w, htmlFor) {
   }
 }
 
+function headerValue(init, name) {
+  const headers = init?.headers
+  if (!headers) return ''
+  if (typeof headers.get === 'function') return String(headers.get(name) || '')
+  if (Array.isArray(headers)) {
+    return String(headers.find(([key]) => String(key).toLowerCase() === name.toLowerCase())?.[1] || '')
+  }
+  return String(headers[name] ?? headers[name.toLowerCase()] ?? '')
+}
+
+function isOnlineUserRequest(url, init = {}) {
+  try {
+    const x = new URL(String(url), 'https://linux.sb')
+    const path = x.pathname.replace(/\/{2,}/g, '/') || '/'
+    return (path === '/' || path === '/index.php') && headerValue(init, 'cache-control').toLowerCase() === 'no-cache'
+  } catch {
+    return false
+  }
+}
+
 function onlineUserGets(calls) {
-  return calls.filter((u) => {
-    try {
-      const x = new URL(String(u), 'https://linux.sb')
-      return !!x.searchParams.get('lsb_online_users')
-    } catch {
-      return false
-    }
-  })
+  return calls.filter((url, index) => isOnlineUserRequest(url, calls.inits?.[index]))
 }
 
 function homeGets(calls) {
-  return calls.filter((u) => {
+  return calls.filter((u, index) => {
     try {
       const x = new URL(String(u), 'https://linux.sb')
       const path = x.pathname.replace(/\/{2,}/g, '/') || '/'
       if (path !== '/' && path !== '/index.php') return false
-      if (x.searchParams.get('lsb_online_users')) return false
+      if (isOnlineUserRequest(u, calls.inits?.[index])) return false
       return !x.searchParams.get('p')
     } catch {
       return false
@@ -4085,8 +4100,10 @@ test('在线清单刷新会更新站点显示的当前在线人数，但不改�
       true,
       '在线 ID 清单仍应刷新，供头像在线状态使用',
     )
-    assert.match(online.querySelector('.online-users-head').textContent, /3 人/,
-      '在线清单应把当前在线人数更新为实时清单数量')
+    assert.match(online.querySelector('.online-users-head').textContent, /9 人/,
+      '当前在线人数应保持站点原生显示')
+    assert.equal(online.querySelector('[data-online-users-count]'), null,
+      '不得注入自有在线人数节点')
     assert.equal(online.querySelector('.online-users-title').textContent, '当前在线')
     assert.equal(online.querySelector('.online-users-members').textContent, '保留成员列表')
   } finally {
@@ -4126,9 +4143,9 @@ test('回到缓存首页后立即重新取在线清单并更新绿点', async ()
     `<span class="online-users-boot" hidden data-online-users-ids="${becameOffline}" data-online-users-label="在线"></span>`,
   )
   w.document.body.append(probes)
-  const calls = stubHtmlFetch(w, (url) => {
+  const calls = stubHtmlFetch(w, (url, init) => {
     const href = String(url)
-    if (/[?&]lsb_online_users=/.test(href)) return onlineHtml
+    if (isOnlineUserRequest(href, init)) return onlineHtml
     if (/\/topic\//.test(href)) return topicHtml
     return initialHome
   })
@@ -4890,7 +4907,7 @@ test('壳内跳转：淘帖中心和申精走软跳；淘帖详情和认证中�
   assert.equal(w.location.pathname, '/topic_essence_review_list')
   assert.equal((await w.LSB.bus.request('skin:debug')).shell.location, '申精')
 
-  const navigationCalls = () => calls.filter((url) => !/[?&]lsb_online_users=/.test(String(url)))
+  const navigationCalls = () => calls.filter((url, index) => !isOnlineUserRequest(url, calls.inits?.[index]))
   const before = navigationCalls().length
   const album = w.document.createElement('a')
   album.href = 'https://linux.sb/topic_collection/153'
