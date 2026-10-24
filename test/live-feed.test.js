@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}`, import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
@@ -413,6 +413,16 @@ test('实时流：精华 / 抽奖按新帖序数巡检，不当成回复流', as
   const redDbg = await red.w.LSB.bus.request('live-feed:debug')
   await red.until(() => redDbg.role() === 'leader', 3000)
   assert.equal(redDbg.baseline().sort, 'post', '红包 Tab 按帖 id，不能当成回复流')
+
+  const hot = makeSite(homeHtml, '/hot_discussions', {
+    'lsb_base:live-feed:__config': { jitterMs: 0, autoInsert: false },
+  })
+  feedStub(hot.w, () => homeHtml)
+  await loadBase(hot.w, PLUG('live-feed.user.js'))
+  const hotDbg = await hot.w.LSB.bus.request('live-feed:debug')
+  await hot.until(() => hotDbg.role() === 'leader', 3000)
+  assert.equal(hotDbg.mode(), 'list', '热议页应进入列表实时流')
+  assert.equal(hotDbg.baseline().sort, 'post')
 })
 
 test('实时流：route:changed 只重建基线，不立刻再 GET', async () => {

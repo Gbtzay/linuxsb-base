@@ -48,8 +48,33 @@
     return Number.isFinite(n) ? n : null
   }
 
+  function classRarity(el) {
+    const match = String(el?.className || '').match(/(?:^|\s)gacha-(?:title|pool-rarity)-(ur|ssr|sr|r|n)(?:\s|$)/i)
+    return match ? match[1].toUpperCase() : ''
+  }
+
+  function titleParts(el) {
+    const badge = el?.matches?.('.gacha-title-badge') ? el : el?.querySelector?.('.gacha-title-badge')
+    const name = textOf(badge?.querySelector?.('.gacha-title-name')) || textOf(el?.querySelector?.('.gacha-title-name')) || ''
+    const rarity = (textOf(badge?.querySelector?.('.gacha-title-rarity')) || textOf(el?.querySelector?.('.gacha-title-rarity')) || classRarity(badge) || classRarity(el)).toUpperCase()
+    return { name, rarity }
+  }
+
+  function slashQuantity(el) {
+    const match = textOf(el).match(/\s+([\d,]+)\s*\/\s*([\d,]+)\s*$/)
+    if (!match) return null
+    const owned = Number(match[1].replace(/,/g, ''))
+    const qty = Number(match[2].replace(/,/g, ''))
+    return Number.isFinite(owned) && Number.isFinite(qty) ? { owned, qty } : null
+  }
+
+  function countFromClass(el) {
+    const match = String(el?.className || '').match(/(?:^|\s)gacha-pull-(\d+)(?:\s|$)/i)
+    return match ? Number(match[1]) : null
+  }
+
   function keyOf(name, rarity) {
-    return `${name}@${rarity}`
+    return `${name}@${rarity || ''}`
   }
 
   function issue(scope, reason, extra = {}) {
@@ -60,26 +85,37 @@
     const root = toDocument(input)
     const recipes = []
     const issues = []
-    const nodes = [...root.querySelectorAll('[data-gacha-recipe]')]
+    const nodes = [...root.querySelectorAll('[data-gacha-recipe], .gacha-recipe-card')]
     if (!nodes.length) {
       return { recipes, issues: [issue('recipes', 'recipes-not-found')] }
     }
     for (const el of nodes) {
-      const id = (el.getAttribute('data-recipe-id') || '').trim() || `recipe-${recipes.length + issues.length + 1}`
-      const targetName = attrOrText(el, 'data-target-name', /(?:目标|产出|结果)\s*[:：]?\s*(.+?)(?:\s+(?:UR|SSR|SR|R|N)\b|$)/i) ||
+      const actualCard = el.matches?.('.gacha-recipe-card')
+      const form = el.querySelector('form')
+      const recipeId = form?.querySelector('[name="recipe_id"]')?.getAttribute('value')
+      const id = (el.getAttribute('data-recipe-id') || '').trim() || recipeId?.trim() || `recipe-${recipes.length + issues.length + 1}`
+      const targetBadge = actualCard ? el.querySelector('.gacha-recipe-target .gacha-title-badge') : null
+      const targetTitle = titleParts(targetBadge)
+      const targetName = targetTitle.name || attrOrText(el, 'data-target-name', /(?:目标|产出|结果)\s*[:：]?\s*(.+?)(?:\s+(?:UR|SSR|SR|R|N)\b|$)/i) ||
         textOf(el.querySelector('[data-gacha-target], .gacha-recipe-target, h1, h2, h3, h4, strong')).match(/^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)?.[1]?.trim() ||
         textOf(el).match(/^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)?.[1]?.trim() || ''
-      const targetRarity = attrOrText(el, 'data-target-rarity', /\b(UR|SSR|SR|R|N)\b/i).toUpperCase()
-      const fee = numberAttrOrText(el, 'data-fee', /(?:费用|消耗|积分)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/)
+      const targetRarity = (targetTitle.rarity || attrOrText(el, 'data-target-rarity', /\b(UR|SSR|SR|R|N)\b/i)).toUpperCase()
+      let fee = numberAttrOrText(el, 'data-fee', /(?:费用|消耗|积分)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/)
+      if (actualCard && fee == null) fee = 0
       if (targetRarity !== 'UR') continue
-      const materials = [...el.querySelectorAll('[data-gacha-material]')]
+      const materials = actualCard ? [...el.querySelectorAll('.gacha-recipe-materials > span')] : [...el.querySelectorAll('[data-gacha-material]')]
       const inputs = []
       let invalid = false
       for (const material of materials) {
-        const name = attrOrText(material, 'data-name', /^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)
-        const rarity = attrOrText(material, 'data-rarity', /\b(UR|SSR|SR|R|N)\b/i).toUpperCase()
-        const qty = numberAttrOrText(material, 'data-qty', /[×x]\s*([\d,]+(?:\.\d+)?)/i)
-        if (!name || !rarity || !Number.isFinite(qty) || qty <= 0) {
+        const parsedTitle = titleParts(material)
+        const slash = slashQuantity(material)
+        const rawMaterial = textOf(material)
+        const name = attrOrText(material, 'data-name', /^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i) ||
+          parsedTitle.name ||
+          (actualCard ? rawMaterial.replace(/\s+[\d,]+\s*\/\s*[\d,]+\s*$/, '').trim() : '')
+        const rarity = (parsedTitle.rarity || attrOrText(material, 'data-rarity', /\b(UR|SSR|SR|R|N)\b/i)).toUpperCase()
+        const qty = numberAttrOrText(material, 'data-qty', /[×x]\s*([\d,]+(?:\.\d+)?)/i) ?? slash?.qty
+        if (!name || (!actualCard && !rarity) || !Number.isFinite(qty) || qty <= 0) {
           invalid = true
           break
         }
@@ -103,48 +139,116 @@
     const root = toDocument(input)
     const pools = []
     const issues = []
+    const titleCatalog = []
+    const knownTitles = new Set()
+    const addTitle = (name, rarity) => {
+      if (!name || !rarity) return
+      const key = keyOf(name, rarity)
+      if (knownTitles.has(key)) return
+      knownTitles.add(key)
+      titleCatalog.push({ key, name, rarity })
+    }
     const nodes = [...root.querySelectorAll('[data-gacha-pool]')]
-    if (!nodes.length) return { pools, issues: [issue('gacha', 'pools-not-found')] }
-    for (const el of nodes) {
-      const id = (el.getAttribute('data-pool-id') || '').trim() || `pool-${pools.length + issues.length + 1}`
-      const label = (el.getAttribute('data-pool-label') || '').trim() || textOf(el.querySelector('[data-gacha-pool-label]')) || id
-      const drawCost = numberAttrOrText(el, 'data-draw-cost', /(?:抽取|消耗|费用)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/)
-      const outcomes = []
-      let invalid = false
-      for (const outcome of el.querySelectorAll('[data-gacha-outcome]')) {
-        const name = attrOrText(outcome, 'data-name', /^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)
-        const rarity = attrOrText(outcome, 'data-rarity', /\b(UR|SSR|SR|R|N)\b/i).toUpperCase()
-        const probability = numberAttrOrText(outcome, 'data-probability', /([\d.]+)\s*%?/)
-        const probabilitySource = outcome.getAttribute('data-probability') || textOf(outcome)
-        const normalizedProbability = probability != null && /%/.test(probabilitySource) ? probability / 100 : probability
-        if (!name || !rarity || !Number.isFinite(normalizedProbability) || normalizedProbability < 0 || normalizedProbability > 1) {
-          invalid = true
+    if (nodes.length) {
+      for (const el of nodes) {
+        const id = (el.getAttribute('data-pool-id') || '').trim() || `pool-${pools.length + issues.length + 1}`
+        const label = (el.getAttribute('data-pool-label') || '').trim() || textOf(el.querySelector('[data-gacha-pool-label]')) || id
+        const drawCost = numberAttrOrText(el, 'data-draw-cost', /(?:抽取|消耗|费用)\s*[:：]?\s*([\d,]+(?:\.\d+)?)/)
+        const outcomes = []
+        let invalid = false
+        for (const outcome of el.querySelectorAll('[data-gacha-outcome]')) {
+          const name = attrOrText(outcome, 'data-name', /^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)
+          const rarity = attrOrText(outcome, 'data-rarity', /\b(UR|SSR|SR|R|N)\b/i).toUpperCase()
+          const probability = numberAttrOrText(outcome, 'data-probability', /([\d.]+)\s*%?/)
+          const probabilitySource = outcome.getAttribute('data-probability') || textOf(outcome)
+          const normalizedProbability = probability != null && /%/.test(probabilitySource) ? probability / 100 : probability
+          if (!name || !rarity || !Number.isFinite(normalizedProbability) || normalizedProbability < 0 || normalizedProbability > 1) {
+            invalid = true
+            continue
+          }
+          addTitle(name, rarity)
+          outcomes.push({ key: keyOf(name, rarity), name, rarity, probability: normalizedProbability })
+        }
+        const total = outcomes.reduce((sum, item) => sum + item.probability, 0)
+        if (!Number.isFinite(drawCost) || drawCost <= 0 || !outcomes.length || invalid) {
+          issues.push(issue('pool', 'pool-incomplete', { id }))
           continue
         }
-        outcomes.push({ key: keyOf(name, rarity), name, rarity, probability: normalizedProbability })
+        const probabilityComplete = Math.abs(total - 1) <= 1e-9
+        if (!probabilityComplete) issues.push(issue('pool', 'probability-incomplete', { id, total }))
+        pools.push({ id, label, drawCost, outcomes, probabilityComplete })
       }
-      const total = outcomes.reduce((sum, item) => sum + item.probability, 0)
-      if (!Number.isFinite(drawCost) || drawCost <= 0 || !outcomes.length || invalid) {
-        issues.push(issue('pool', 'pool-incomplete', { id }))
+      return { pools, titleCatalog, issues }
+    }
+
+    const rarityNodes = [...root.querySelectorAll('.gacha-pool-section .gacha-pool-rarity')]
+    const allItems = [...root.querySelectorAll('.gacha-all-item')]
+    if (!rarityNodes.length && !allItems.length) return { pools, titleCatalog, issues: [issue('gacha', 'pools-not-found')] }
+    for (const item of allItems) {
+      const title = titleParts(item)
+      addTitle(title.name, title.rarity)
+    }
+    if (!rarityNodes.length || !titleCatalog.length) {
+      return { pools, titleCatalog, issues: [issue('gacha', 'pool-incomplete')] }
+    }
+
+    const rates = new Map()
+    let invalid = false
+    for (const el of rarityNodes) {
+      const rarity = (textOf(el.querySelector('.gacha-pool-rarity-label')) || classRarity(el)).toUpperCase()
+      const countMatch = textOf(el.querySelector('.gacha-pool-rarity-count')).match(/([\d,]+)\s*种/)
+      const rateMatch = textOf(el.querySelector('.gacha-pool-rarity-rate')).match(/([\d.]+)\s*%/)
+      const count = countMatch ? Number(countMatch[1].replace(/,/g, '')) : null
+      const probability = rateMatch ? Number(rateMatch[1]) / 100 : null
+      if (!rarity || !Number.isInteger(count) || count < 0 || !Number.isFinite(probability) || probability < 0 || probability > 1) {
+        invalid = true
         continue
       }
-      const probabilityComplete = Math.abs(total - 1) <= 1e-9
-      if (!probabilityComplete) issues.push(issue('pool', 'probability-incomplete', { id, total }))
-      pools.push({ id, label, drawCost, outcomes, probabilityComplete })
+      rates.set(rarity, { count, probability })
     }
-    return { pools, issues }
+
+    const outcomes = []
+    for (const title of titleCatalog) {
+      const rate = rates.get(title.rarity)
+      if (!rate || rate.count <= 0) continue
+      outcomes.push({ ...title, probability: rate.probability / rate.count })
+    }
+    const total = [...rates.values()].reduce((sum, item) => sum + item.probability, 0)
+    const positiveRatesMissingTitles = [...rates.entries()].some(([rarity, rate]) => rate.probability > 0 && (rate.count <= 0 || !titleCatalog.some((title) => title.rarity === rarity)))
+    const probabilityComplete = !invalid && !positiveRatesMissingTitles && Math.abs(total - 1) <= 1e-9
+    const costOptions = [...root.querySelectorAll('.gacha-pull-btn[data-cost]')].map((button) => {
+      const cost = Number((button.getAttribute('data-cost') || '').replace(/,/g, ''))
+      const count = countFromClass(button)
+      return Number.isFinite(cost) && cost > 0 && Number.isFinite(count) && count > 0 ? cost / count : null
+    }).filter((cost) => cost != null)
+    const drawCost = costOptions.length ? Math.min(...costOptions) : null
+    const id = 'standard'
+    if (!Number.isFinite(drawCost) || drawCost <= 0 || !outcomes.length || !probabilityComplete) {
+      issues.push(issue('pool', !probabilityComplete ? 'probability-incomplete' : 'pool-incomplete', { id, total }))
+    }
+    if (Number.isFinite(drawCost) && drawCost > 0 && outcomes.length) {
+      pools.push({ id, label: '标准抽取（按页面概率和同稀有度数量均分）', drawCost, outcomes, probabilityComplete })
+    }
+    return { pools, titleCatalog, issues }
   }
 
   function parseInventory(input) {
     const root = toDocument(input)
     const inventory = {}
     const issues = []
-    const nodes = [...root.querySelectorAll('[data-gacha-owned]')]
-    if (!nodes.length) return { inventory, issues: [issue('inventory', 'inventory-not-found')] }
+    const actualPage = !!root.querySelector('.gacha-profile-page')
+    const nodes = [...root.querySelectorAll('[data-gacha-owned], .gacha-profile-item')]
+    if (!nodes.length) return { inventory, issues: [issue('inventory', 'inventory-not-found')], recognized: actualPage || !!root.querySelector('[data-gacha-profile]') }
     for (const el of nodes) {
-      const name = attrOrText(el, 'data-name', /^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i)
-      const rarity = attrOrText(el, 'data-rarity', /\b(UR|SSR|SR|R|N)\b/i).toUpperCase()
-      const qty = numberAttrOrText(el, 'data-qty', /[×x]\s*([\d,]+(?:\.\d+)?)/i)
+      const actualItem = el.matches?.('.gacha-profile-item')
+      const title = titleParts(el.querySelector('.gacha-profile-badge') || el)
+      const raw = textOf(el)
+      const name = attrOrText(el, 'data-name', /^\s*(.+?)\s+(?:UR|SSR|SR|R|N)\b/i) ||
+        title.name ||
+        (actualItem ? raw.match(/^\s*(.+?)(?:\s+\S+)?\s+\S+\s+×\s*[\d,]+/i)?.[1]?.trim() || '' : '')
+      const rarity = (title.rarity || attrOrText(el, 'data-rarity', /\b(UR|SSR|SR|R|N)\b/i)).toUpperCase()
+      const qtySource = actualItem ? el.querySelector('.gacha-status-tag') || el : el
+      const qty = numberAttrOrText(qtySource, 'data-qty', /[×x]\s*([\d,]+(?:\.\d+)?)/i)
       if (!name || !rarity || !Number.isFinite(qty) || qty < 0) {
         issues.push(issue('inventory', 'inventory-entry-incomplete'))
         continue
@@ -152,7 +256,7 @@
       const key = keyOf(name, rarity)
       inventory[key] = (inventory[key] || 0) + qty
     }
-    return { inventory, issues }
+    return { inventory, issues, recognized: actualPage || !!root.querySelector('[data-gacha-profile]') }
   }
 
   function aggregateRequirements(inputs) {
@@ -198,9 +302,16 @@
 
   function applyPoints(plan, points) {
     if (!plan || plan.status === 'unavailable') {
-      return planResult(plan?.status || 'unavailable', plan?.cost, plan?.fee, plan?.steps, plan?.reason, points)
+      const out = planResult(plan?.status || 'unavailable', plan?.cost, plan?.fee, plan?.steps, plan?.reason, points)
+      for (const key of ['expected', 'approximate', 'expectedDraws', 'expectedCost', 'poolChoices', 'missing']) {
+        if (plan?.[key] !== undefined) out[key] = plan[key]
+      }
+      return out
     }
     const out = planResult(plan.status, plan.cost, plan.fee, plan.steps, plan.reason, points)
+    for (const key of ['expected', 'approximate', 'expectedDraws', 'expectedCost', 'poolChoices', 'missing']) {
+      if (plan[key] !== undefined) out[key] = plan[key]
+    }
     if (out.currentPoints != null && out.cost != null && out.cost > out.currentPoints) out.status = 'insufficient'
     return out
   }
@@ -223,6 +334,7 @@
     }
     for (const group of byKey.values()) group.sort((a, b) => a.price - b.price || a.index - b.index)
     const steps = [{ kind: 'fee', fee: Number(fee), cost: Number(fee) }]
+    const missing = []
     let total = Number(fee)
     for (const requirement of rows) {
       let remaining = requirement.qty
@@ -234,7 +346,12 @@
         total += cost
         remaining -= qty
       }
-      if (remaining > 0) return unavailable('market-insufficient', Number(fee), steps)
+      if (remaining > 0) missing.push({ ...requirement, qty: remaining })
+    }
+    if (missing.length) {
+      const out = unavailable('market-insufficient', Number(fee), steps)
+      out.missing = missing
+      return out
     }
     return planResult('ok', total, Number(fee), steps, 'market-low')
   }
@@ -347,6 +464,89 @@
     return out.sort((a, b) => (a.route.cost ?? Infinity) - (b.route.cost ?? Infinity) || a.target.key.localeCompare(b.target.key, 'zh-CN') || String(a.recipe.id).localeCompare(String(b.recipe.id)))
   }
 
+  const MAX_EXACT_GACHA_STATES = 250000
+  const APPROX_GACHA_STEPS = 2048
+
+  function stateSpaceSize(rows, limit = MAX_EXACT_GACHA_STATES) {
+    let size = 1
+    for (const row of rows || []) {
+      size *= Number(row?.qty || 0) + 1
+      if (size > limit) return size
+    }
+    return size
+  }
+
+  function logFactorial(n) {
+    let value = 0
+    for (let i = 2; i <= n; i++) value += Math.log(i)
+    return value
+  }
+
+  function poissonTailAtLeast(shape, mean, shapeLogFactorial) {
+    if (!(mean > 0)) return 0
+    const threshold = shape + 12 * Math.sqrt(shape + 1)
+    if (mean > threshold) {
+      let term = Math.exp(-mean)
+      let sum = term
+      for (let k = 1; k < shape; k++) {
+        term *= mean / k
+        sum += term
+      }
+      return Math.max(0, Math.min(1, 1 - sum))
+    }
+    let term = Math.exp(-mean + shape * Math.log(mean) - shapeLogFactorial)
+    let sum = term
+    for (let k = shape; k < shape + 10000; k++) {
+      term *= mean / (k + 1)
+      sum += term
+      if (k > mean && term <= sum * 1e-15) break
+    }
+    return Math.max(0, Math.min(1, sum))
+  }
+
+  function approximateSinglePoolDraws(rows, pool) {
+    const probabilities = new Map()
+    for (const outcome of pool?.outcomes || []) {
+      const probability = Number(outcome?.probability)
+      if (!outcome?.key || !Number.isFinite(probability) || probability <= 0) continue
+      probabilities.set(outcome.key, (probabilities.get(outcome.key) || 0) + probability)
+    }
+    const normalized = (rows || []).map((row) => ({
+      qty: Number(row.qty),
+      probability: Number(probabilities.get(row.key)),
+      logFactorial: logFactorial(Number(row.qty)),
+    }))
+    if (normalized.some((row) => !Number.isInteger(row.qty) || row.qty < 1 || !(row.probability > 0))) return null
+    const upper = Math.max(...normalized.map((row) => (row.qty + 12 * Math.sqrt(row.qty + 1)) / row.probability))
+    if (!Number.isFinite(upper) || upper <= 0) return null
+    const integrand = (time) => {
+      let completed = 1
+      for (const row of normalized) {
+        completed *= poissonTailAtLeast(row.qty, row.probability * time, row.logFactorial)
+        if (completed === 0) break
+      }
+      return Math.max(0, 1 - completed)
+    }
+    const integrate = (steps) => {
+      const width = upper / steps
+      let sum = integrand(0) + integrand(upper)
+      for (let i = 1; i < steps; i++) sum += (i % 2 ? 4 : 2) * integrand(i * width)
+      return sum * width / 3
+    }
+    let steps = APPROX_GACHA_STEPS
+    let value = integrate(steps)
+    for (let i = 0; i < 2; i++) {
+      const next = integrate(steps * 2)
+      if (Math.abs(next - value) <= Math.max(1e-6, Math.abs(next) * 1e-5)) {
+        value = next
+        break
+      }
+      value = next
+      steps *= 2
+    }
+    return Number.isFinite(value) && value >= 0 ? value : null
+  }
+
   function expectedGachaCost(requirements, pools, fee) {
     if (!Number.isFinite(Number(fee)) || Number(fee) < 0) return unavailable('fee-missing')
     const rows = aggregateRequirements(requirements)
@@ -371,6 +571,25 @@
       validPools.push({ ...pool, drawCost, outcomes })
     }
     if (!validPools.length) return unavailable(sawIncomplete ? 'probability-incomplete' : 'gacha-unavailable', Number(fee))
+    const estimatedStates = stateSpaceSize(rows)
+    if (estimatedStates > MAX_EXACT_GACHA_STATES) {
+      if (validPools.length !== 1) return unavailable('state-space-too-large', Number(fee))
+      const pool = validPools[0]
+      const expectedDraws = approximateSinglePoolDraws(rows, pool)
+      if (!Number.isFinite(expectedDraws)) return unavailable('gacha-unavailable', Number(fee))
+      const expectedCost = pool.drawCost * expectedDraws
+      const steps = [
+        { kind: 'fee', fee: Number(fee), cost: Number(fee) },
+        { kind: 'gacha', expected: true, approximate: true, expectedDraws, expectedCost, choices: [{ poolId: pool.id || null, label: pool.label || pool.id || '', approximate: true }] },
+      ]
+      const result = planResult('ok', Number(fee) + expectedCost, Number(fee), steps, 'gacha')
+      result.expected = true
+      result.approximate = true
+      result.expectedDraws = expectedDraws
+      result.expectedCost = expectedCost
+      result.poolChoices = steps[1].choices
+      return result
+    }
     const indexOf = new Map(rows.map((row, index) => [row.key, index]))
     const memo = new Map()
     const solve = (remaining) => {
@@ -394,7 +613,6 @@
         let childCost = 0
         let childDraws = 0
         let valid = true
-        const nextStates = []
         for (const [index, probability] of transitions) {
           const next = remaining.slice()
           next[index] -= 1
@@ -405,16 +623,14 @@
           }
           childCost += probability * child.cost
           childDraws += probability * child.draws
-          nextStates.push({ index, probability, state: next })
         }
         if (!valid) continue
         const candidate = {
           cost: (pool.drawCost + childCost) / progressProbability,
           draws: (1 + childDraws) / progressProbability,
-          choices: [{ poolId: pool.id || null, label: pool.label || pool.id || '', state: stateKey, progressProbability }, ...nextStates.flatMap((next) => {
-            const child = solve(next.state)
-            return child?.choices || []
-          })],
+          // 只保留当前状态的最优决策；把所有后续概率分支展开到 choices
+          // 会产生指数级重复数组，真实 UR 配方会因此耗尽页面内存。
+          choices: [{ poolId: pool.id || null, label: pool.label || pool.id || '', state: stateKey, progressProbability }],
         }
         if (!best || candidate.cost < best.cost || (candidate.cost === best.cost && candidate.draws < best.draws)) best = candidate
       }
@@ -433,6 +649,35 @@
     result.expectedCost = solved.cost
     result.poolChoices = solved.choices
     return result
+  }
+
+  function resolveRecipeRarities(recipes, titleCatalog = [], fallbackKeys = []) {
+    const byName = new Map()
+    for (const title of titleCatalog || []) {
+      if (!title?.name || !title?.rarity) continue
+      if (!byName.has(title.name)) byName.set(title.name, new Set())
+      byName.get(title.name).add(String(title.rarity).toUpperCase())
+    }
+    for (const key of fallbackKeys || []) {
+      const value = String(key || '')
+      const split = value.lastIndexOf('@')
+      if (split <= 0) continue
+      const name = value.slice(0, split)
+      const rarity = value.slice(split + 1).toUpperCase()
+      if (!name || !rarity) continue
+      if (!byName.has(name)) byName.set(name, new Set())
+      byName.get(name).add(rarity)
+    }
+    return (recipes || []).map((recipe) => ({
+      ...recipe,
+      inputs: (recipe.inputs || []).map((input) => {
+        if (input?.rarity) return input
+        const rarities = [...(byName.get(input?.name) || [])]
+        if (rarities.length !== 1) return input
+        const rarity = rarities[0]
+        return { ...input, rarity, key: keyOf(input.name, rarity) }
+      }),
+    }))
   }
 
   function summarizeMode(targets, points) {
@@ -500,11 +745,17 @@
     market: '称号行情',
   }
 
+  const SOURCE_TIMEOUT_MS = 10_000
+
+  // ═══════════════════════════════════════════════════════════
+  // 章节索引（1077 行，只读 UR 规划数据源，UI 已移至工作台）：
+  //   A: 配方/概率/库存读取 B: calculate/refresh RPC
+  // ═══════════════════════════════════════════════════════════
   function setup(api) {
     const sourceState = Object.fromEntries(Object.keys(SOURCE_NAMES).map((key) => [key, {
       status: 'idle', fetchedAt: null, error: null, stale: false, issues: [],
     }]))
-    let data = { recipes: [], gachaPools: [], inventory: {}, inventoryAvailable: false, market: null }
+    let data = { recipes: [], gachaPools: [], titleCatalog: [], inventory: {}, inventoryAvailable: false, market: null }
     let hostRef = null
     let refreshPromise = null
     let hasRendered = false
@@ -536,6 +787,38 @@
       return error
     }
 
+    function withSourceTimeout(job, timeoutMs = SOURCE_TIMEOUT_MS) {
+      const controller = new AbortController()
+      const parent = api.signal
+      const forwardAbort = () => controller.abort(parent?.reason)
+      if (parent?.aborted) forwardAbort()
+      else parent?.addEventListener?.('abort', forwardAbort, { once: true })
+      let timer = null
+      const cleanup = () => {
+        if (timer) clearTimeout(timer)
+        parent?.removeEventListener?.('abort', forwardAbort)
+      }
+      return new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          cleanup()
+          reject(sourceError('读取超时'))
+        }, timeoutMs)
+        Promise.resolve()
+          .then(() => job(controller.signal))
+          .then(
+            (value) => {
+              cleanup()
+              resolve(value)
+            },
+            (error) => {
+              cleanup()
+              reject(error)
+            },
+          )
+      })
+    }
+
     function setSource(key, patch) {
       Object.assign(sourceState[key], patch)
     }
@@ -554,6 +837,7 @@
       data = {
         recipes: Array.isArray(saved.recipes) ? saved.recipes : [],
         gachaPools: Array.isArray(saved.gachaPools) ? saved.gachaPools : [],
+        titleCatalog: Array.isArray(saved.titleCatalog) ? saved.titleCatalog : [],
         inventory: saved.inventory && typeof saved.inventory === 'object' ? saved.inventory : {},
         inventoryAvailable: saved.inventoryAvailable === true,
         market: saved.market || null,
@@ -565,28 +849,28 @@
 
     async function loadSources() {
       const jobs = {
-        recipes: async () => {
-          const doc = await api.net.doc('/gacha_recipes', { signal: api.signal })
+        recipes: async (signal) => {
+          const doc = await api.net.doc('/gacha_recipes', { signal })
           const failure = classifyDocument(doc)
           if (failure) throw sourceError(failure)
           const parsed = parseRecipes(doc)
           if (!parsed.recipes.length) throw sourceError(parsed.issues[0]?.reason === 'recipes-not-found' ? '页面格式无法识别' : '数据不足')
           return { value: parsed, partial: parsed.issues.length > 0 }
         },
-        gacha: async () => {
-          const doc = await api.net.doc('/gacha', { signal: api.signal })
+        gacha: async (signal) => {
+          const doc = await api.net.doc('/gacha', { signal })
           const failure = classifyDocument(doc)
           if (failure) throw sourceError(failure)
           const parsed = parseGacha(doc)
           if (!parsed.pools.length) throw sourceError(parsed.issues[0]?.reason === 'pools-not-found' ? '页面格式无法识别' : '数据不足')
           return { value: parsed, partial: parsed.issues.length > 0 }
         },
-        inventory: async () => {
-          const doc = await api.net.doc('/gacha_profile', { signal: api.signal })
+        inventory: async (signal) => {
+          const doc = await api.net.doc('/gacha_profile', { signal })
           const failure = classifyDocument(doc)
           if (failure) throw sourceError(failure)
           const parsed = parseInventory(doc)
-          if (!doc.querySelector('[data-gacha-profile]') || parsed.issues.length && !Object.keys(parsed.inventory).length) {
+          if (!parsed.recognized) {
             throw sourceError(parsed.issues[0]?.reason === 'inventory-not-found' ? '页面格式无法识别' : '数据不足')
           }
           return { value: parsed, partial: parsed.issues.length > 0 }
@@ -598,7 +882,7 @@
         },
       }
       const entries = Object.entries(jobs)
-      const results = await Promise.allSettled(entries.map(async ([key, job]) => [key, await job()]))
+      const results = await Promise.allSettled(entries.map(async ([key, job]) => [key, await withSourceTimeout(job)]))
       for (let i = 0; i < results.length; i++) {
         const result = results[i]
         const key = entries[i][0]
@@ -606,8 +890,10 @@
           const loaded = result.value[1]
           const parsed = loaded.value
           if (key === 'recipes') data.recipes = parsed.recipes
-          else if (key === 'gacha') data.gachaPools = parsed.pools
-          else if (key === 'inventory') {
+          else if (key === 'gacha') {
+            data.gachaPools = parsed.pools
+            data.titleCatalog = parsed.titleCatalog || []
+          } else if (key === 'inventory') {
             data.inventory = parsed.inventory
             data.inventoryAvailable = true
           } else data.market = parsed
@@ -627,12 +913,39 @@
           })
         }
       }
+      data.recipes = resolveRecipeRarities(
+        data.recipes,
+        data.titleCatalog,
+        [
+          ...Object.keys(data.market?.titles || {}),
+          ...Object.keys(data.inventory || {}),
+        ],
+      )
       calculatedAt = Date.now()
       try {
         api.store.set('snapshot', { savedAt: Date.now(), data: cloneData(data) })
       } catch {
         /* storage failure does not invalidate current in-memory results */
       }
+      return {
+        sources: cloneData(sourceState),
+        data: cloneData(data),
+      }
+    }
+
+    function snapshot() {
+      return {
+        sources: cloneData(sourceState),
+        data: cloneData(data),
+      }
+    }
+
+    function publicSnapshot() {
+      const full = snapshot()
+      const sources = Object.fromEntries(['recipes', 'gacha', 'inventory'].map((key) => [key, full.sources[key]]))
+      const data = { ...full.data }
+      delete data.market
+      return { sources, data }
     }
 
     function refresh() {
@@ -662,7 +975,15 @@
     }
 
     function routeText(route, key) {
-      if (!route || route.status === 'unavailable') return key === 'gacha' ? '数据不足' : '不可用'
+      if (!route || route.status === 'unavailable') {
+        if (route?.reason === 'market-insufficient') {
+          const missing = (Array.isArray(route.missing) ? route.missing : [])
+            .map((row) => `${row.name || row.key}还缺${Math.round(Number(row.qty) * 100) / 100}个`)
+            .join('、')
+          return `挂单不足${missing ? `：${missing}` : ''}`
+        }
+        return key === 'gacha' ? '数据不足' : '不可用'
+      }
       const cost = Number.isFinite(route.cost) ? `预计 ${Math.round(route.cost * 100) / 100} 积分` : '成本未知'
       if (route.status === 'insufficient') return `${cost} · 还差 ${Math.round((route.shortfall || 0) * 100) / 100} 积分`
       if (route.currentPoints == null) return cost
@@ -671,14 +992,40 @@
 
     function routeHtml(route, key) {
       const label = key === 'marketLow' ? '市场最低挂单' : key === 'marketMedian' ? '市场中位价估算' : '抽取路线'
-      const note = key === 'gacha' ? '期望值，不保证实际结果' : ''
-      const steps = route?.status === 'unavailable' ? '' : (route?.steps || []).slice(0, 10).map((step) => {
-        if (step.kind === 'market') return `<li>${esc(step.key)}：${esc(step.qty)} 个 × ${esc(step.price)}</li>`
-        if (step.kind === 'median') return `<li>${esc(step.key)}：中位价 ${esc(step.price)} × ${esc(step.qty)}</li>`
-        if (step.kind === 'inventory') return `<li>${esc(step.key)}：库存抵扣 ${esc(step.qty)}</li>`
-        if (step.kind === 'gacha') return `<li>期望抽取 ${esc(Math.round((step.expectedDraws || 0) * 100) / 100)} 次</li>`
-        return ''
-      }).filter(Boolean).join('')
+      const note = key === 'gacha' ? route?.approximate ? '近似期望值，不保证实际结果' : '期望值，不保证实际结果' : ''
+      const steps = route?.status === 'unavailable' ? '' : (() => {
+        const rows = []
+        const marketGroups = new Map()
+        for (const step of Array.isArray(route?.steps) ? route.steps : []) {
+          if (step.kind === 'market') {
+            let group = marketGroups.get(step.key)
+            if (!group) {
+              group = { key: step.key, qty: 0, cost: 0, tiers: [] }
+              marketGroups.set(step.key, group)
+              rows.push({ kind: 'market', group })
+            }
+            const price = Number(step.price)
+            let tier = group.tiers.find((item) => item.price === price)
+            if (!tier) {
+              tier = { price, qty: 0 }
+              group.tiers.push(tier)
+            }
+            tier.qty += Number(step.qty) || 0
+            group.qty += Number(step.qty) || 0
+            group.cost += Number(step.cost) || 0
+            continue
+          }
+          if (step.kind === 'median') rows.push({ html: `<li>${esc(step.key)}：中位价 ${esc(step.price)} × ${esc(step.qty)}</li>` })
+          else if (step.kind === 'inventory') rows.push({ html: `<li>${esc(step.key)}：库存抵扣 ${esc(step.qty)}</li>` })
+          else if (step.kind === 'gacha') rows.push({ html: `<li>期望抽取 ${esc(Math.round((step.expectedDraws || 0) * 100) / 100)} 次</li>` })
+        }
+        return rows.map((row) => {
+          if (row.html) return row.html
+          const group = row.group
+          const tiers = group.tiers.map((tier) => `${esc(tier.qty)} 个 × ${esc(tier.price)}`).join(' + ')
+          return `<li>${esc(group.key)}：${tiers}（合计 ${esc(group.qty)} 个，${esc(Math.round(group.cost * 100) / 100)} 积分）</li>`
+        }).join('')
+      })()
       const selectorKey = key === 'marketLow' ? 'market-low' : key === 'marketMedian' ? 'market-median' : 'gacha'
       return `<div class="lsb-title-forge-planner-plan" data-title-forge-planner-plan="${esc(selectorKey)}"><strong>${esc(label)}</strong><span>${esc(routeText(route, key))}</span>${note ? `<em>${esc(note)}</em>` : ''}${steps ? `<details><summary>查看步骤</summary><ul>${steps}</ul></details>` : ''}</div>`
     }
@@ -702,24 +1049,14 @@
 
     restoreCache()
     api.ui.style('.lsb-title-forge-planner{padding:8px 0;color:var(--text,#222)}.lsb-title-forge-planner-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.lsb-title-forge-planner-head strong{font-size:18px}.lsb-title-forge-planner-head span{font-size:12px;color:var(--muted,#777)}.lsb-title-forge-planner-head button{margin-left:auto}.lsb-title-forge-planner-sources{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin:12px 0}.lsb-title-forge-planner-sources>div{display:flex;flex-direction:column;gap:3px;padding:7px 9px;border:1px solid var(--line-soft,#eee);border-radius:7px}.lsb-title-forge-planner-sources span{font-size:12px;color:var(--muted,#777)}.lsb-title-forge-planner-sources small{color:var(--danger,#b44)}.lsb-title-forge-planner-warning{padding:8px;border:1px solid var(--warning,#c90);border-radius:7px;margin:8px 0}.lsb-title-forge-planner-mode{margin:12px 0;padding:10px;border:1px solid var(--line-soft,#eee);border-radius:9px}.lsb-title-forge-planner-mode h3{margin:0 0 6px}.lsb-title-forge-planner-summary{font-weight:600}.lsb-title-forge-planner-mode article{padding:8px 0;border-top:1px solid var(--line-soft,#eee)}.lsb-title-forge-planner-mode h4{margin:0 0 6px}.lsb-title-forge-planner-mode h4 small{font-weight:400;color:var(--muted,#777)}.lsb-title-forge-planner-plan{display:grid;grid-template-columns:150px 1fr;gap:5px;padding:4px 0;font-size:13px}.lsb-title-forge-planner-plan em{grid-column:2;color:var(--brand,#5eaaa0);font-size:12px}.lsb-title-forge-planner-plan details{grid-column:2}.lsb-title-forge-planner-plan ul{margin:4px 0 0;padding-left:18px}.lsb-title-forge-planner-plan span{color:var(--muted,#666)}@media(max-width:620px){.lsb-title-forge-planner-plan{grid-template-columns:1fr}.lsb-title-forge-planner-plan em,.lsb-title-forge-planner-plan details{grid-column:1}.lsb-title-forge-planner-head button{margin-left:0}}')
-    api.ui.tab({
-      name: 'UR 合成规划',
-      order: 67,
-      render(host) {
-        hostRef = host
-        paint(host)
-        if (!hasRendered) {
-          hasRendered = true
-          refresh()
-        }
-      },
-    })
-
+    api.handle('title-forge-planner:refresh', () => refresh().then(() => publicSnapshot()))
+    api.handle('title-forge-planner:calculate', (input = {}) => calculatePlans(input))
     api.handle('title-forge-planner:debug', () => ({
       keyOf,
       parseRecipes,
       parseGacha,
       parseInventory,
+      resolveRecipeRarities,
       missingInputs,
       marketCost,
       medianCost,

@@ -1,15 +1,27 @@
 {
   "name": "linuxsb-base",
-  "version": "0.1.43",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build.mjs && node build-suite.mjs && node build-lts.mjs",
+    "build": "node build.mjs --profile=release && node build-suite.mjs --profile=release && node build-lts.mjs --profile=release",
+    "build:dev": "node build.mjs --profile=dev && node build-suite.mjs --profile=dev",
     "verify:dist": "node scripts/check-dist.mjs",
-    "test": "node --test --test-force-exit --test-concurrency=4"
+    "verify:dev-dist": "node scripts/check-dev-dist.mjs",
+    "verify:profiles": "npm run verify:dist && npm run verify:dev-dist",
+    "smoke:ios27": "node scripts/ios27-canvas-smoke.mjs",
+    "smoke:legacy": "node scripts/legacy-home-scroll-smoke.mjs",
+    "test": "node scripts/run-tests.mjs quick",
+    "test:quick": "node scripts/run-tests.mjs quick",
+    "test:core": "node scripts/run-tests.mjs core",
+    "test:all": "node scripts/run-tests.mjs all",
+    "test:ai": "node scripts/run-tests.mjs ai",
+    "test:live-feed": "node scripts/run-tests.mjs live-feed",
+    "test:skin": "node scripts/run-tests.mjs skin"
   },
   "devDependencies": {
     "esbuild": "^0.25.5",
-    "jsdom": "26.1.0"
+    "jsdom": "26.1.0",
+    "playwright": "^1.63.0"
   }
 }

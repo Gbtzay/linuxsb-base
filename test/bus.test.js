@@ -2,6 +2,12 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Bus } from '../src/bus.js'
 import { satisfies, compareVersion, clone } from '../src/util.js'
+import * as util from '../src/util.js'
+
+test('未使用的基础工具导出已移除', () => {
+  assert.equal(Object.hasOwn(util, 'noop'), false)
+  assert.equal(Object.hasOwn(util, 'isPlainObject'), false)
+})
 
 test('基本订阅与广播', () => {
   const bus = new Bus({ onError: () => {} })

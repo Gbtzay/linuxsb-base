@@ -72,7 +72,7 @@ test('LTS：只装这一份则 ORDER_LTS 全部激活，砍掉的不在，面板
     assert.equal(byId[id], 'active', id)
   }
   assert.equal(byId.suite, 'active')
-  for (const id of ['title-quotes', 'forum-watch', 'ai-summary', 'ai-copilot', 'ai-actions', 'ai-workbench', 'my-archive', 'hot-floor-badge', 'perf-probe', 'hover-profile', 'local-bridge', 'topic-marks']) {
+  for (const id of ['title-quotes', 'title-forge-planner', 'points-title-workbench', 'forum-watch', 'ai-summary', 'ai-copilot', 'ai-actions', 'ai-workbench', 'my-archive', 'hot-floor-badge', 'perf-probe', 'local-bridge', 'topic-marks']) {
     assert.equal(byId[id], undefined, id)
   }
   assert.equal(byId.suite, 'active')

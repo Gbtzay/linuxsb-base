@@ -2,7 +2,7 @@
 // @name         LSB·称号行情
 // @namespace    https://linux.sb/
 // @version      1.0.19
-// @description  采集称号交易挂单的最低/最高与中位数；全场锚点折线，各称号可切挂单合成K或高低折线；交易页与全站浮层可切分析大盘。氢壳开着时走左栏，关壳才留右下钮。打开浮层时巡检加快。纯读，不提交购买。需要 LINUX.SB 基座。
+// @description  采集称号交易挂单的最低/最高与中位数；全场锚点折线，各称号可切挂单合成K或高低折线；交易页内嵌行情分析。氢壳工作台提供统一访问，纯读，不提交购买。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -22,7 +22,7 @@
     id: 'title-quotes',
     name: '称号行情',
     version: '1.0.19',
-    description: '称号交易挂单高低价、全场锚点折线；各称号可切挂单合成K或高低折线；全站浮层；氢壳开着走左栏，关壳才留右下钮',
+    description: '采集称号交易挂单行情并提供交易页内嵌分析；工作台通过正式 RPC 读取市场快照',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
@@ -528,6 +528,11 @@
     return lines.join('\n')
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // 章节索引（1736 行，行情数据源 + 交易页内嵌 + 工作台 RPC）：
+  //   A: 市场快照采集与轮询 B: 交易页行情折叠/折线/K 线 C: title-quotes:market-data / refresh 供给
+  // 拆分建议：渲染层提 title-quotes/render.js。
+  // ═══════════════════════════════════════════════════════════
   function setup(api) {
     const esc = api.util.esc
     let cfg = api.config()
@@ -606,7 +611,29 @@
       return true
     }
 
-    function ingestListings(listings, now = Date.now()) {
+    function normalizeCoverage(coverage = {}, listings = []) {
+      const expectedPages = Number.isFinite(Number(coverage.expectedPages)) && Number(coverage.expectedPages) > 0
+        ? Math.min(MAX_PAGES, Math.floor(Number(coverage.expectedPages)))
+        : 1
+      const fetchedPages = Number.isFinite(Number(coverage.fetchedPages)) && Number(coverage.fetchedPages) >= 0
+        ? Math.min(expectedPages, Math.floor(Number(coverage.fetchedPages)))
+        : expectedPages
+      const failedPages = Number.isFinite(Number(coverage.failedPages)) && Number(coverage.failedPages) >= 0
+        ? Math.min(expectedPages, Math.floor(Number(coverage.failedPages)))
+        : 0
+      const challengePages = Number.isFinite(Number(coverage.challengePages)) && Number(coverage.challengePages) >= 0
+        ? Math.min(expectedPages, Math.floor(Number(coverage.challengePages)))
+        : 0
+      return {
+        complete: coverage.complete === true || (fetchedPages === expectedPages && failedPages === 0 && challengePages === 0 && listings.length > 0),
+        expectedPages,
+        fetchedPages,
+        failedPages,
+        challengePages,
+      }
+    }
+
+    function ingestListings(listings, now = Date.now(), coverage = {}) {
       const prev = api.store.get('book', null)
       const flow = estimateFlow(prev, listings, now)
       api.store.set('book', { t: now, rows: bookFromListings(listings) })
@@ -616,7 +643,9 @@
         titles[k].fills = flow[k]?.fills ?? 0
       }
       const market = {
+        schema: 2,
         fetchedAt: now,
+        coverage: normalizeCoverage(coverage, listings || []),
         listings: (listings || [])
           .filter((x) => x && x.name && x.rarity != null && Number.isFinite(Number(x.price)))
           .map((x) => ({
@@ -1262,30 +1291,48 @@
       if (body) render(body)
     }
 
+    function isChallengePage(doc) {
+      const text = String(doc?.body?.textContent || doc?.documentElement?.textContent || '')
+      return /cloudflare|checking your browser|challenge/i.test(text)
+    }
+
     async function cycle(force = false) {
       if (inflight) return inflight
       if (election.role === 'follower' && !force) return null
       inflight = (async () => {
+        const coverage = { expectedPages: 1, fetchedPages: 0, failedPages: 0, challengePages: 0 }
         try {
           const lists = []
-          const first = await api.net.doc('/gacha_market?p=1')
+          const readPage = async (path) => {
+            try {
+              const doc = await api.net.doc(path)
+              if (isChallengePage(doc)) {
+                coverage.challengePages += 1
+                throw new Error('挑战页未完成')
+              }
+              coverage.fetchedPages += 1
+              return doc
+            } catch (error) {
+              if (!/挑战页未完成/.test(String(error?.message || error))) coverage.failedPages += 1
+              throw error
+            }
+          }
+          const first = await readPage('/gacha_market?p=1')
           lists.push(parseCards(first))
           const pages = parsePageCount(first)
+          coverage.expectedPages = pages
           for (let p = 2; p <= pages; p++) {
-            lists.push(parseCards(await api.net.doc(`/gacha_market?p=${p}`)))
+            lists.push(parseCards(await readPage(`/gacha_market?p=${p}`)))
           }
           if (isMarket()) lists.push(parseCards(document))
           const listings = mergeListings(lists)
-          if (!listings.length) {
-            lastErr = null
-            return { empty: true }
-          }
-          ingestListings(listings)
+          if (!listings.length) throw new Error('市场页面格式无法识别')
+          ingestListings(listings, Date.now(), coverage)
           lastErr = null
           lastAt = Date.now()
           toasted = false
           refreshViews()
-          return { n: listings.length }
+          return { n: listings.length, market: api.store.get('market', null) }
         } catch (e) {
           lastErr = String((e && e.message) || e)
           api.log('采集失败', lastErr)
@@ -1300,6 +1347,15 @@
         }
       })()
       return inflight
+    }
+
+    async function refreshMarket() {
+      const result = await cycle(true)
+      const market = result?.market || null
+      if (!result || !market?.coverage?.complete) {
+        throw new Error(lastErr || '行情数据不足')
+      }
+      return market
     }
 
     function watching() {
@@ -1432,16 +1488,6 @@
     function unmountFloat() {
       document.querySelectorAll('.lsb-title-quotes-float').forEach((n) => n.remove())
     }
-    function unmountFab() {
-      document.querySelectorAll('.lsb-title-quotes-fab').forEach((n) => n.remove())
-    }
-    function shellOn() {
-      return document.documentElement.classList.contains('lsb-skin-shell-on')
-    }
-    function syncFab() {
-      if (shellOn()) unmountFab()
-      else mountFab()
-    }
     function bindChrome(el) {
       const head = el.querySelector('.lsb-title-quotes-float-head')
       head.addEventListener('pointerdown', (e) => {
@@ -1513,19 +1559,6 @@
       if (!api.store.get('floatOpen')) return
       closeFloat()
     }
-    function mountFab() {
-      let btn = document.querySelector('.lsb-title-quotes-fab')
-      if (!btn) {
-        btn = document.createElement('button')
-        btn.className = 'lsb-title-quotes-fab'
-        btn.type = 'button'
-        btn.textContent = '行情'
-        btn.title = '称号行情'
-        btn.setAttribute('aria-label', '称号行情')
-        document.body.append(btn)
-        btn.addEventListener('click', () => openFloat())
-      }
-    }
     function mountFloat() {
       let el = document.querySelector('.lsb-title-quotes-float')
       if (!el) {
@@ -1579,21 +1612,9 @@
     api.on('route:changed', () => {
       mountEmbed()
       if (isMarket()) scheduleForceSnap()
-      syncFab()
     })
-    api.on('plugin:activated', syncFab)
-    api.on('plugin:disabled', syncFab)
-    api.on('config:changed:skin', () => {
-      queueMicrotask(syncFab)
-    })
-    const fabWatch = new MutationObserver(syncFab)
-    fabWatch.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
     mountEmbed()
     if (isMarket()) scheduleForceSnap()
-    syncFab()
-    if (api.store.get('floatOpen')) showFloat({ expand: false })
-    api.handle('title-quotes:open', () => openFloat())
-
     api.onDispose(() => {
       if (timer) clearTimeout(timer)
       if (forceTimer) clearTimeout(forceTimer)
@@ -1608,10 +1629,8 @@
       window.removeEventListener('resize', onWinResize)
       document.removeEventListener('keydown', onKey)
       document.removeEventListener('visibilitychange', onVis)
-      fabWatch.disconnect()
       unmountEmbed()
       unmountFloat()
-      unmountFab()
     })
 
     api.ui.tab({
@@ -1619,17 +1638,6 @@
       order: 66,
       render(host) {
         api.ui.buildForm(host, manifest.config, api.config(), (v) => api.saveConfig(v))
-        const row = document.createElement('div')
-        row.className = 'lsb-actions'
-        row.style.justifyContent = 'flex-start'
-        row.style.borderTop = '0'
-        const btn = document.createElement('button')
-        btn.type = 'button'
-        btn.className = 'lsb-btn is-primary'
-        btn.textContent = '打开浮层'
-        btn.addEventListener('click', () => openFloat())
-        row.appendChild(btn)
-        host.appendChild(row)
       },
     })
 
@@ -1657,7 +1665,6 @@
         '.lsb-title-quotes-mover{display:flex;gap:8px;justify-content:space-between;align-items:baseline;margin:4px 0;font-size:13px}' +
         '.lsb-title-quotes-name{border:0;background:none;padding:0;color:var(--brand,#5eaaa0);cursor:pointer;font:inherit;text-align:left}' +
         '.lsb-title-quotes-name:hover{text-decoration:underline}' +
-        '.lsb-title-quotes-fab{position:fixed;right:62px;bottom:74px;z-index:99998;width:38px;height:38px;border-radius:50%;border:1px solid var(--line,#ddd);background:var(--panel,#fff);color:var(--brand,#5eaaa0);cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 12px var(--shadow-base,rgba(0,0,0,.15))}' +
         '.lsb-title-quotes-float{position:fixed;z-index:99990;display:flex;flex-direction:column;background:var(--panel,#fff);color:var(--text,#222);border:1px solid var(--line,#ddd);border-radius:10px;box-shadow:0 18px 48px var(--shadow-medium,rgba(0,0,0,.3));overflow:hidden;overscroll-behavior:contain}' +
         '.lsb-title-quotes-float-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line-soft,#eee);cursor:move;flex:0 0 auto}' +
         '.lsb-title-quotes-float-head strong{font-size:14px;margin-right:auto}' +
@@ -1669,6 +1676,7 @@
     )
 
     api.handle('title-quotes:market-data', () => api.store.get('market', null))
+    api.handle('title-quotes:refresh', () => refreshMarket())
     api.handle('title-quotes:debug', () => ({
       parseCards,
       parsePageCount,
@@ -1706,6 +1714,7 @@
         api.store.set('market', null)
       },
       snap: () => cycle(true),
+      refresh: refreshMarket,
       intervalMs: pollMs,
       watching,
       watchBeat: () => api.store.get('watchBeat', null),

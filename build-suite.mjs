@@ -1,19 +1,20 @@
 #!/usr/bin/env node
 /**
- * 打包重型套件：plugins/*.user.js（全部模块）+ 套件中心 → dist/linuxsb-suite.user.js
- *
- * 设计：套件是「多个独立模块共居一个油猴脚本」——每个模块仍以自己的 manifest
- * 向基座注册，因此保留：单独启停、独立配置页、权限声明、依赖解析。
- * 额外提供一个『套件总览』仪表盘 Tab：状态卡片 + 快捷开关 + 跨模块关键指标。
+ * 按构建配置输出 Oxygen：正式版在 dist/ 排除 AI 模块；开发版在 dist-dev/ 保留完整 ORDER。
+ * 各模块仍以自己的 manifest 向基座注册，因此保留单独启停、独立配置页、权限声明和依赖解析。
  */
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const SUITE_VERSION = '2.0.23'
+import { ORDER, ORDER_RELEASE, SUITE_EXCLUDE } from './suite/order.js'
+import { outputDirectory, readBuildProfile, readPluginBody, readPluginMeta, readSuiteCenter, SUITE_VERSION } from './scripts/build-common.mjs'
 
-import { ORDER, SUITE_EXCLUDE } from './suite/order.js'
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const profile = readBuildProfile()
+const distDir = outputDirectory(profile)
+const isDev = profile === 'dev'
+const members = isDev ? ORDER : ORDER_RELEASE
 
 const pluginFiles = readdirSync(join(__dirname, 'plugins'))
   .filter((f) => f.endsWith('.user.js'))
@@ -43,25 +44,29 @@ if (ghost.length) {
  * 因此下面做构建期校验，让漂移在打包时就暴露。
  */
 const readPlug = (id) => {
-  const raw = readFileSync(join(__dirname, 'plugins', `${id}.user.js`), 'utf8')
-  const version = raw.match(/@version\s+([\d.]+)/)?.[1] || null
-  const name = raw.match(/@name\s+(.+)/)?.[1]?.trim() || id
-  const manifestVersion = raw.match(/\bversion:\s*'([\d][\w.\-+]*)'/)?.[1] || null
-  const manifestId = raw.match(/\bid:\s*'([a-z0-9-]+)'/)?.[1] || null
+  const { headerVersion, headerName, manifestVersion, manifestId, raw } = readPluginMeta(id)
+  if (raw.charCodeAt(0) === 0xfeff) {
+    console.error(`✘ ${id}：源码带 UTF-8 BOM，不能安全拼接进套件产物`)
+    process.exit(1)
+  }
+  if (/\r/.test(raw)) {
+    console.error(`✘ ${id}：源码含 CRLF 行尾，请统一保存为 LF 后再打包`)
+    process.exit(1)
+  }
   const header = raw.match(/^\/\/ ==UserScript==\r?\n[\s\S]*?\/\/ ==\/UserScript==\r?\n*/)
   if (!header) {
     console.error(`✘ ${id}：文件必须以油猴头开头，套件打包才能剥离内嵌头`)
     process.exit(1)
   }
-  const code = raw.slice(header[0].length)
+  const code = readPluginBody(id, profile)
   if (/\/\/ ==UserScript==/.test(code)) {
     console.error(`✘ ${id}：剥离油猴头后仍含 ==UserScript==，请勿在模块正文里写这段标记`)
     process.exit(1)
   }
-  return { id, code, version, name, manifestVersion, manifestId }
+  return { id, code, version: headerVersion, name: headerName, manifestVersion, manifestId }
 }
 
-const mods = ORDER.map(readPlug)
+const mods = members.map(readPlug)
 
 /* ── 一致性校验：版本号双处对齐 + manifest id 与文件名对齐 ── */
 const versionIssues = []
@@ -74,7 +79,9 @@ for (const m of mods) {
         `（banner 显示前者、套件卡片显示后者，会对不上号）`,
     )
   }
-  if (m.manifestId && m.manifestId !== m.id) {
+  if (!m.manifestId) {
+    versionIssues.push(`${m.id}：manifest 缺少可识别的静态 id`)
+  } else if (m.manifestId !== m.id) {
     versionIssues.push(`${m.id}：manifest.id 为 "${m.manifestId}"，与文件名不一致（ORDER/停用键均以文件名为准）`)
   }
 }
@@ -88,18 +95,26 @@ if (versionIssues.length) {
 }
 
 /** 套件中心：独立文件读取，__SUITE_MEMBERS__ 由构建时注入 */
-const suiteCenter = readFileSync(join(__dirname, 'suite', 'suite-center.js'), 'utf8')
-.replace('__SUITE_MEMBERS__', JSON.stringify(ORDER))
+const suiteCenter = readSuiteCenter(members)
 
-mkdirSync(join(__dirname, 'dist'), { recursive: true })
+mkdirSync(join(__dirname, distDir), { recursive: true })
+
+const publicName = isDev ? 'LINUX.SB 氧（开发版）' : 'LINUX.SB 氧'
+const publicNameEn = isDev ? 'LINUX.SB Oxygen (Developer Build)' : 'LINUX.SB Oxygen'
+const publicDescription = isDev
+  ? `linux.sb 开发版功能套件（含 AI），共 ${mods.length} 个模块。仅用于开发与测试。`
+  : `linux.sb 正式功能套件：氢壳、实时流、未读哨兵、签到日历等 ${mods.length} 个非 AI 模块。`
+const publicDescriptionEn = isDev
+  ? `Developer feature pack for linux.sb, including AI modules. ${mods.length} modules; for development and testing only.`
+  : `Public feature pack for linux.sb with ${mods.length} non-AI modules. Requires LINUX.SB Hydrogen.`
 
 const banner = `// ==UserScript==
-// @name         LINUX.SB 氧
-// @name:en      LINUX.SB Oxygen
+// @name         ${publicName}
+// @name:en      ${publicNameEn}
 // @namespace    https://linux.sb/
 // @version      ${SUITE_VERSION}
-// @description  linux.sb 功能套件：氢壳、实时流、未读哨兵、AI 总结、签到日历等 ${mods.length} 个模块。必须先安装「LINUX.SB 氢」。
-// @description:en  Feature pack for linux.sb (shell, live feed, unread sentinel, AI summary, check-in, and more). Requires LINUX.SB Hydrogen.
+// @description  ${publicDescription}
+// @description:en  ${publicDescriptionEn}
 // @author       xB70sR71
 // @license      MIT
 // @match        https://linux.sb/*
@@ -112,7 +127,6 @@ const banner = `// ==UserScript==
 // ── 包含模块 ──
 ${mods.map((m) => `// · ${m.name} v${m.version}`).join('\n')}
 //
-
 `
 
 const body =
@@ -121,8 +135,8 @@ const body =
   '\n' +
   suiteCenter
 
-const out = join(__dirname, 'dist/linuxsb-suite.user.js')
+const out = join(__dirname, `${distDir}/linuxsb-suite.user.js`)
 writeFileSync(out, body)
 
 const size = readFileSync(out).length
-console.log(`✔ dist/linuxsb-suite.user.js  ${(size / 1024).toFixed(1)} KB  v${SUITE_VERSION} · ${mods.length} 模块`)
+console.log(`✔ ${distDir}/linuxsb-suite.user.js  ${(size / 1024).toFixed(1)} KB  v${SUITE_VERSION} · ${mods.length} 模块 · ${profile}`)

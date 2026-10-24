@@ -1,5 +1,5 @@
 import { Core, VERSION, PERMISSIONS } from './core.js'
-import { applyShellBoot, watchShellBoot } from './shell-boot.js'
+import { applyShellBoot, watchShellBoot } from './shell/boot.js'
 
 function inIframe() {
   try {

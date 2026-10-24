@@ -98,8 +98,9 @@ test('称号行情：分页缺失时不把部分快照标记为完整', async ()
 test('称号行情：按需刷新复用进行中的采集请求', async () => {
   const { w, dbg } = await boot()
   dbg.reset()
-  const first = w.LSB.bus.request('title-quotes:refresh')
-  const second = w.LSB.bus.request('title-quotes:refresh')
+  const dbg = await w.LSB.bus.request('title-quotes:debug')
+  const first = dbg.refresh()
+  const second = dbg.refresh()
   assert.equal(first, second)
   await assert.rejects(first, /market|coverage|data/i)
 })
@@ -342,8 +343,15 @@ async function bootWorkbench({ preload = {}, fetchGacha = fixture('gacha.html') 
     PLUG('title-forge-planner.user.js'),
     PLUG('points-title-workbench.user.js'),
   )
-  return { w, calls, tick }
-}
+  const until = async (fn, ms = 2000) => {
+    const end = Date.now() + ms
+    while (Date.now() <= end) {
+      if (fn()) return true
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    return false
+  }
+  return { w, calls, tick, until }
 
 test('工作台：打开后默认总览并复用缓存，同时启动单飞刷新', async () => {
   const cached = {
@@ -353,14 +361,17 @@ test('工作台：打开后默认总览并复用缓存，同时启动单飞刷�
     plans: null,
   }
   const { w, calls } = await bootWorkbench({ preload: { 'lsb_base:points-title-workbench:snapshot': cached } })
-  const first = w.LSB.bus.request('points-title-workbench:open')
-  const second = w.LSB.bus.request('points-title-workbench:open')
-  assert.equal(first, second)
+  const opening = w.LSB.bus.request('points-title-workbench:open')
   await new Promise((resolve) => setTimeout(resolve, 0))
   const root = w.document.querySelector('[data-points-title-workbench]')
   assert.ok(root)
   assert.match(root.querySelector('[data-workbench-view="overview"]').textContent, /总览|当前积分/)
   assert.equal(root.querySelector('[data-workbench-tab].is-active')?.dataset.workbenchTab, 'overview')
+  const dbg = await w.LSB.bus.request('points-title-workbench:debug')
+  const first = dbg.refresh()
+  const second = dbg.refresh()
+  assert.equal(first, second)
+  await Promise.all([opening, first])
   assert.ok(calls.length > 0)
 })
 
@@ -477,7 +488,7 @@ git -c core.whitespace=cr-at-eol diff --check -- plugins/points-title-workbench.
 
 ```js
 test('工作台：总览显示两种模式和三类路线', async () => {
-  const { w } = await bootWorkbench()
+  const { w, until } = await bootWorkbench()
   await w.LSB.bus.request('points-title-workbench:open')
   await until(() => w.document.querySelector('[data-workbench-route="market-low"]'))
   const root = w.document.querySelector('[data-points-title-workbench]')
@@ -495,7 +506,8 @@ test('工作台：窄屏使用单列且窗口矩形保持在视口内', async ()
   Object.defineProperty(w, 'innerHeight', { configurable: true, value: 640 })
   await w.LSB.bus.request('points-title-workbench:open')
   const root = w.document.querySelector('[data-points-title-workbench]')
-  assert.match(root.querySelector('style')?.textContent || '', /max-width|grid-template-columns|@media/)
+  const styles = [...w.document.querySelectorAll('style')].map((node) => node.textContent).join('\n')
+  assert.match(styles, /max-width|grid-template-columns|@media/)
   const dbg = await w.LSB.bus.request('points-title-workbench:debug')
   const rect = dbg.state().rect
   assert.ok(rect.left >= 0 && rect.top >= 0)
@@ -504,7 +516,7 @@ test('工作台：窄屏使用单列且窗口矩形保持在视口内', async ()
 })
 
 test('工作台：无完整来源时显示固定错误文案而不是无限读取', async () => {
-  const { w } = await bootWorkbench({ fetchGacha: '<html><body>登录</body></html>' })
+  const { w, until } = await bootWorkbench({ fetchGacha: '<html><body>登录</body></html>' })
   await w.LSB.bus.request('points-title-workbench:open')
   await until(() => !w.document.querySelector('[data-workbench-source="gacha"] .is-loading'))
   const text = w.document.querySelector('[data-points-title-workbench]').textContent

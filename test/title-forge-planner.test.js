@@ -86,12 +86,13 @@ function fixtureDataWithPoints(points, inventory = { '蓝色火花@SSR': 1, '旧
 
 async function bootPlanner({
   points = 500,
+  market = fixtureDataWithPoints(points).market,
   fetchRecipes = fixture('gacha-recipes.html'),
   fetchGacha = fixture('gacha.html'),
   fetchProfile = fixture('gacha-profile.html'),
 } = {}) {
   const { w, tick } = makeDom(loggedInHome(points), 'https://linux.sb/', {
-    'lsb_base:title-quotes:market': fixtureDataWithPoints(points).market,
+    'lsb_base:title-quotes:market': market,
   })
   const calls = []
   w.fetch = async (url, init = {}) => {
@@ -113,6 +114,19 @@ async function bootPlanner({
   }
   return { w, tick, calls, dbg, until }
 }
+
+test('UR 规划器：保留正式 RPC，不注册独立 UI 页签', async () => {
+  const { w, tick } = await bootPlanner()
+  w.LSB.open('title-forge-planner')
+  await tick(10)
+  assert.equal(
+    [...w.document.querySelectorAll('.lsb-tabs .lsb-tab')].some((tab) => /UR 合成规划/.test(tab.textContent || '')),
+    false,
+  )
+  assert.equal(w.document.querySelector('[data-title-forge-planner]'), null)
+  assert.equal(await w.LSB.bus.hasHandler('title-forge-planner:refresh'), true)
+  assert.equal(await w.LSB.bus.hasHandler('title-forge-planner:calculate'), true)
+})
 
 test('UR 规划器：解析 UR 配方、抽取池和称号库存', async () => {
   const { dbg } = await bootPlanner()
@@ -231,6 +245,82 @@ test('UR 规划器：有积分足够的方案时优先返回可行最低路线�
   assert.ok(short.modes.noInventory.summary.nearest.shortfall > 0)
 })
 
+test('UR 规划器：大配方抽取期望值以有界近似计算', async () => {
+  const { dbg } = await bootPlanner()
+  const required = [
+    ['传说之龙', 'SSR', 20],
+    ['全站偶像', 'SSR', 100],
+    ['富可敌国', 'SSR', 5],
+    ['欧皇', 'SSR', 20],
+    ['氪金大佬', 'SSR', 100],
+    ['管理员之友', 'SSR', 20],
+    ['隐藏大佬', 'SSR', 20],
+    ['路人甲', 'N', 1],
+  ].map(([name, rarity, qty]) => ({ key: `${name}@${rarity}`, name, rarity, qty }))
+  const outcomes = required.map((item) => ({
+    key: item.key,
+    probability: item.rarity === 'SSR' ? 0.01 / 7 : 0.53 / 5,
+  }))
+  outcomes.push(
+    ...Array.from({ length: 5 }, (_, i) => ({ key: `其它SR${i}@SR`, probability: 0.16 / 5 })),
+    ...Array.from({ length: 6 }, (_, i) => ({ key: `其它R${i}@R`, probability: 0.30 / 6 })),
+    ...Array.from({ length: 4 }, (_, i) => ({ key: `其它N${i}@N`, probability: 0.53 / 5 })),
+  )
+  const plan = dbg.expectedGachaCost(required, [{
+    id: 'standard',
+    label: '标准抽取',
+    drawCost: 8,
+    outcomes,
+    probabilityComplete: true,
+  }], 0)
+  assert.equal(plan.status, 'ok')
+  assert.equal(plan.approximate, true)
+  assert.ok(plan.expectedDraws > 0)
+  assert.equal(plan.expectedCost, plan.expectedDraws * 8)
+  const calculated = dbg.calculatePlans({
+    recipes: [{ id: 'large-ur', target: { key: '大型@UR', name: '大型', rarity: 'UR' }, inputs: required, fee: 0 }],
+    market: {},
+    gachaPools: [{ id: 'standard', label: '标准抽取', drawCost: 8, outcomes, probabilityComplete: true }],
+  })
+  assert.equal(calculated.modes.noInventory.targets[0].routes.gacha.approximate, true)
+})
+
+test('UR 规划器：真实大盘三张 UR 配方可完成面板计算', async () => {
+  const { dbg } = await bootPlanner()
+  const names = [
+    ['传说之龙', 'SSR'], ['全站偶像', 'SSR'], ['富可敌国', 'SSR'], ['欧皇', 'SSR'],
+    ['氪金大佬', 'SSR'], ['管理员之友', 'SSR'], ['隐藏大佬', 'SSR'], ['路人甲', 'N'],
+    ['反贼', 'R'],
+  ]
+  const probabilityByRarity = { SSR: 0.01 / 7, SR: 0.16 / 5, R: 0.30 / 6, N: 0.53 / 5 }
+  const outcomes = names.map(([name, rarity]) => ({ key: `${name}@${rarity}`, probability: probabilityByRarity[rarity] }))
+  outcomes.push(
+    ...[['萌新', 'N'], ['潜水员', 'N'], ['吃瓜群众', 'N'], ['打酱油的', 'N']].map(([name, rarity]) => ({ key: `${name}@${rarity}`, probability: probabilityByRarity[rarity] })),
+    ...[['常客', 'R'], ['话题王', 'R'], ['回复达人', 'R'], ['夜猫子', 'R'], ['表情包大户', 'R']].map(([name, rarity]) => ({ key: `${name}@${rarity}`, probability: probabilityByRarity[rarity] })),
+    ...[['论坛之星', 'SR'], ['万人迷', 'SR'], ['键盘侠', 'SR'], ['精华收割机', 'SR'], ['社交达人', 'SR']].map(([name, rarity]) => ({ key: `${name}@${rarity}`, probability: probabilityByRarity[rarity] })),
+  )
+  const recipes = [
+    [['传说之龙', 1], ['全站偶像', 1], ['富可敌国', 1], ['欧皇', 1], ['氪金大佬', 1], ['管理员之友', 1], ['隐藏大佬', 1], ['路人甲', 100]],
+    [['传说之龙', 1], ['全站偶像', 10], ['富可敌国', 1], ['欧皇', 1], ['氪金大佬', 10], ['管理员之友', 1], ['隐藏大佬', 1], ['反贼', 1]],
+    [['传说之龙', 20], ['全站偶像', 100], ['富可敌国', 5], ['欧皇', 20], ['氪金大佬', 100], ['管理员之友', 20], ['隐藏大佬', 20], ['反贼', 1]],
+  ].map((materials, index) => ({
+    id: String(index + 3),
+    target: { key: `目标${index}@UR`, name: `目标${index}`, rarity: 'UR' },
+    inputs: materials.map(([name, qty]) => {
+      const rarity = name === '路人甲' ? 'N' : name === '反贼' ? 'R' : 'SSR'
+      return { key: `${name}@${rarity}`, name, rarity, qty }
+    }),
+    fee: 0,
+  }))
+  assert.doesNotThrow(() => dbg.calculatePlans({
+    recipes,
+    market: { listings: [], titles: {} },
+    gachaPools: [{ id: 'standard', label: '标准抽取', drawCost: 8, outcomes, probabilityComplete: true }],
+    inventory: {},
+    points: 1364,
+  }))
+})
+
 test('UR 规划器：不完整抽取概率不产生期望路线', async () => {
   const { dbg } = await bootPlanner()
   const plan = dbg.expectedGachaCost(
@@ -263,6 +353,75 @@ test('UR 规划器：结构化字段缺失时使用配方和概率的可见文�
   assert.equal(gacha.pools[0].outcomes[0].probability, 0.5)
 })
 
+test('UR 规划器：兼容站点真实的配方、抽取和库存页面结构', async () => {
+  const { dbg } = await bootPlanner()
+  const recipes = dbg.parseRecipes(`<div class="gacha-center-page">
+    <section class="gacha-recipe-panel"><div class="gacha-recipe-grid">
+      <article class="gacha-recipe-card">
+        <div class="gacha-recipe-target">
+          <span class="gacha-title-badge gacha-title-ur"><span class="gacha-title-icon">🎲</span><span class="gacha-title-name">非必要不抽奖</span><span class="gacha-title-rarity">UR</span></span>
+          <strong>路人甲逆袭</strong>
+        </div>
+        <div class="gacha-recipe-materials">
+          <span class="is-missing">传说之龙 0/1</span><span class="is-missing">路人甲 0/100</span>
+        </div>
+        <form action="/gacha_recipe_craft"><input name="recipe_id" value="3"></form>
+      </article>
+    </div></section>
+  </div>`)
+  const gacha = dbg.parseGacha(`<div class="gacha-center-page">
+    <div class="gacha-pool-section"><div class="gacha-pool-grid">
+      <div class="gacha-pool-rarity gacha-pool-rarity-ssr"><div class="gacha-pool-rarity-label">SSR</div><div class="gacha-pool-rarity-count">7 种</div><div class="gacha-pool-rarity-rate">1%</div></div>
+      <div class="gacha-pool-rarity gacha-pool-rarity-n"><div class="gacha-pool-rarity-label">N</div><div class="gacha-pool-rarity-count">5 种</div><div class="gacha-pool-rarity-rate">53%</div></div>
+    </div></div>
+    <button class="gacha-pull-btn gacha-pull-10" data-cost="90">十连抽 (90 积分)</button>
+    <button class="gacha-pull-btn gacha-pull-100" data-cost="800">百连抽 (800 积分)</button>
+    <div class="gacha-all-titles"><div class="gacha-all-item"><span class="gacha-title-badge gacha-title-ssr"><span class="gacha-title-name">传说之龙</span><span class="gacha-title-rarity">SSR</span></span></div><div class="gacha-all-item"><span class="gacha-title-badge gacha-title-n"><span class="gacha-title-name">路人甲</span><span class="gacha-title-rarity">N</span></span></div></div>
+  </div>`)
+  const profile = dbg.parseInventory(`<div class="gacha-profile-page"><div class="gacha-profile-titles"><div class="gacha-profile-grid">
+    <div class="gacha-profile-item"><span class="gacha-title-name">万人迷</span><span class="gacha-title-rarity">SR</span><span class="gacha-status-tag">× 7</span></div>
+    <div class="gacha-profile-item"><span class="gacha-title-name">常客</span><span class="gacha-title-rarity">R</span><span class="gacha-status-tag">× 1</span></div>
+  </div></div></div>`)
+
+  assert.equal(recipes.recipes.length, 1)
+  assert.equal(recipes.recipes[0].id, '3')
+  assert.equal(recipes.recipes[0].target.key, '非必要不抽奖@UR')
+  assert.deepEqual(plain(recipes.recipes[0].inputs), [
+    { key: '传说之龙@', name: '传说之龙', rarity: '', qty: 1 },
+    { key: '路人甲@', name: '路人甲', rarity: '', qty: 100 },
+  ])
+  const normalized = dbg.resolveRecipeRarities(recipes.recipes, gacha.titleCatalog)
+  assert.deepEqual(plain(normalized[0].inputs), [
+    { key: '传说之龙@SSR', name: '传说之龙', rarity: 'SSR', qty: 1 },
+    { key: '路人甲@N', name: '路人甲', rarity: 'N', qty: 100 },
+  ])
+  assert.equal(recipes.recipes[0].fee, 0)
+  assert.equal(gacha.pools.length, 1)
+  assert.equal(gacha.pools[0].drawCost, 8)
+  assert.equal(gacha.pools[0].outcomes.find((item) => item.key === '传说之龙@SSR').probability, 0.01 / 7)
+  assert.deepEqual(plain(profile.inventory), { '万人迷@SR': 7, '常客@R': 1 })
+  assert.equal(profile.recognized, true)
+})
+
+test('UR 规划器：真实来源加载后不再显示格式、库存或合成表错误', async () => {
+  const actualRecipes = `<div class="gacha-recipe-card"><div class="gacha-recipe-target"><span class="gacha-title-badge gacha-title-ur"><span class="gacha-title-name">非必要不抽奖</span><span class="gacha-title-rarity">UR</span></span><strong>路人甲逆袭</strong></div><div class="gacha-recipe-materials"><span>传说之龙 0/1</span><span>路人甲 0/100</span></div><form action="/gacha_recipe_craft"><input name="recipe_id" value="3"></form></div>`
+  const actualGacha = `<div class="gacha-pool-section"><div class="gacha-pool-grid">
+    <div class="gacha-pool-rarity"><div class="gacha-pool-rarity-label">SSR</div><div class="gacha-pool-rarity-count">7 种</div><div class="gacha-pool-rarity-rate">1%</div></div>
+    <div class="gacha-pool-rarity"><div class="gacha-pool-rarity-label">SR</div><div class="gacha-pool-rarity-count">5 种</div><div class="gacha-pool-rarity-rate">16%</div></div>
+    <div class="gacha-pool-rarity"><div class="gacha-pool-rarity-label">R</div><div class="gacha-pool-rarity-count">6 种</div><div class="gacha-pool-rarity-rate">30%</div></div>
+    <div class="gacha-pool-rarity"><div class="gacha-pool-rarity-label">N</div><div class="gacha-pool-rarity-count">5 种</div><div class="gacha-pool-rarity-rate">53%</div></div>
+  </div></div><button class="gacha-pull-btn gacha-pull-100" data-cost="800">百连抽</button><div class="gacha-all-item"><span class="gacha-title-name">传说之龙</span><span class="gacha-title-rarity">SSR</span></div><div class="gacha-all-item"><span class="gacha-title-name">万人迷</span><span class="gacha-title-rarity">SR</span></div><div class="gacha-all-item"><span class="gacha-title-name">常客</span><span class="gacha-title-rarity">R</span></div><div class="gacha-all-item"><span class="gacha-title-name">路人甲</span><span class="gacha-title-rarity">N</span></div>`
+  const actualProfile = `<div class="gacha-profile-page"><div class="gacha-profile-item"><div class="gacha-profile-badge"><span class="gacha-title-badge"><span class="gacha-title-name">万人迷</span><span class="gacha-title-rarity">SR</span></span></div><div class="gacha-profile-meta"><span class="gacha-status-tag">× 7</span></div></div></div>`
+  const { w, dbg } = await bootPlanner({ fetchRecipes: actualRecipes, fetchGacha: actualGacha, fetchProfile: actualProfile })
+  await w.LSB.bus.request('title-forge-planner:refresh')
+  const state = dbg.state()
+  assert.notEqual(state.sourceState.recipes.status, 'unavailable')
+  assert.notEqual(state.sourceState.gacha.status, 'unavailable')
+  assert.notEqual(state.sourceState.inventory.status, 'unavailable')
+  assert.equal(state.data.inventoryAvailable, true)
+  assert.equal(state.data.recipes[0].inputs[0].key, '传说之龙@SSR')
+})
+
 test('UR 规划器：不完整页面和非 UR 数据进入 issues 而不是零值成功', async () => {
   const { dbg } = await bootPlanner()
   const recipes = dbg.parseRecipes(`<section data-gacha-recipes>
@@ -286,32 +445,41 @@ test('UR 规划器：不完整页面和非 UR 数据进入 issues 而不是零�
   assert.ok(profile.issues.length >= 1)
 })
 
-test('UR 规划器面板：刷新后同时显示两种库存和三类路线', async () => {
-  const { w, calls, until } = await bootPlanner({ points: 500 })
-  w.LSB.open('title-forge-planner')
-  assert.ok(w.document.querySelector('[data-title-forge-planner]'))
-  assert.equal(await until(() => w.document.querySelector('[data-title-forge-planner-target]')), true)
-
-  const root = w.document.querySelector('[data-title-forge-planner]')
-  assert.match(root.querySelector('[data-title-forge-planner-source="recipes"]').textContent, /最后更新/)
-  assert.ok(root.querySelector('[data-title-forge-planner-mode="no-inventory"]'))
-  assert.ok(root.querySelector('[data-title-forge-planner-mode="inventory"]'))
-  assert.ok(root.querySelector('[data-title-forge-planner-plan="market-low"]'))
-  assert.ok(root.querySelector('[data-title-forge-planner-plan="market-median"]'))
-  assert.ok(root.querySelector('[data-title-forge-planner-plan="gacha"]'))
-  assert.match(root.textContent, /当前积分/)
-  assert.equal(calls.some((x) => x.method === 'POST' || /_buy|_forge|gacha.*draw/i.test(x.href)), false)
+test('UR 规划器：市场挂单不足时保留具体材料缺口', async () => {
+  const { dbg } = await bootPlanner()
+  const req = [{ key: '隐藏大佬@SSR', name: '隐藏大佬', rarity: 'SSR', qty: 20 }]
+  const low = dbg.marketCost(req, [{ key: '隐藏大佬@SSR', price: 4588, qty: 10 }], 0)
+  assert.equal(low.status, 'unavailable')
+  assert.equal(low.reason, 'market-insufficient')
+  assert.deepEqual(plain(low.missing), [{ key: '隐藏大佬@SSR', name: '隐藏大佬', rarity: 'SSR', qty: 10 }])
 })
 
-test('UR 规划器面板：单个来源失败只禁用相关路线并显示状态', async () => {
-  const { w, until } = await bootPlanner({ fetchGacha: '<html><body>Cloudflare challenge</body></html>' })
-  w.LSB.open('title-forge-planner')
-  assert.equal(await until(() => {
-    const source = w.document.querySelector('[data-title-forge-planner-source="gacha"]')
-    return source && !/读取中/.test(source.textContent)
-  }), true)
-  const root = w.document.querySelector('[data-title-forge-planner]')
-  assert.match(root.querySelector('[data-title-forge-planner-source="gacha"]').textContent, /无法识别|数据不足|挑战未完成/)
-  assert.ok(root.querySelector('[data-title-forge-planner-plan="market-low"]'))
-  assert.match(root.textContent, /抽取路线.*数据不足|抽取.*不可用/)
+test('UR 规划器：正式刷新接口返回来源状态和规范化数据', async () => {
+  const { w } = await bootPlanner({ points: 500 })
+  const result = await w.LSB.bus.request('title-forge-planner:refresh')
+  assert.deepEqual(Object.keys(result.sources).sort(), ['gacha', 'inventory', 'recipes'])
+  assert.equal(result.sources.recipes.status, 'ok')
+  assert.equal(result.sources.gacha.status, 'ok')
+  assert.equal(result.sources.inventory.status, 'ok')
+  assert.ok(result.data.recipes.length > 0)
+  assert.ok(result.data.gachaPools.length > 0)
+  assert.equal(result.data.inventoryAvailable, true)
+})
+
+test('UR 规划器：正式计算接口不发起网络请求', async () => {
+  const { w, calls } = await bootPlanner({ points: 500 })
+  const before = calls.length
+  const result = await w.LSB.bus.request('title-forge-planner:calculate', fixtureDataWithPoints(500))
+  assert.equal(calls.length, before)
+  assert.equal(result.modes.noInventory.summary.state, 'feasible')
+  assert.equal(result.modes.inventory.summary.state, 'feasible')
+})
+
+test('UR 规划器：来源失败时只标记受影响来源且不产生空成功数据', async () => {
+  const { w } = await bootPlanner({ fetchGacha: '<html><body>Cloudflare challenge</body></html>' })
+  const result = await w.LSB.bus.request('title-forge-planner:refresh')
+  assert.notEqual(result.sources.recipes.status, 'unavailable')
+  assert.equal(result.sources.gacha.status, 'unavailable')
+  assert.equal(result.data.gachaPools.length, 0)
+  assert.match(result.sources.gacha.error, /页面格式无法识别|挑战未完成|数据不足/)
 })

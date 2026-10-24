@@ -123,6 +123,8 @@ The phase floors below are the first release that can contain the phase. Interme
 
 When a task touches a plugin source, update both its userscript header and manifest version in the same change. When a task only changes docs or tests, do not invent a plugin version bump.
 
+Platform v2 first shipped at the `0.2.0` / `2.0.0` phase floor. Its current compatibility patch is Hydrogen `0.2.1`, skin/Oxygen/LTS `2.0.1`; later phase floors remain unchanged.
+
 ## Cross-Unit Verification Gate
 
 Run these commands at every unit boundary and read the exit code and final counts:

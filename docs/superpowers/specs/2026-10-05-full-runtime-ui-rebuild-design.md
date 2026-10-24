@@ -67,7 +67,7 @@
 - **Reader runtime**：RouteCoordinator、shadow 解析、renderer registry、native fallback、滚动/焦点和生命周期。
 - **Renderers**：首页、版块、主题、用户、搜索、设置和社区功能页的结构化 renderer。
 - **Surface runtime**：CardHost、SheetHost、TopStatus、ToolCapsule、AI/site/evidence/context surfaces。
-- **Appearance/media**：语义令牌、A/B/C 预设、色板、字体、图片/视频 IndexedDB、可读性遮罩和降级。
+- **Appearance/media**：语义令牌、D 原生站点/A 平衡玻璃/B 沉浸视频/C 静态可读预设、字体、图片/视频 IndexedDB、可读性遮罩和降级；颜色跟随站点令牌。
 - **Compatibility**：将旧 `shellAsideView`、`shellWindowRegister`、`shellScrollRoot`、`api.net` 和 `api.actions` 映射到新运行时，并记录 legacy 使用情况。
 
 `plugins/skin.user.js` 在重建后只保留 manifest、bootstrap 和兼容注册；实现代码通过新的构建入口打包，避免再次形成不可拆分的单文件源代码。现有 Oxygen 单脚本安装方式保持不变。
@@ -220,7 +220,7 @@ Sheet、AI、引用、上下文卡片 z-index:30+
 
 ### 外观模型
 
-统一外观设置提供 A 平衡玻璃、B 沉浸视频、C 静态可读三个预设，并用色板、滑杆、字体选择、本地媒体选择和恢复默认控制细项。颜色、字号、圆角、透明度、模糊和 URL 在写入前经过 schema 校验；用户不需要输入 CSS 代码。
+统一外观设置提供 D 原生站点、A 平衡玻璃、B 沉浸视频、C 静态可读四个预设，并用滑杆、字体选择、本地媒体选择和恢复默认控制细项。字号、圆角、透明度、模糊和 URL 在写入前经过 schema 校验；颜色沿用站点令牌，用户不需要输入颜色编号或 CSS 代码。
 
 ## 插件兼容与迁移
 

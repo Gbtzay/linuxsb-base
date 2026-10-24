@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·签到日历
 // @namespace    https://linux.sb/
-// @version      1.0.3
+// @version      1.0.4
 // @description  本地签到日历：自动探测每日签到状态、连击统计、月视图；支持一键签今天（原生无法补签，历史仅从安装日起记录）。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -22,7 +22,7 @@
   const manifest = {
     id: 'checkin-calendar',
     name: '签到日历',
-    version: '1.0.3',
+    version: '1.0.4',
     description: '签到状态日历 + 连击统计 + 一键签今天',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -117,7 +117,7 @@
     }
 
     /* ── 一键签今天 ── */
-    async function doCheckin(skipConfirm = false) {
+    async function doCheckin(skipConfirm = false, { detailed = false } = {}) {
       if (!skipConfirm && !(await api.ui.confirm('提交今天的签到？'))) return false
       if (!formInfo) await probe(true)
       if (status === 'ok' || /已签到|今日已签/.test(document.body?.textContent || '')) {
@@ -128,19 +128,34 @@
       if (!formInfo) throw new Error('未找到签到表单（页面结构可能变化）')
       const fd = new FormData()
       for (const f of formInfo.fields) fd.append(f.name, f.value)
-      const res = await api.net.raw(formInfo.action, {
-        method: 'POST',
-        body: fd,
-        headers: { 'x-requested-with': 'XMLHttpRequest' },
-      })
-      if (!res.ok) {
+      let res
+      try {
+        res = await api.net.raw(formInfo.action, {
+          method: 'POST',
+          body: fd,
+          headers: { 'x-requested-with': 'XMLHttpRequest' },
+        })
+      } catch {
+        const result = { done: false, reason: 'unknown', outcome: 'unknown', status: 0, message: '签到请求未收到可判定结果' }
+        api.ui.toast('签到结果未知，请检查站点状态', { type: 'error' })
+        return result
+      }
+      const outcome = api.net.classifyWrite(res, { actionPath: formInfo.action })
+      if (outcome.outcome !== 'success') {
+        const result = {
+          done: false,
+          reason: outcome.outcome === 'failure' ? `http-${outcome.status || 'error'}` : 'unknown',
+          outcome: outcome.outcome,
+          status: outcome.status,
+          ...(outcome.message ? { message: outcome.message } : {}),
+        }
         api.ui.toast('签到失败 HTTP ' + res.status, { type: 'error' })
-        return { done: false, reason: 'http-' + res.status }
+        return result
       }
       status = 'ok'
       setDay(today(), 'ok')
       api.ui.toast('签到完成', { type: 'success' })
-      return true
+      return detailed ? { done: true, outcome: 'success', status: outcome.status, ...(outcome.message ? { message: outcome.message } : {}) } : true
     }
 
     /* ── 连击统计 ── */
@@ -256,6 +271,21 @@
       streak,
       form: () => formInfo,
     }))
+
+    api.handle('checkin-calendar:ai-checkin', async () => {
+      if (!formInfo) await probe(true)
+      const csrf = formInfo?.fields?.filter((field) => field.name === '_csrf') || []
+      let action
+      try {
+        action = new URL(formInfo?.action || '', location.href)
+      } catch {
+        throw new Error('签到表单地址无效，已停止提交')
+      }
+      if (action.origin !== location.origin || !/checkin/i.test(action.pathname) || csrf.length !== 1 || !String(csrf[0].value || '').trim()) {
+        throw new Error('签到表单或 CSRF 校验失败，已停止提交')
+      }
+      return doCheckin(false, { detailed: true })
+    })
 
     return {}
   }

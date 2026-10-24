@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 import { ActionRegistry } from '../src/ai-actions.js'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const pluginCode = () => readFileSync(new URL('../plugins/ai-actions.user.js', import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 
@@ -56,6 +56,26 @@ test('计划校验：未知字段、未知动作、外部 URL 和超过五步都
     false,
   )
   assert.equal(registry.validatePlan({ ...base, steps: Array.from({ length: 6 }, () => base.steps[0]) }, {}).ok, false)
+})
+
+test('写动作计划隔离：写动作必须独占计划步骤', () => {
+  const registry = new ActionRegistry()
+  registry.register({
+    id: 'site.reply', version: 1, permission: 'write',
+    args: { body: { type: 'string', minLength: 1 } },
+    execute: () => ({ ok: true }), preview: () => '回复当前帖子',
+  }, 'ai-write-actions')
+  registry.register({
+    id: 'site.navigate', version: 1, permission: 'read',
+    args: {}, execute: () => ({ ok: true }), preview: () => '打开首页',
+  }, 'ai-actions')
+
+  const write = { action: 'site.reply', args: { body: '回复内容' } }
+  const read = { action: 'site.navigate', args: {} }
+  const plan = (steps) => ({ version: 1, summary: '测试', steps })
+  assert.equal(registry.validatePlan(plan([write]), {}).ok, true)
+  assert.ok(registry.validatePlan(plan([write, read]), {}).errors.some((error) => error.code === 'plan.write-isolation'))
+  assert.ok(registry.validatePlan(plan([write, write]), {}).errors.some((error) => error.code === 'plan.write-isolation'))
 })
 
 test('计划绑定动作版本与提供方；旧绑定和缺少绑定的待执行计划会失效', () => {
@@ -150,6 +170,23 @@ test('首批动作：目录只暴露固定目标，执行不接受任意 URL', a
   assert.equal(result.kind, 'navigation')
   assert.equal(result.url, '/forum/7')
   assert.equal(result.label, '已打开版块')
+})
+
+test('AI 导航：明确请求我的帖子时用当前用户 ID 打开主题列表', async () => {
+  const w = await loadHome()
+  const context = { route: { type: 'home' }, currentUserId: 5372 }
+  const step = { action: 'site.navigate', args: { target: 'user', tab: 'topics' } }
+  const checked = w.LSB.__core.ai.validate(step, context)
+  assert.equal(checked.ok, true)
+  assert.equal(checked.args.target, 'user')
+  assert.equal(checked.args.tab, 'topics')
+  assert.equal(w.LSB.__core.ai.preview(step, context).text, '打开我的帖子')
+  const result = await w.LSB.__core.ai.execute(step, context)
+  assert.equal(result.url, '/user/5372?tab=topics')
+
+  const missingIdentity = w.LSB.__core.ai.validate(step, { route: { type: 'home' } })
+  assert.equal(missingIdentity.ok, false, '没有当前登录身份时不能猜测用户目标')
+  assert.equal(missingIdentity.error.code, 'args.id-required')
 })
 
 test('站内搜索动作：只调用语义 API，并返回站内导航结果', async () => {

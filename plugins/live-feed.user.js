@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LSB·实时流
 // @namespace    https://linux.sb/
-// @version      1.2.18
-// @description  免刷新获取新帖与新回复：前台短周期、后台长周期的自适应轮询（跨标签选主，只有一个标签发请求）；视口锚点补偿让任意滚动位置都能无感插入；打字期间只暂存不打扰；老帖有新回复原地高亮。需要 LINUX.SB 基座。
+// @version      1.2.21
+// @description  免刷新获取新帖与新回复：前台短周期、后台长周期的自适应轮询（跨标签选主，只有一个标签发请求）；视口锚点补偿让任意滚动位置都能无感插入；打字期间只暂存不打扰；老帖有新回复原地高亮并同步评论数。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -16,8 +16,8 @@
   const manifest = {
     id: 'live-feed',
     name: '实时流',
-    version: '1.2.18',
-    description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮',
+    version: '1.2.21',
+    description: '新帖/新回复免刷新送达：视口锚点无感插入 + 打字免打扰 + 新动态高亮并同步评论数',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
@@ -81,6 +81,64 @@
     let bannerAction = null
     let navGen = 0
 
+    function captureContext() {
+      return {
+        gen: navGen,
+        mode,
+        ul: ctx.ul || null,
+        tid: mode === 'topic' ? Number(ctx.tid) || 0 : 0,
+      }
+    }
+
+    function currentListUl() {
+      const selector = api.sel?.listUl || 'ul.post-list'
+      const outlets = document.querySelectorAll('#lsb-shell-window-content main.wrap, .lsb-canvas-content-root, .main-panel')
+      for (const outlet of outlets) {
+        for (const ul of outlet.querySelectorAll(selector)) {
+          // 帖子楼层也带 post-list 类，且可能留在隐藏的旧出口或缓存 DOM 中。
+          // 只接受当前路由出口中真正的列表容器，避免把帖子正文识别成首页实时流列表。
+          if (ul.classList.contains('topic-post-list')) continue
+          if ([...ul.children].some((child) => child.classList.contains('post-entry'))) continue
+          return ul
+        }
+      }
+      return null
+    }
+
+    function currentTopicUl() {
+      return document.querySelector(api.sel?.topicUl || 'ul.topic-post-list, ul.post-list')
+    }
+
+    function currentRoutePage() {
+      try {
+        return api.parse.detectPage(location)
+      } catch {
+        return api.page || {}
+      }
+    }
+
+    function contextActive(token) {
+      if (!token || token.gen !== navGen || token.mode !== mode) return false
+      if (!(token.ul?.nodeType === 1) || !token.ul.isConnected || ctx.ul !== token.ul) return false
+      const page = currentRoutePage()
+      if (token.mode === 'topic') {
+        return page.type === 'topic'
+          && Number(page.id) === token.tid
+          && api.page?.type === 'topic'
+          && Number(api.page.id) === token.tid
+          && Number(ctx.tid) === token.tid
+          && currentTopicUl() === token.ul
+      }
+      if (token.mode !== 'list') return false
+      const pageType = page.type
+      const listPage = pageType === 'home'
+        || pageType === 'forum'
+        || pageType === 'featured'
+        || pageType === 'footprint'
+        || isUserTopicList(page)
+      return listPage && currentListUl() === token.ul
+    }
+
     /**
      * 列表条目的「新鲜度指纹」：回复数 + 最后活跃时间。
      * 用它替代单纯的「见过/没见过」，才能区分三种状态：
@@ -103,9 +161,9 @@
       return api.page.sort === 'comment' ? 'comment' : 'post'
     }
 
-    function isUserTopicList() {
-      if (api.page?.type !== 'user') return false
-      const tab = api.page.tab || 'topics'
+    function isUserTopicList(page = api.page) {
+      if (page?.type !== 'user') return false
+      const tab = page.tab || 'topics'
       return tab === 'topics' || tab === 'replies'
     }
 
@@ -115,12 +173,12 @@
 
     function isTopicListPage() {
       const t = api.page?.type
-      if (t === 'home' || t === 'forum' || t === 'featured' || t === 'footprint') return true
+      if (t === 'home' || t === 'forum' || t === 'featured' || t === 'hot_discussions' || t === 'footprint') return true
       return isUserTopicList()
     }
 
     function captureList() {
-      const ul = document.querySelector(api.sel?.listUl || 'ul.post-list')
+      const ul = currentListUl()
       if (!ul) return false
       if (ul.querySelector('li.notification-item')) return false
       const seen = new Map()
@@ -187,6 +245,7 @@
     }
 
     function teardown() {
+      clearBumps()
       banner?.remove()
       banner = null
       bannerAction = null
@@ -228,7 +287,8 @@
       }
     `)
 
-    function showBanner(text, onClick, { asTopic = false, quiet = false } = {}) {
+    function showBanner(text, onClick, { asTopic = false, quiet = false, token = null } = {}) {
+      if (token && !contextActive(token)) return false
       // 动作存在可变引用里：横幅语义会随状态变化（「点击加载」→「已加载，回顶部」），
       // 旧实现只在创建时绑一次 onClick，后续传入的新动作会被静默忽略。
       bannerAction = onClick
@@ -387,6 +447,39 @@
 
     let lastBumped = 0
     const bumpTimers = []
+    function numericMetaSpans(root) {
+      return [...(root?.querySelectorAll?.('.post-meta span') || [])]
+        .filter((el) => /^\d[\d,]*$/.test(el.textContent.trim()))
+    }
+
+    /** 只更新评论数的文字节点，保留站点放在同一 span 里的图标和其它标记。 */
+    function syncReplyCount(row, src, replies) {
+      if (replies == null) return
+      const target = numericMetaSpans(row).at(-1)
+      if (!target) return
+      const source = numericMetaSpans(src).at(-1)
+      const display = source?.textContent.trim() || String(replies)
+      const walker = document.createTreeWalker(target, 4)
+      const textNodes = []
+      let node
+      while ((node = walker.nextNode())) textNodes.push(node)
+      if (textNodes.length) {
+        textNodes.forEach((textNode, i) => {
+          textNode.nodeValue = i === textNodes.length - 1 ? display : ''
+        })
+      } else {
+        target.appendChild(document.createTextNode(display))
+      }
+    }
+
+    function notifyListRowUpdated(id) {
+      try {
+        api.emitGlobal('live-feed:list-row-updated', { id })
+      } catch {
+        /* 已读插件缺席不得影响实时流 */
+      }
+    }
+
     function attachNativeUnread(row, src) {
       const from = src?.querySelector?.('a.unread-topic-notice')
       if (!row || !from || row.querySelector('a.unread-topic-notice')) return
@@ -395,22 +488,33 @@
       if (title) title.after(node)
       else row.querySelector('.post-title-row')?.appendChild(node)
     }
-    function markBumped(items) {
+    function markBumped(items, token = captureContext()) {
+      if (!contextActive(token)) return
       lastBumped = items.length
       if (!items.length || !ctx.ul) return
       for (const it of items) {
         const row = ctx.ul.querySelector(`:scope > li.post-item a.post-title[href*="/topic/${it.id}"]`)
           ?.closest('li.post-item')
         if (!row) continue
+        // 轮询返回的是同一帖的最新行：同步评论数，不能只复制未读点和高亮。
+        syncReplyCount(row, it.el, it.replies)
         // 站点刷新会在标题旁留「未读」红点；高亮只闪 2.6 秒，点要一直留到用户进帖。
         attachNativeUnread(row, it.el)
-        if (!cfg.highlightBumped) continue
-        row.classList.remove('lsb-live-bumped')
-        void row.offsetWidth
-        row.classList.add('lsb-live-bumped')
-        const tid = setTimeout(() => row.classList.remove('lsb-live-bumped'), 2600)
-        bumpTimers.push(tid)
+        if (cfg.highlightBumped) {
+          row.classList.remove('lsb-live-bumped')
+          void row.offsetWidth
+          row.classList.add('lsb-live-bumped')
+          const tid = setTimeout(() => row.classList.remove('lsb-live-bumped'), 2600)
+          bumpTimers.push(tid)
+        }
+        // 已读插件在这里重新检查水位，避免软跳缓存里的旧提示被重新挂回。
+        notifyListRowUpdated(it.id)
       }
+    }
+
+    function clearBumps() {
+      for (const t of bumpTimers.splice(0)) clearTimeout(t)
+      document.querySelectorAll('li.post-item.lsb-live-bumped').forEach((row) => row.classList.remove('lsb-live-bumped'))
     }
 
     function announceNew(kind, n) {
@@ -430,12 +534,11 @@
     }
 
     async function cycleList() {
-      const gen = navGen
-      const ul = ctx.ul
+      const token = captureContext()
       const seen = ctx.seen
-      if (!seen) return 0
+      if (!contextActive(token) || !seen) return 0
       const doc = await liveDoc(listUrl())
-      if (gen !== navGen || ctx.ul !== ul || ctx.seen !== seen) return 0
+      if (!contextActive(token) || ctx.seen !== seen) return 0
       const isPost = ctx.sort === 'post'
       // 回复流首页每条评论都在转：存档还回后立刻 cycle 会把整页热帖当成「新的」。
       // 第一轮只对齐水位，真正的增量留给之后的巡检。发布流不这么做——还回首页仍要立刻插入新 id。
@@ -470,18 +573,19 @@
         }
       }
       if (priming) ctx.prime = false
-      markBumped(bumped)
+      markBumped(bumped, token)
 
       if (!pending.length) {
         if (!bumped.length) hideBanner()
         return 0
       }
+      if (!contextActive(token)) return 0
       announceNew('帖', pending.length)
       ctx.maxId = Math.max(ctx.maxId, ...pending.map((x) => x.id))
       ctx.maxTs = Math.max(ctx.maxTs, ...pending.map((x) => x.lastActiveTs || 0))
       const n = pending.length
-      if (gen !== navGen || ctx.ul !== ul) return 0
-      await flushOrOffer()
+      if (!contextActive(token)) return 0
+      await flushOrOffer(token)
       return n
     }
 
@@ -501,31 +605,34 @@
       return cfg.anchorScroll || nearTop()
     }
 
-    async function flushOrOffer() {
-      if (!pending.length) return
+    async function flushOrOffer(token) {
+      if (!contextActive(token) || !pending.length) return
       if (canFlushNow()) {
         const away = !nearTop()
-        const n = insertPending(true)
+        const n = insertPending(true, token)
         // 在视口外静默插入后仍然告知一声，并给一键回顶——内容不过期，用户也不失去感知。
         // （逛吧只是静默插入，用户不知道上面多了东西）
-        if (n && away) {
+        if (n && contextActive(token) && away) {
           showBanner(`▲ 已加载 ${n} 条新帖 — 点击回到顶部`, () => {
+            if (!contextActive(token)) return
             hideBanner()
             window.scrollTo?.({ top: 0, behavior: 'smooth' })
-          }, { quiet: true })
+          }, { quiet: true, token })
         }
         return
       }
       const m = await msgDelta()
+      if (!contextActive(token) || !pending.length) return
       const why = isTyping() ? '（写完自动加载）' : ''
       showBanner(
         `▲ ${pending.length} 条新帖${m ? ` · ${m} 条新消息` : ''} — 点击加载${why}`,
-        () => insertPending(),
+        () => insertPending(false, token),
+        { token },
       )
     }
 
-    function insertPending(silent = false) {
-      if (!pending.length || !ctx.ul) return 0
+    function insertPending(silent = false, token = captureContext()) {
+      if (!contextActive(token) || !pending.length) return 0
       const anchor = captureAnchor()
       hideBanner()
       const frag = document.createDocumentFragment()
@@ -543,15 +650,19 @@
       else ctx.ul.appendChild(frag)
       restoreAnchor(anchor)
       if (!silent) api.ui.toast(`已加载 ${batch.length} 条新帖`, { title: '实时流', type: 'success' })
-      if (pending.length) showBanner(`▲ 还有 ${pending.length} 条新帖 — 继续加载`, () => insertPending())
+      if (pending.length) showBanner(
+        `▲ 还有 ${pending.length} 条新帖 — 继续加载`,
+        () => insertPending(false, token),
+        { token },
+      )
       return batch.length
     }
 
     /* ── 轮询：帖子模式 ── */
     async function cycleTopic() {
-      const gen = navGen
-      const tid = ctx.tid
-      if (!tid) return 0
+      const token = captureContext()
+      const tid = token.tid
+      if (!contextActive(token) || !tid) return 0
       const fresh = new Map() // postId → post（跨页去重）
       const absorb = (t) => {
         for (const p of t.posts) {
@@ -572,38 +683,40 @@
 
       // 新回复总在最后一页
       let t = api.parse.topic(await liveDoc(api.routes.topic(tid, Math.max(1, ctx.pages || 1))))
-      if (gen !== navGen || ctx.tid !== tid) return 0
+      if (!contextActive(token)) return 0
       absorb(t)
       // 回复把帖子顶到了新页：本轮立即追补，不必等下一个周期。
       // 否则每次翻页都会让新页的首批回复延迟一整个轮询间隔才出现。
       for (let i = 0; i < MAX_PAGE_CATCHUP && t.pages > ctx.pages; i++) {
         ctx.pages = t.pages
         t = api.parse.topic(await liveDoc(api.routes.topic(tid, ctx.pages)))
-        if (gen !== navGen || ctx.tid !== tid) return 0
+        if (!contextActive(token)) return 0
         absorb(t)
       }
       if (t.pages > ctx.pages) ctx.pages = t.pages
 
-      if (!fresh.size) return 0
+      if (!contextActive(token) || !fresh.size) return 0
       pending = [...fresh.values()].sort((a, b) => a.floor - b.floor)
+      if (!contextActive(token)) return 0
       const n = pending.length
       announceNew('回复', n)
       if (cfg.autoInsert && !isTyping() && document.visibilityState !== 'hidden') {
-        insertFloors(true)
+        insertFloors(true, token)
         return n
       }
       const m = await msgDelta()
+      if (!contextActive(token) || !pending.length) return 0
       const why = isTyping() ? '（写完自动加载）' : ''
       showBanner(
         `↓ ${n} 条新回复${m ? ` · ${m} 条新消息` : ''} — 点击加载${why}`,
-        () => insertFloors(),
-        { asTopic: true },
+        () => insertFloors(false, token),
+        { asTopic: true, token },
       )
       return n
     }
 
-    function insertFloors(silent = false) {
-      if (!pending.length || !ctx.ul) return 0
+    function insertFloors(silent = false, token = captureContext()) {
+      if (!contextActive(token) || !pending.length) return 0
       const anchor = captureAnchor()
       let n = 0
       for (const p of pending) {
@@ -632,13 +745,14 @@
 
     /* ── 时机到了就把暂存内容补上（事件驱动，无需常驻定时器） ── */
     function tryFlush() {
-      if (!pending.length) return false
-      if (mode === 'topic') {
+      const token = captureContext()
+      if (!contextActive(token) || !pending.length) return false
+      if (token.mode === 'topic') {
         if (!cfg.autoInsert || isTyping() || document.visibilityState === 'hidden') return false
-        return insertFloors(true) > 0
+        return insertFloors(true, token) > 0
       }
       if (!canFlushNow()) return false
-      return insertPending(true) > 0
+      return insertPending(true, token) > 0
     }
 
     /* ── 巡检核心（在途 Promise 复用，并发不丢弃） ── */
@@ -734,10 +848,9 @@
     api.onDispose(() => {
       if (timer) clearTimeout(timer)
       timer = null
-      for (const t of bumpTimers.splice(0)) clearTimeout(t)
+      teardown()
       document.removeEventListener('focusout', onFocusOut)
       document.removeEventListener('visibilitychange', onVisible)
-      teardown()
     })
 
     /* 消息基线尽早建立：此后每轮对比增量（哨兵缺席则静默，成功后不再重置） */
@@ -750,9 +863,11 @@
     })
     api.on('spa:view-restored', () => {
       init()
+      const token = captureContext()
       void (async () => {
         const wait = inflight
         if (wait) await wait
+        if (!contextActive(token)) return
         void cycle()
       })()
     })
@@ -790,7 +905,10 @@
       intervalFor: (hidden) => (hidden ? cfg.bgSec : cfg.pollSec) * 1000,
       pollOnce: () => cycle(),
       demote: () => election.demote(),
-      load: () => (mode === 'topic' ? insertFloors() : insertPending()),
+      load: () => {
+        const token = captureContext()
+        return token.mode === 'topic' ? insertFloors(false, token) : insertPending(false, token)
+      },
       bannerVisible: () => !!banner && banner.style.display !== 'none',
       bannerText: () => banner?.querySelector('.lsb-live-txt')?.textContent || '',
       clickBanner: () => bannerAction?.(),

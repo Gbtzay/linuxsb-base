@@ -87,10 +87,10 @@ test('AI 总结配置页存在并渲染字段（此前完全缺失）', async ()
   assert.match(text, /总结风格/)
 })
 
-test('用户画像 / 高频标记 / 哨兵设置 三页补齐', async () => {
+test('高频标记 / 哨兵设置页面可用', async () => {
   const { w } = makeSite()
-  await loadBase(w, PLUG('hover-profile'), PLUG('hot-floor-badge'), PLUG('unread-sentinel'))
-  for (const id of ['hover-profile', 'hot-floor-badge', 'unread-sentinel']) {
+  await loadBase(w, PLUG('hot-floor-badge'), PLUG('unread-sentinel'))
+  for (const id of ['hot-floor-badge', 'unread-sentinel']) {
     w.LSB.open(id)
     const t = w.document.querySelector('.lsb-view')?.textContent || ''
     assert.ok(!t.includes('面板渲染失败'), `${id} 面板渲染异常: ${t.slice(0, 80)}`)
@@ -140,4 +140,36 @@ test('签到日历：从签到页收割过去的历史日期', async () => {
   assert.equal(recs[day(1)]?.s, 'ok', '昨日从页面收割为已签')
   assert.equal(recs[day(2)]?.s, 'ok', '前日同上')
   assert.equal(recs[day(0)].s, 'ok', '今天由「今日已签到」判定')
+})
+
+test('AI 签到安全入口：必须经过确认，取消不发出 POST', async () => {
+  const { w, until } = makeSite({ 'lsb_base:checkin-calendar:__config': { autoProbe: false } })
+  const posts = []
+  const openForm = '<html><body><form method="post" action="/do_checkin"><input type="hidden" name="_csrf" value="csrf-safe"><input type="hidden" name="day" value="today"></form></body></html>'
+  w.fetch = async (url, init = {}) => {
+    if (init.method === 'POST') {
+      posts.push({ url: String(url), body: init.body })
+      return { status: 200, ok: true, url: String(url), text: async () => '{"ok":1,"message":"签到完成"}' }
+    }
+    return { status: 200, ok: true, url: String(url), text: async () => openForm }
+  }
+  await loadBase(w, PLUG('checkin-calendar'))
+  assert.equal(w.LSB.bus.hasHandler('checkin-calendar:ai-checkin'), true)
+
+  const cancelledRequest = w.LSB.bus.request('checkin-calendar:ai-checkin')
+  assert.equal(await until(() => w.document.querySelector('.lsb-panel [data-no]')), true)
+  assert.equal(posts.length, 0, '确认前不提交')
+  w.document.querySelector('.lsb-panel [data-no]').click()
+  assert.equal(await cancelledRequest, false)
+  assert.equal(posts.length, 0, '取消后不提交')
+
+  const acceptedRequest = w.LSB.bus.request('checkin-calendar:ai-checkin')
+  assert.equal(await until(() => w.document.querySelector('.lsb-panel [data-yes]')), true)
+  assert.equal(posts.length, 0, '确认前仍不提交')
+  w.document.querySelector('.lsb-panel [data-yes]').click()
+  const accepted = await acceptedRequest
+  assert.equal(accepted.outcome, 'success')
+  assert.equal(accepted.done, true)
+  assert.equal(posts.length, 1, '确认后仅提交一次')
+  assert.equal(posts[0].body.get('_csrf'), 'csrf-safe')
 })

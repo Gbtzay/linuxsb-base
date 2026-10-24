@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}`, import.meta.url), 'utf8')
 const FX = {
   topic: readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8'),
@@ -16,6 +16,7 @@ function makeSite(name = 'topic', url = 'https://linux.sb/topic/1', preload = {}
   const dom = new JSDOM(FX[name], { url, runScripts: 'outside-only' })
   const w = dom.window
   w.unsafeWindow = w
+  w.scrollTo = () => {}
   w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
   w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
   for (const [k, v] of Object.entries(preload)) w.localStorage.setItem(k, JSON.stringify(v))
@@ -305,7 +306,11 @@ test('哨兵：访客不请求通知页', async () => {
 
 test('哨兵：氢壳迁入个人卡后角标仍在「我的通知」上；停用卸掉', async () => {
   const calls = []
-  const { w, until } = makeSite('home', 'https://linux.sb/', SENTINEL_PRELOAD)
+  const { w, until } = makeSite('home', 'https://linux.sb/', {
+    ...SENTINEL_PRELOAD,
+    'lsb_base:skin:__config': { uiMode: 'legacy' },
+  })
+  Object.defineProperty(w, 'innerWidth', { value: 1200, configurable: true })
   putCardBadge(w.document, 2)
   w.fetch = homeBadgeStub(calls, 2)
   await loadBase(w, PLUG('skin.user.js'), PLUG('unread-sentinel.user.js'))

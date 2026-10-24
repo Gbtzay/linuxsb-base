@@ -18,7 +18,9 @@ import {
   parsePost,
   SEL,
   USER_TABS,
+  listPages,
 } from '../src/site.js'
+import * as site from '../src/site.js'
 
 const fx = (n) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), 'utf8')
 
@@ -49,6 +51,7 @@ test('detectPage 识别各类路由', () => {
   assert.equal(detectPage(mk('https://linux.sb/community_wallet')).type, 'wallet')
   assert.equal(detectPage(mk('https://linux.sb/topic_featured')).type, 'featured')
   assert.equal(detectPage(mk('https://linux.sb/unread_topic_notice_footprint')).type, 'footprint')
+  assert.deepEqual(detectPage(mk('https://linux.sb/hot_discussions')), { type: 'hot_discussions' })
   assert.deepEqual(detectPage(mk('https://linux.sb/topic_collections')), { type: 'collections', tab: 'mine' })
   assert.deepEqual(detectPage(mk('https://linux.sb/topic_collections?tab=everyone')), {
     type: 'collections',
@@ -74,13 +77,20 @@ test('ROUTES 生成正确 URL', () => {
   assert.equal(ROUTES.topic(1), '/topic/1')
   assert.equal(ROUTES.forum(7, { sort: 'post', p: 2 }), '/forum/7?sort=post&p=2')
   assert.equal(ROUTES.user(5372, 'favorites'), '/user/5372?tab=favorites')
+  assert.equal(ROUTES.user(5372, 'favorites', 3), '/user/5372?tab=favorites&p=3')
   assert.equal(ROUTES.user(5372, 'notifications'), '/user/5372?tab=notifications')
+  assert.equal(ROUTES.searchResults('内核 更新', 'title', 2), '/index.php?q=%E5%86%85%E6%A0%B8+%E6%9B%B4%E6%96%B0&field=title&p=2')
+  assert.throws(() => ROUTES.user(0, 'favorites', 2), /用户|页码|路由/)
+  assert.throws(() => ROUTES.user(5372, 'unknown', 2), /用户|页码|路由/)
+  assert.throws(() => ROUTES.user(5372, 'favorites', 0), /用户|页码|路由/)
+  assert.throws(() => ROUTES.searchResults('topic', 'url', 2), /搜索|字段|路由/)
   assert.equal(ROUTES.homeSorted('comment', 2), '/index.php?sort=comment&p=2')
   assert.equal(ROUTES.invite, '/invite_center')
   assert.equal(ROUTES.gacha, '/gacha')
   assert.equal(ROUTES.gachaMarket, '/gacha_market')
   assert.equal(ROUTES.featured, '/topic_featured')
   assert.equal(ROUTES.footprint, '/unread_topic_notice_footprint')
+  assert.equal(ROUTES.hotDiscussions, '/hot_discussions')
   assert.equal(ROUTES.wallet, '/community_wallet')
   assert.equal(ROUTES.collections, '/topic_collections')
   assert.equal(ROUTES.collection(153), '/topic_collection/153')
@@ -89,6 +99,43 @@ test('ROUTES 生成正确 URL', () => {
   assert.equal(ROUTES.essenceReview, '/topic_essence_review_list')
   assert.equal(ROUTES.messages, '/direct_messages')
   assert.equal(ROUTES.userBlock, '/user_block')
+})
+
+test('ROUTES.topicReply 只生成校验过的本站回帖目标路由', () => {
+  assert.equal(ROUTES.topicReply(4321, 8102), '/topic/4321?replyid=8102')
+  assert.throws(() => ROUTES.topicReply(0, 8102), /主题|回帖|路由/)
+  assert.throws(() => ROUTES.topicReply(4321, -1), /主题|回帖|路由/)
+  assert.throws(() => ROUTES.topicReply(4321, 1.5), /主题|回帖|路由/)
+})
+
+test('listPages 只解析同源分页数字，不暴露链接', () => {
+  const dom = new JSDOM(`
+    <nav class="pagination">
+      <a href="/index.php?q=kernel&amp;field=title&amp;p=3">3</a>
+      <a href="?q=kernel&amp;field=title&amp;p=2">2</a>
+      <a href="/index.php?q=kernel&amp;field=title&amp;p=3">3</a>
+      <a href="https://evil.example/index.php?p=99">99</a>
+      <a href="/index.php?p=0">0</a>
+    </nav>`, { url: 'https://linux.sb/index.php?q=kernel&field=title' })
+  assert.deepEqual(listPages(dom.window.document), [1, 2, 3])
+  const empty = new JSDOM('<main>没有分页</main>', { url: 'https://linux.sb/search' })
+  assert.deepEqual(listPages(empty.window.document), [1])
+})
+
+test('parseTopic 返回文档当前页，不把最大页数当作当前页', () => {
+  const first = load('topic1.html', 'https://linux.sb/topic/1')
+  const second = load('topic1.html', 'https://linux.sb/topic/1?p=2')
+  assert.equal(parseTopic(first.document).currentPage, 1)
+  assert.equal(parseTopic(second.document).currentPage, 2)
+  assert.equal(parseTopic(second.document).pages, 8)
+
+  const replyTarget = new JSDOM(`
+    <link rel="canonical" href="/topic/1">
+    <nav class="pagination"><ul>
+      <li><a href="/topic/1?p=1">1</a></li>
+      <li class="active"><a href="/topic/1?p=3">3</a></li>
+    </ul></nav>`, { url: 'https://linux.sb/topic/1?replyid=9003' })
+  assert.equal(parseTopic(replyTarget.window.document).currentPage, 3)
 })
 
 test('帖子页：整体元数据与楼层', () => {
@@ -420,10 +467,49 @@ test('v8.7.5：精华 / 足迹快照带 list', () => {
   assert.equal(foot.list[0].id, 88)
 })
 
+test('热议路由快照包含主题列表', () => {
+  const html =
+    '<ul class="post-list"><li class="post-item"><div class="post-title-row">' +
+    '<a class="post-title" href="/topic/88">热议帖</a></div></li></ul>'
+  const w = new JSDOM(html, { url: 'https://linux.sb/hot_discussions' }).window
+  const snap = snapshot(w.document, new URL('https://linux.sb/hot_discussions'))
+
+  assert.deepEqual(snap.page, { type: 'hot_discussions' })
+  assert.equal(snap.list.length, 1)
+  assert.equal(snap.list[0].id, 88)
+})
+
 test('v8.7.5：快照能读到 index.css 版本', () => {
   const w = new JSDOM(V875_TOPIC, { url: 'https://linux.sb/topic/42' }).window
   const snap = snapshot(w.document, new URL('https://linux.sb/topic/42'))
   assert.equal(snap.version, '8.7.5')
+})
+
+test('parseUserReplies 只返回本人回帖页中可定位的主题和回帖 ID', () => {
+  const w = load('user-replies.html', 'https://linux.sb/user/5372?tab=replies')
+  assert.deepEqual(site.parseUserReplies(w.document), [{ postId: 8102, topicId: 4321, topicTitle: '主题标题' }])
+  assert.deepEqual(site.parseUserReplies(load('user-replies.html', 'https://linux.sb/user/5372?tab=topics').document), [])
+  const parsedDoc = new JSDOM('').window.DOMParser.prototype
+    ? new JSDOM('').window.DOMParser
+    : null
+  const networkDoc = new parsedDoc().parseFromString(fx('user-replies.html'), 'text/html')
+  assert.deepEqual(site.parseUserReplies(networkDoc, 5372), [{ postId: 8102, topicId: 4321, topicTitle: '主题标题' }])
+  assert.deepEqual(site.parseUserReplies(networkDoc, 9001), [], '请求身份与回帖页身份不同则丢弃')
+})
+
+test('互动状态使用三态，收藏状态未知时不推断，投币档位只保留有效整数', () => {
+  const likeDoc = (attributes) => new JSDOM(`<li class="post-entry"><form class="like-coin-form" method="post" action="/lsb_like_coin"><button data-like-coin-action data-like-coin-type="reply" data-like-coin-id="87" ${attributes}></button></form></li>`).window.document
+  assert.equal(site.parseLikeTargets(likeDoc('data-like-coin-liked="1"'))[0].liked, true)
+  assert.equal(site.parseLikeTargets(likeDoc('data-like-coin-liked="0"'))[0].liked, false)
+  assert.equal(site.parseLikeTargets(likeDoc(''))[0].liked, null)
+  assert.deepEqual(site.parseLikeTargets(likeDoc('data-like-coin-liked="1" data-like-coin-tiers="1,5,5,0,-2,word,10,1"'))[0].tiers, [1, 5, 10])
+
+  const favoriteDoc = (label, extra = '') => new JSDOM(`<form class="topic-favorites-action" method="post" action="/topic_favorite"><button class="fav-btn" aria-label="${label}" ${extra}><span>${label}</span></button></form>`).window.document
+  assert.equal(site.parseTopicFavoriteState(favoriteDoc('收藏')), false)
+  assert.equal(site.parseTopicFavoriteState(favoriteDoc('取消收藏')), true)
+  assert.equal(site.parseTopicFavoriteState(favoriteDoc('收藏', 'aria-pressed="true"')), true)
+  assert.equal(site.parseTopicFavoriteState(favoriteDoc('未知状态')), null)
+  assert.equal(site.parseTopicFavoriteState(new JSDOM('<form action="https://evil.example/topic_favorite"><button class="fav-btn">收藏</button></form>').window.document), null)
 })
 
 test('线上 BBS1ORG v99.0 / v10.3：右栏与帖子选择器保持兼容', () => {

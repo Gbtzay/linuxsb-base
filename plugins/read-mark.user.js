@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         LSB·已读置灰
 // @namespace    https://linux.sb/
-// @version      1.0.4
-// @description  列表里看过的帖子整行变灰。未读标记沿用站点原样，不再另挂角标。需要 LINUX.SB 基座。
+// @version      1.0.5
+// @description  列表里看过的帖子整行变灰。已读到当前评论数时清理站点未读提示。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
 // @grant        none
@@ -16,8 +16,8 @@
   const manifest = {
     id: 'read-mark',
     name: '已读置灰',
-    version: '1.0.4',
-    description: '看过的帖子在列表中变灰；未读仍用站点自己的标记',
+    version: '1.0.5',
+    description: '看过的帖子在列表中变灰；读到当前评论数后清理站点未读提示',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
@@ -70,10 +70,20 @@
       return rec
     }
 
+    let topicSeenPosts = new Set()
+
     /* ── 标记侧：帖子页打开即视为已读（壳内跳转也走 route:changed，不能只在 setup 时记一次） ── */
     function markOpenTopic() {
-      if (api.page.type !== 'topic') return
+      if (api.page.type !== 'topic') {
+        topicSeenPosts = new Set()
+        return
+      }
       const tid = api.page.id
+      topicSeenPosts = new Set(
+        [...document.querySelectorAll('li.post-entry')]
+          .map((li) => Number((li.id || '').match(/^post-(\d+)$/)?.[1] || 0))
+          .filter(Boolean),
+      )
       let topic = null
       try {
         topic = api.parse.topic(document)
@@ -89,17 +99,34 @@
     api.on('topic:posts-added', (posts) => {
       if (api.page.type !== 'topic' || !posts.length) return
       const tid = api.page.id
+      const fresh = posts.filter((post) => post.postId && !topicSeenPosts.has(post.postId))
+      for (const post of posts) if (post.postId) topicSeenPosts.add(post.postId)
+      // 软跳提交正文也会触发一次 posts-added；这些楼层已经在打开时计入水位，不能重复加回复数。
+      if (!fresh.length) return
       const all = loadAll()
       const prev = all[tid]
       markSeen(
         tid,
-        Math.max(0, ...posts.map((p) => p.ts || 0)),
-        prev && prev.r != null ? prev.r + posts.length : null,
+        Math.max(0, ...fresh.map((p) => p.ts || 0)),
+        prev && prev.r != null ? prev.r + fresh.length : null,
       )
     })
 
     /* ── 上色侧：列表页把看过的条目变灰 ── */
     const DIM = { 轻: 0.7, 中: 0.55, 重: 0.35 }
+
+    /** 当前列表行是否已经读到记录中的回复数；没有回复数时退回楼层时间水位。 */
+    function isReadAt(rec, it) {
+      if (it.replies != null && rec.r != null) return it.replies <= rec.r
+      if (it.lastActiveTs != null && rec.w != null) return it.lastActiveTs <= rec.w
+      return true
+    }
+
+    function clearNativeUnread(li) {
+      li.querySelectorAll('a.unread-topic-notice').forEach((node) => node.remove())
+      // 实时流的短时高亮也是「新评论」提示；用户已经读到当前水位后一起清掉。
+      li.classList.remove('lsb-live-bumped')
+    }
 
     function restyle() {
       const id = 'lsb-read-mark-style'
@@ -123,6 +150,15 @@
       const rec = loadAll()[it.id]
       if (!rec) return
       li.classList.add('lsb-seen')
+      if (isReadAt(rec, it)) clearNativeUnread(li)
+    }
+
+    function paintTopic(id) {
+      if (id == null) return
+      for (const li of document.querySelectorAll(api.sel?.listItems || 'ul.post-list > li.post-item:not(.post-entry):not(.topic-collections-collection-row)')) {
+        const it = api.parse.listItem(li)
+        if (it?.id === Number(id)) paint(li)
+      }
     }
 
     function paintAll() {
@@ -139,6 +175,9 @@
       setTimeout(paintAll, 50)
     })
 
+    // 实时流更新了旧帖行的评论数后重新判断：用户已读到该水位时，清除缓存行里的旧提示。
+    api.on('live-feed:list-row-updated', ({ id } = {}) => paintTopic(id))
+
     /* ── 面板：设置表单（自动生成）+ 统计与清空 ── */
     api.ui.configTab({
       name: '已读置灰',
@@ -150,7 +189,7 @@
         const info = document.createElement('div')
         info.className = 'lsb-row-desc'
         info.style.marginBottom = '10px'
-        info.textContent = `本地已记录 ${total} 帖。置灰只改外观，未读仍用站点自己的标记。`
+        info.textContent = `本地已记录 ${total} 帖。已读到当前评论数时清理站点未读提示；置灰只改外观。`
         host.appendChild(info)
 
         const clear = document.createElement('button')

@@ -1,5 +1,7 @@
 import { esc, uid } from './util.js'
 
+const MAX_SHELL_WINDOWS = 12
+
 /**
  * UI 层：给插件提供统一的挂载点，避免每个插件自己往页面里塞浮层。
  *
@@ -71,6 +73,10 @@ export class UI {
     this.version = version
     this._tabs = [] // 插件注册的面板分页
     this._shellAsideViews = [] // 氢壳右栏的通用外部视图
+    this._shellAsideController = null // 由 skin 提供的受控 tab 选择器
+    this._shellWindows = [] // 氢壳窗口目录；skin 负责几何和宿主 DOM
+    this._shellWindowController = null // 由 skin 提供的窗口控制器
+    this._shellScrollRootController = null // 由 skin 提供的正文滚动根
     this._panel = null
     this._active = null
     this._styleDone = false
@@ -177,7 +183,7 @@ export class UI {
    * 注册一个氢壳右栏视图。skin 只消费这个通用协议，不感知视图业务。
    * 返回注销函数；插件停用时由 api.ui 自动清理。
    */
-  registerShellAsideView({ id, label, order = 100, visible, render }) {
+  registerShellAsideView({ id, label, order = 100, visible, render, windowId = 'site' }) {
     if (!id || typeof render !== 'function') throw new Error('侧栏视图需要 id/render')
     const record = {
       id: String(id),
@@ -185,6 +191,7 @@ export class UI {
       order: Number.isFinite(Number(order)) ? Number(order) : 100,
       visible: typeof visible === 'function' ? visible : () => true,
       render,
+      windowId: String(windowId || 'site'),
     }
     const old = this._shellAsideViews.find((item) => item.id === record.id)
     if (old) this._shellAsideViews = this._shellAsideViews.filter((item) => item !== old)
@@ -204,6 +211,129 @@ export class UI {
         return false
       }
     })
+  }
+
+  /** 注册右栏 tab 的内部控制器；调用方只应是 skin。 */
+  registerShellAsideController(fn) {
+    if (typeof fn !== 'function') throw new Error('侧栏控制器需要函数')
+    this._shellAsideController = fn
+    return () => {
+      if (this._shellAsideController === fn) this._shellAsideController = null
+    }
+  }
+
+  /** 受控切换右栏视图；未知 ID 始终安全回到站点视图。 */
+  shellAsideSelect(id) {
+    const wanted = String(id || '')
+    const valid = wanted === 'site' || this._shellAsideViews.some((view) => view.id === wanted)
+    const next = valid ? wanted : 'site'
+    if (typeof this._shellAsideController !== 'function') return next
+    try {
+      const selected = this._shellAsideController(next)
+      return selected === 'site' || this._shellAsideViews.some((view) => view.id === selected)
+        ? String(selected)
+        : next
+    } catch {
+      return next
+    }
+  }
+
+  /**
+   * 注册一个氢壳窗口。窗口本身由 skin 创建，插件只提供目录和内容描述。
+   * 返回注销函数；插件停用时由 api.ui 自动清理。
+   */
+  registerShellWindow({ id, label, order = 100, visible, render, host, defaultRect, windowId } = {}) {
+    const wid = String(id || '')
+    if (!/^[a-z][a-z0-9-]{0,63}$/.test(wid)) throw new Error('氢壳窗口需要有效 id')
+    if (typeof render !== 'function' && !host) throw new Error('氢壳窗口需要 render 或 host')
+    const record = {
+      id: wid,
+      label: String(label || wid),
+      order: Number.isFinite(Number(order)) ? Number(order) : 100,
+      visible: typeof visible === 'function' ? visible : () => true,
+      render: typeof render === 'function' ? render : null,
+      host: host || null,
+      defaultRect: defaultRect && typeof defaultRect === 'object' ? { ...defaultRect } : null,
+      windowId: String(windowId || wid),
+    }
+    const old = this._shellWindows.find((item) => item.id === wid)
+    if (old) this._shellWindows = this._shellWindows.filter((item) => item !== old)
+    if (!old && this._shellWindows.length >= MAX_SHELL_WINDOWS) throw new Error('氢壳窗口数量超过上限')
+    this._shellWindows.push(record)
+    this._shellWindows.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label))
+    return () => {
+      this._shellWindows = this._shellWindows.filter((item) => item !== record)
+    }
+  }
+
+  /** 返回当前上下文可见的氢壳窗口目录。 */
+  shellWindows(context = {}) {
+    return this._shellWindows
+      .filter((item) => {
+        try {
+          return item.visible(context) !== false
+        } catch {
+          return false
+        }
+      })
+      .map((item) => ({ ...item, defaultRect: item.defaultRect ? { ...item.defaultRect } : null }))
+  }
+
+  /** 注册 skin 的窗口控制器；控制器接收 action/value。 */
+  registerShellWindowController(fn) {
+    if (typeof fn !== 'function') throw new Error('氢壳窗口控制器需要函数')
+    this._shellWindowController = fn
+    return () => {
+      if (this._shellWindowController === fn) this._shellWindowController = null
+    }
+  }
+
+  _shellWindowCall(action, value) {
+    if (typeof this._shellWindowController !== 'function') return null
+    try {
+      return this._shellWindowController(action, value)
+    } catch {
+      return null
+    }
+  }
+
+  shellWindowFocus(id) {
+    const result = this._shellWindowCall('focus', String(id || ''))
+    return result == null ? '' : String(result)
+  }
+
+  shellWindowArrange() {
+    return this._shellWindowCall('arrange')
+  }
+
+  shellWindowReset(id) {
+    return this._shellWindowCall('reset', id == null ? '' : String(id))
+  }
+
+  shellWindowLayout() {
+    return this._shellWindowCall('layout')
+  }
+
+  /** 注册 skin 的正文滚动根控制器。 */
+  registerShellScrollRoot(fn) {
+    if (typeof fn !== 'function') throw new Error('氢壳滚动根控制器需要函数')
+    this._shellScrollRootController = fn
+    return () => {
+      if (this._shellScrollRootController === fn) this._shellScrollRootController = null
+    }
+  }
+
+  registerShellScrollRootController(fn) {
+    return this.registerShellScrollRoot(fn)
+  }
+
+  shellScrollRoot() {
+    if (typeof this._shellScrollRootController !== 'function') return null
+    try {
+      return this._shellScrollRootController() || null
+    } catch {
+      return null
+    }
   }
 
   /** 右下角圆形入口按钮 */
@@ -244,19 +374,15 @@ export class UI {
     }
   }
 
-  openPanel(tabId) {
+  _mountPanel(title = this.title) {
     this.ensureBase()
-    if (this._panel) {
-      if (tabId) this.showTab(tabId)
-      return
-    }
     const mask = document.createElement('div')
     mask.className = 'lsb-mask'
     const panel = document.createElement('div')
     panel.className = 'lsb-panel lsb-panel-settings'
     panel.innerHTML = `
       <div class="lsb-panel-head">
-        <strong>${esc(this.title)}</strong>
+        <strong>${esc(title)}</strong>
         <span class="lsb-ver">v${esc(this.version)}</span>
         <button class="lsb-panel-close" title="关闭">×</button>
       </div>
@@ -275,8 +401,37 @@ export class UI {
     document.body.append(mask, panel)
     trapOverscroll(mask)
     trapOverscroll(panel)
+  }
+
+  openPanel(tabId) {
+    if (this._panel) {
+      if (tabId) this.showTab(tabId)
+      return
+    }
+    this._mountPanel()
     this._renderTabs()
     this.showTab(tabId || this._tabs[0]?.id)
+  }
+
+  /** 用专用表单视图打开设置，不经可能被插件功能页覆盖的分页 ID。 */
+  openSettingsPanel({ id, name, render }) {
+    if (!id || typeof render !== 'function') throw new Error('插件设置面板需要 id/render')
+    if (this._panel) this.closePanel()
+    this._mountPanel(`${name || id} · 设置`)
+    this._panel.panel.querySelector('.lsb-tabs').hidden = true
+    this._active = `__settings__:${id}`
+    this._activeTab = null
+    const view = this._panel.panel.querySelector('.lsb-view')
+    const heading = document.createElement('h2')
+    heading.textContent = `${name || id} 设置`
+    heading.style.margin = '0 0 12px'
+    view.appendChild(heading)
+    try {
+      render(view)
+    } catch (e) {
+      view.innerHTML = `<div class="lsb-empty">面板渲染失败：${esc(e.message)}</div>`
+      console.error('[LSB ui] settings render', e)
+    }
   }
 
   closePanel() {

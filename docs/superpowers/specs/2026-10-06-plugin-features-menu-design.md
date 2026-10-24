@@ -21,8 +21,9 @@
 ## 入口与数据来源
 
 - `skin.user.js` 现有 `collectTools()` 是五个旧功能入口的数据来源，保留现有面板 ID 与 `title-quotes:open` 动作。
-- 插件名称和状态从只读插件目录读取；设置页可用性从现有设置面板目录读取。通过插件 ID 匹配设置页，避免把诸如“AI 历史”这样的功能面板误判成插件设置页。
-- 插件设置跳转使用现有 `api.ui.openPanel(pluginId)`，不新增基座 API、不自行访问内部 UI 状态。
+- 插件名称和状态从只读插件目录读取；功能入口可用性从插件状态、已注册面板目录或 RPC 处理器校验。
+- 基座新增 `api.ui.settingsPlugins()` 与 `api.ui.openPluginSettings(pluginId)`：前者只返回声明了 `config` schema 的插件 ID、名称和状态，不暴露 schema；后者按插件 ID 打开独立设置表单，保留插件通过 `configTab` 注册的附加设置内容，不依赖可能被功能页占用的分页 ID。
+- 插件设置目录通过 `settingsPlugins()` 列出可配置插件，包括已停用或因页面条件跳过的插件；功能条目齿轮使用 `openPluginSettings()`。
 - 页面内容每次打开面板时重新读取；插件启用或停用变化不会留下过期入口。
 
 ## 空状态与失败处理
@@ -50,4 +51,4 @@
 
 ## 实现边界
 
-预计只需要在 `plugins/skin.user.js` 中扩展工具面板与壳内面板交互，并在 `test/skin-canvas.test.js` 中增加 DOM 交互回归测试；除非测试证明现有公开 API 不足，否则不修改 `src/ui.js` 或 `src/core.js`。实现遵循测试先行，并以现有构建与浏览器冒烟命令验证。
+需要扩展 `plugins/skin.user.js` 中的工具面板与壳内面板交互；由于已有 `api.ui.panels()` 无法区分同 ID 的功能页和自动设置页，基座还需在 `src/core.js` 与 `src/ui.js` 中增加受 `ui` 权限保护的设置插件目录和独立设置表单入口。相应回归测试覆盖 `test/core.test.js` 与 `test/skin-canvas.test.js`；完成后运行现有构建与浏览器冒烟检查。实现遵循测试先行。

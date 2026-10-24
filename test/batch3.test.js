@@ -67,7 +67,7 @@ test('签到日历：自动探测未签→提醒；一键签到组表单提交�
     if (init.method === 'POST') {
       posts.push({ url: u, body: init.body })
       checked = true
-      return { status: 200, ok: true, url: u, text: async () => 'ok' }
+      return { status: 200, ok: true, url: u, text: async () => '{"ok":1,"message":"签到完成"}' }
     }
     return {
       status: 200,
@@ -102,6 +102,11 @@ test('签到日历：自动探测未签→提醒；一键签到组表单提交�
 
   // 日历渲染出 ok 格子
   w.LSB.open('checkin-calendar')
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  if (dkey(yesterday).slice(0, 7) !== dkey(new Date()).slice(0, 7)) {
+    w.document.querySelector('[data-prev]').click()
+  }
   assert.ok(w.document.querySelectorAll('.lsb-cal-cell.is-ok').length >= 2)
 })
 
@@ -119,9 +124,25 @@ test('签到日历：HTTP 非 2xx 不把当天标成已签', async () => {
   await until(() => dbg.status() === 'open')
   const out = await dbg.doCheckin()
   assert.equal(out.done, false)
-  assert.match(String(out.reason), /http/)
+  assert.equal(out.outcome, 'unknown', '5xx 可能已到达站点，签到结果应待检查')
   assert.notEqual(dbg.recs()[dkey(new Date())]?.s, 'ok', '失败不得写入 ok')
   assert.equal(dbg.status(), 'open')
+})
+
+test('签到日历：HTTP 200 业务失败不把当天标成已签', async () => {
+  const { w, until } = makeSite()
+  w.fetch = async (url, init = {}) => {
+    const u = String(url)
+    if (init.method === 'POST') return { status: 200, ok: true, url: u, text: async () => '{"ok":0,"message":"CSRF 失效"}' }
+    return { status: 200, ok: true, url: u, text: async () => CHECKIN_OPEN }
+  }
+  await loadBase(w, PLUG('checkin-calendar.user.js'))
+  const dbg = await w.LSB.bus.request('checkin-calendar:debug')
+  await until(() => dbg.status() === 'open')
+  const out = await dbg.doCheckin()
+  assert.equal(out.outcome, 'failure')
+  assert.equal(out.message, 'CSRF 失效')
+  assert.notEqual(dbg.recs()[dkey(new Date())]?.s, 'ok')
 })
 
 test('签到日历：已签状态不再提醒、按钮置灰', async () => {
@@ -141,9 +162,10 @@ test('签到日历：已签状态不再提醒、按钮置灰', async () => {
 
 /* ─────────── 积分趋势 ─────────── */
 
-test('积分趋势：快照序列 → 折线图与增减列表；同值去重', async () => {
+test('积分趋势：快照序列 → 工作台折线图与增减列表；同值去重', async () => {
   const { w } = makeSite()
-  await loadBase(w, PLUG('points-ledger.user.js'))
+  w.fetch = async (url) => ({ status: 200, ok: true, url: String(url), text: async () => '<html><body></body></html>' })
+  await loadBase(w, PLUG('points-ledger.user.js'), PLUG('title-quotes.user.js'), PLUG('title-forge-planner.user.js'), PLUG('points-title-workbench.user.js'))
   const dbg = await w.LSB.bus.request('points-ledger:debug')
   dbg.reset()
 
@@ -152,9 +174,10 @@ test('积分趋势：快照序列 → 折线图与增减列表；同值去重', 
   dbg.add(now - 864e5, 4120)
   dbg.add(now, 4138)
 
-  w.LSB.open('points-ledger')
-  assert.ok(w.document.querySelector('.lsb-svg polyline'), '折线已绘制')
-  const txt = w.document.querySelector('.lsb-view').textContent
+  await w.LSB.bus.request('points-title-workbench:open')
+  w.document.querySelector('[data-workbench-tab="points"]').click()
+  assert.ok(w.document.querySelector('[data-workbench-view="points"] .lsb-svg polyline'), '折线已绘制')
+  const txt = w.document.querySelector('[data-workbench-view="points"]').textContent
   assert.match(txt, /\+20/)
   assert.match(txt, /\+18/)
 
@@ -176,17 +199,19 @@ test('积分趋势：间隔定时器已挂上（配置 intervalHours 不是一�
   assert.equal(dbg.armed(), true)
 })
 
-test('积分趋势：折线图带 viewBox，按栏宽缩放而不是裁掉右侧', async () => {
+test('积分趋势：工作台折线图带 viewBox，按栏宽缩放而不是裁掉右侧', async () => {
   const { w } = makeSite()
-  await loadBase(w, PLUG('points-ledger.user.js'))
+  w.fetch = async (url) => ({ status: 200, ok: true, url: String(url), text: async () => '<html><body></body></html>' })
+  await loadBase(w, PLUG('points-ledger.user.js'), PLUG('title-quotes.user.js'), PLUG('title-forge-planner.user.js'), PLUG('points-title-workbench.user.js'))
   const dbg = await w.LSB.bus.request('points-ledger:debug')
   dbg.reset()
   const now = Date.now()
   dbg.add(now - 2 * 864e5, 4100)
   dbg.add(now - 864e5, 4120)
   dbg.add(now, 4138)
-  w.LSB.open('points-ledger')
-  const svg = w.document.querySelector('.lsb-svg')
+  await w.LSB.bus.request('points-title-workbench:open')
+  w.document.querySelector('[data-workbench-tab="points"]').click()
+  const svg = w.document.querySelector('[data-workbench-view="points"] .lsb-svg')
   assert.ok(svg, '应有折线图')
   const vb = svg.getAttribute('viewBox') || ''
   assert.match(vb, /^0 0 \d+(\.\d+)? \d+(\.\d+)?$/, `需要 viewBox 才能随容器缩放，实际 viewBox="${vb}"`)
@@ -198,7 +223,7 @@ test('积分趋势：折线图带 viewBox，按栏宽缩放而不是裁掉右侧
     !wAttr || /%$/.test(wAttr),
     `width 应省略或用百分比，否则固定像素会裁掉右侧；实际 width="${wAttr}"`,
   )
-  const css = w.document.getElementById('lsb-style-points-ledger')?.textContent || ''
+  const css = [...w.document.querySelectorAll('style')].map((node) => node.textContent).join('\n')
   assert.match(css, /\.lsb-svg[\s\S]*width:\s*100%/, '样式要把 SVG 拉满内容栏')
 })
 

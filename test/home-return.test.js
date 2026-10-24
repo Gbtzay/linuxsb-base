@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}`, import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 const userHtml = readFileSync(new URL('./fixtures/user1.html', import.meta.url), 'utf8')
@@ -69,6 +69,9 @@ function stubRect(w, tid, top) {
 
 function captureScroll(w) {
   const scrolled = []
+  // 氢壳窗口化后 window.scrollTo 会由滚动桥代理到正文滚动根；
+  // 监听 window scroll 可同时观察旧原生路径和代理后的实际位置。
+  w.addEventListener('scroll', () => scrolled.push(Number(w.scrollY) || 0))
   w.scrollTo = (a, b) => {
     if (typeof a === 'object' && a) scrolled.push(Number(a.top) || 0)
     else scrolled.push(Number(b) || 0)
@@ -153,7 +156,10 @@ test('首页回位：氢壳软跳清滚动后仍能回位', async () => {
   const forumHtml = homeHtml
     .replace(/<ul class="post-list">[\s\S]*?<\/ul>/, '<ul class="post-list"></ul>')
     .replace('<title>', '<title>技术交流 - ')
-  const { w, tick, until } = makeDom(forumHtml, 'https://linux.sb/forum/4')
+  const { w, tick, until } = makeDom(forumHtml, 'https://linux.sb/forum/4', {
+    'lsb_base:skin:__config': { uiMode: 'legacy' },
+  })
+  Object.defineProperty(w, 'innerWidth', { value: 1200, configurable: true })
   w.sessionStorage.setItem(KEY, JSON.stringify({ tid: id, offset: 90, ts: Date.now() }))
   stubRect(w, id, 400)
   const scrolled = captureScroll(w)

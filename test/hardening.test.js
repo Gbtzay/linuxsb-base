@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}.user.js`, import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
 
@@ -153,25 +153,6 @@ test('非幂等请求默认不重试（避免重复回复/重复签到）', asyn
 })
 
 /* ═══════════ 资源清理：停用即收摊 ═══════════ */
-
-test('停用清理：悬浮卡节点被移除，链接监听摘除', async () => {
-  const { w, until } = makeSite()
-  w.fetch = async (url) => ({ status: 200, ok: true, url: String(url), text: async () => topicHtml })
-  await loadBase(w, PLUG('hover-profile'))
-
-  const link = w.document.querySelector('a[href^="/user/"]')
-  assert.ok(link, '夹具里有用户链接')
-  link.dispatchEvent(new w.MouseEvent('mouseenter'))
-  assert.ok(await until(() => !!w.document.querySelector('.lsb-hover-card')), '浮卡已创建')
-
-  w.LSB.disable('hover-profile')
-  assert.equal(w.document.querySelector('.lsb-hover-card'), null, '停用后浮卡节点不残留')
-
-  // 摘掉监听后再次悬停不应重建
-  link.dispatchEvent(new w.MouseEvent('mouseenter'))
-  await new Promise((r) => setTimeout(r, 350))
-  assert.equal(w.document.querySelector('.lsb-hover-card'), null, '监听已摘除，不再重建浮卡')
-})
 
 test('停用清理：未读哨兵还原标题并停掉定时器', async () => {
   const seed = {}

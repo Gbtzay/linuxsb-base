@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
 
-const baseCode = readFileSync(new URL('../dist/linuxsb-base.user.js', import.meta.url), 'utf8')
+const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (n) => readFileSync(new URL(`../plugins/${n}`, import.meta.url), 'utf8')
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 
@@ -41,6 +41,7 @@ function makeDom(html, url, preload = {}) {
   const dom = JSDOM ? new JSDOM(html, { url, runScripts: 'outside-only' }) : null
   const w = dom.window
   w.unsafeWindow = w
+  w.scrollTo = () => {}
   w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
   w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
   w.localStorage.setItem('lsb_base:__core:urlPoll', JSON.stringify(0))
@@ -89,6 +90,15 @@ async function quotesView(w, dbg) {
   await dbg.openFloat()
   return w.document.querySelector('.lsb-title-quotes-float-body')
 }
+
+test('称号行情：全局不再挂行情浮层或 FAB，但交易页仍保留嵌入行情', async () => {
+  const home = await boot()
+  assert.equal(home.w.document.querySelector('.lsb-title-quotes-fab'), null)
+  assert.equal(home.w.document.querySelector('.lsb-title-quotes-float'), null)
+
+  const market = await boot('https://linux.sb/gacha_market')
+  assert.ok(market.w.document.querySelector('.lsb-title-quotes-embed'))
+})
 
 test('称号行情：同称号多单价 → lo / hi / mid', async () => {
   const { dbg } = await boot()
@@ -240,6 +250,48 @@ test('称号行情：公开最近成功采集的市场挂单给合成规划器',
   assert.equal(Object.hasOwn(market.listings[0], 'id'), false)
 })
 
+test('称号行情：市场快照公开完整分页覆盖', async () => {
+  const { w, dbg } = await boot()
+  const now = 1_700_000_000_000
+  dbg.reset()
+  dbg.ingestListings([
+    { id: 'a', name: '路人甲', rarity: 'N', price: 10, qty: 36 },
+    { id: 'b', name: '路人甲', rarity: 'N', price: 12, qty: 64 },
+  ], now, { expectedPages: 9, fetchedPages: 9, failedPages: 0, challengePages: 0 })
+  const market = await w.LSB.bus.request('title-quotes:market-data')
+  assert.equal(market.coverage.complete, true)
+  assert.equal(market.coverage.expectedPages, 9)
+  assert.deepEqual(JSON.parse(JSON.stringify(market.listings)), [
+    { key: '路人甲@N', price: 10, qty: 36 },
+    { key: '路人甲@N', price: 12, qty: 64 },
+  ])
+})
+
+test('称号行情：分页缺失时不把部分快照标记为完整', async () => {
+  const { w, dbg } = await boot()
+  dbg.reset()
+  dbg.ingestListings([{ id: 'a', name: '路人甲', rarity: 'N', price: 10, qty: 36 }], 1_700_000_000_000, {
+    expectedPages: 9,
+    fetchedPages: 8,
+    failedPages: 1,
+    challengePages: 0,
+  })
+  const market = await w.LSB.bus.request('title-quotes:market-data')
+  assert.equal(market.coverage.complete, false)
+  assert.equal(market.coverage.failedPages, 1)
+})
+
+test('称号行情：按需刷新复用进行中的采集请求', async () => {
+  const html = () => marketPage(card('路人甲', 'N', 10, 'a', 36) + pager(1))
+  const { w, calls } = await boot('https://linux.sb/', {}, html)
+  const first = w.LSB.bus.request('title-quotes:refresh')
+  const second = w.LSB.bus.request('title-quotes:refresh')
+  const [one, two] = await Promise.all([first, second])
+  assert.equal(one.coverage.complete, true)
+  assert.equal(two.coverage.complete, true)
+  assert.equal(calls.filter((x) => /\/gacha_market\?p=1/.test(x.href)).length, 1)
+})
+
 test('称号行情：四锚点；不足 4 个不硬凑；最高最低不进中位', async () => {
   const { dbg } = await boot()
   const html =
@@ -345,18 +397,15 @@ test('称号行情：氧面板不折叠', async () => {
   assert.equal(w.document.querySelector('.lsb-view details.lsb-title-quotes-fold'), null)
 })
 
-test('称号行情：氧面板是设置加打开浮层，不画行情图', async () => {
+test('称号行情：氧面板仅保留设置，不提供全局行情打开入口', async () => {
   const { w } = await boot()
   w.LSB.open('title-quotes')
   const view = w.document.querySelector('.lsb-view')
   assert.match(view.textContent, /巡检间隔/)
-  assert.match(view.textContent, /打开浮层/)
+  assert.doesNotMatch(view.textContent, /打开浮层/)
   assert.equal(view.querySelector('.lsb-title-quotes-anchors'), null)
   assert.equal(view.querySelector('[data-board-view]'), null)
-  const btn = [...view.querySelectorAll('button')].find((b) => b.textContent.trim() === '打开浮层')
-  assert.ok(btn)
-  btn.click()
-  assert.ok(w.document.querySelector('.lsb-title-quotes-float'))
+  assert.equal(view.querySelector('.lsb-title-quotes-float'), null)
 })
 
 test('称号行情：默认巡检 30 秒', async () => {
@@ -679,7 +728,10 @@ test('称号行情：本日只收当天快照，昨天的不进窗口', async ()
 test('称号行情：可选本日；K 线悬停给出开高低收', async () => {
   const { w, dbg } = await boot()
   dbg.reset()
-  const now = Date.now()
+  const fixedNow = new Date()
+  fixedNow.setHours(12, 0, 0, 0)
+  const now = fixedNow.getTime()
+  w.Date.now = () => now
   const listings = dbg.parseCards(
     card('吃瓜群众', 'N', 20, 'a') + card('隐藏大佬', 'SSR', 666, 'e'),
   )
@@ -1045,16 +1097,15 @@ test('称号行情：区间空窗榜文案；短线仅一份则全是新上', as
   assert.match(view.textContent, /吃瓜群众/)
 })
 
-test('称号行情：氢壳开着时不挂右下行情钮；关壳后才出现', async () => {
-  const { w, tick } = makeDom(homeHtml, 'https://linux.sb/')
+test('称号行情：氢壳开关变化也不再挂全局行情钮或浮层', async () => {
+  const { w, tick } = makeDom(homeHtml, 'https://linux.sb/', {
+    'lsb_base:skin:__config': { uiMode: 'legacy' },
+  })
+  Object.defineProperty(w, 'innerWidth', { value: 1200, configurable: true })
   stubFetch(w)
   await loadBase(w, PLUG('title-quotes.user.js'), PLUG('skin.user.js'))
-  assert.ok(w.document.documentElement.classList.contains('lsb-skin-shell-on'))
-  assert.equal(
-    w.document.querySelector('.lsb-title-quotes-fab'),
-    null,
-    '氢壳左栏已有入口，不要再叠右下钮',
-  )
+  assert.equal(w.document.querySelector('.lsb-title-quotes-fab'), null)
+  assert.equal(w.document.querySelector('.lsb-title-quotes-float'), null)
   w.eval(`(() => {
     const cur = JSON.parse(localStorage.getItem('lsb_base:skin:__config') || '{}')
     cur.shell = false
@@ -1062,30 +1113,15 @@ test('称号行情：氢壳开着时不挂右下行情钮；关壳后才出现',
   })()`)
   w.LSB.bus.emit('config:changed:skin', { shell: false }, { source: 'core' })
   await tick(20)
-  assert.ok(
-    w.document.querySelector('.lsb-title-quotes-fab'),
-    '关壳后的原生界面才留行情钮',
-  )
+  assert.equal(w.document.querySelector('.lsb-title-quotes-fab'), null)
+  assert.equal(w.document.querySelector('.lsb-title-quotes-float'), null)
 })
 
-test('称号行情：默认有行情钮；RPC 打开浮层且含行情大盘', async () => {
-  const { w, dbg } = await boot()
-  const fab = w.document.querySelector('.lsb-title-quotes-fab')
-  assert.ok(fab)
-  assert.equal(fab.textContent.trim(), '行情')
-  assert.equal(fab.getAttribute('aria-label'), '称号行情')
+test('称号行情：不再注册全局打开浮层 RPC', async () => {
+  const { w } = await boot()
+  assert.equal(await w.LSB.bus.hasHandler('title-quotes:open'), false)
+  assert.equal(w.document.querySelector('.lsb-title-quotes-fab'), null)
   assert.equal(w.document.querySelector('.lsb-title-quotes-float'), null)
-  await w.LSB.bus.request('title-quotes:open')
-  const floatEl = w.document.querySelector('.lsb-title-quotes-float')
-  assert.ok(floatEl)
-  const body = floatEl.querySelector('.lsb-title-quotes-float-body')
-  assert.ok(body)
-  assert.ok(body.querySelector('[data-board-view="quotes"]'))
-  assert.ok(body.querySelector('[data-board-view="board"]'))
-  assert.match(floatEl.querySelector('.lsb-title-quotes-float-head')?.textContent || '', /称号行情/)
-  assert.equal(dbg.watching(), true)
-  assert.equal(dbg.intervalMs(), 10000)
-  assert.equal(JSON.parse(w.localStorage.getItem('lsb_base:title-quotes:floatOpen')), true)
 })
 
 test('称号行情：浮层滚到底不带动后面的页面', async () => {
@@ -1141,17 +1177,17 @@ test('称号行情：关闭浮层后间隔回到配置；收起仍算在看', as
   assert.equal(dbg.watching(), true)
   w.document.querySelector('[data-float-close]').click()
   assert.equal(w.document.querySelector('.lsb-title-quotes-float'), null)
-  assert.ok(w.document.querySelector('.lsb-title-quotes-fab'))
   assert.equal(JSON.parse(w.localStorage.getItem('lsb_base:title-quotes:floatOpen')), false)
   assert.equal(dbg.watching(), false)
   assert.equal(dbg.intervalMs(), 30000)
 })
 
-test('称号行情：floatOpen 预载则启动即打开', async () => {
+test('称号行情：旧的 floatOpen 预载也不再启动全局浮层', async () => {
   const { w } = await boot('https://linux.sb/', {
     'lsb_base:title-quotes:floatOpen': true,
   })
-  assert.ok(w.document.querySelector('.lsb-title-quotes-float'))
+  assert.equal(w.document.querySelector('.lsb-title-quotes-float'), null)
+  assert.equal(w.document.querySelector('.lsb-title-quotes-fab'), null)
 })
 
 test('称号行情：氢面板存在时 Esc 不关浮层', async () => {

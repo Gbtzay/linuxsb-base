@@ -1,11 +1,5 @@
 /** 基础工具：无依赖，可在 jsdom / 浏览器 / node 下运行 */
 
-export const noop = () => {}
-
-export function isPlainObject(v) {
-  return Object.prototype.toString.call(v) === '[object Object]'
-}
-
 export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
