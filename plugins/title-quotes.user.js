@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·称号行情
 // @namespace    https://linux.sb/
-// @version      1.0.19
+// @version      1.0.20
 // @description  采集称号交易挂单的最低/最高与中位数；全场锚点折线，各称号可切挂单合成K或高低折线；交易页内嵌行情分析。氢壳工作台提供统一访问，纯读，不提交购买。需要 LINUX.SB 基座。
 // @author       you
 // @match        https://linux.sb/*
@@ -21,7 +21,7 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.19',
+    version: '1.0.20',
     description: '采集称号交易挂单行情并提供交易页内嵌分析；工作台通过正式 RPC 读取市场快照',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -1292,7 +1292,10 @@
     }
 
     function isChallengePage(doc) {
-      const text = String(doc?.body?.textContent || doc?.documentElement?.textContent || '')
+      const root = doc?.body || doc?.documentElement
+      const clean = root?.cloneNode?.(true)
+      clean?.querySelectorAll?.('script,style,noscript,template').forEach((node) => node.remove())
+      const text = String(clean?.textContent || '')
       return /cloudflare|checking your browser|challenge/i.test(text)
     }
 

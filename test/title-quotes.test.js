@@ -510,6 +510,23 @@ test('称号行情：分页第二页的挂单也要记进高低价，不能只�
   )
 })
 
+test('称号行情：正常交易页内的 Cloudflare 脚本不应被判为挑战页', async () => {
+  const html = `<html><body>${marketPage(card('路人甲', 'N', 10, 'ok'))}` +
+    `<script>window.__CF$cv_params={challenge:"challenge-platform"};</script></body></html>`
+  const { w, dbg, tick } = await boot('https://linux.sb/', {}, html)
+  dbg.reset()
+  await dbg.snap()
+  await tick(40)
+  const market = await w.LSB.bus.request('title-quotes:market-data')
+  assert.equal(market.coverage.complete, true)
+  assert.equal(dbg.lastErr(), null)
+  assert.equal(
+    [...w.document.querySelectorAll('.lsb-toast')].some((el) => /称号行情本轮采集失败/.test(el.textContent || '')),
+    false,
+    '正常页的 Cloudflare 脚本不得触发失败提示',
+  )
+})
+
 test('称号行情：交易页「在售列表」也能插入（站点现用文案）', async () => {
   const page = homeHtml.replace(
     '</body>',

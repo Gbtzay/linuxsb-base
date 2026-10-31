@@ -27,7 +27,7 @@
 // · LSB·机会监控 v1.0.2
 // · LSB·签到日历 v1.0.4
 // · LSB·积分趋势 v1.0.2
-// · LSB·称号行情 v1.0.19
+// · LSB·称号行情 v1.0.20
 // · LSB·UR 合成规划 v0.1.3
 // · LSB·积分-称号工作台 v0.1.0
 // · LSB·配置迁移 v1.0.0
@@ -2882,7 +2882,7 @@
 
 
 ;
-/* ══════════════ LSB·称号行情 v1.0.19 (title-quotes) ══════════════ */
+/* ══════════════ LSB·称号行情 v1.0.20 (title-quotes) ══════════════ */
 /**
  * 数据源：/gacha_market 在售卡片。站点按页展示（约 24 条/页），必须跟分页把挂单收全；
  * 只拉每个筛选的第一页会丢掉中间价，巡检高低价就会和交易页对不上。
@@ -2894,7 +2894,7 @@
   const manifest = {
     id: 'title-quotes',
     name: '称号行情',
-    version: '1.0.19',
+    version: '1.0.20',
     description: '采集称号交易挂单行情并提供交易页内嵌分析；工作台通过正式 RPC 读取市场快照',
     author: 'you',
     requires: { base: '^0.1.0' },
@@ -4165,7 +4165,10 @@
     }
 
     function isChallengePage(doc) {
-      const text = String(doc?.body?.textContent || doc?.documentElement?.textContent || '')
+      const root = doc?.body || doc?.documentElement
+      const clean = root?.cloneNode?.(true)
+      clean?.querySelectorAll?.('script,style,noscript,template').forEach((node) => node.remove())
+      const text = String(clean?.textContent || '')
       return /cloudflare|checking your browser|challenge/i.test(text)
     }
 
