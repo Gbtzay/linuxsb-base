@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
@@ -6,14 +6,28 @@ import { JSDOM } from 'jsdom'
 const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const PLUG = (name) => readFileSync(new URL(`../plugins/${name}`, import.meta.url), 'utf8')
 const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url), 'utf8')
+const fixtureWindows = new Set()
+
+afterEach(async () => {
+  const windows = [...fixtureWindows]
+  fixtureWindows.clear()
+  try {
+    for (const w of windows) if (w.document) w.LSB?.__core?.shutdown()
+  } finally {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    for (const w of windows) if (w.document) w.close()
+  }
+})
 
 function makeSite(width = 1200) {
   const dom = new JSDOM(topicHtml, { url: 'https://linux.sb/topic/1', runScripts: 'outside-only' })
   const w = dom.window
+  fixtureWindows.add(w)
   w.unsafeWindow = w
   w.scrollTo = () => {}
   Object.defineProperty(w, 'innerWidth', { value: width, configurable: true })
-  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 1)
+  w.requestAnimationFrame = (fn) => w.setTimeout(() => fn(Date.now()), 1)
+  w.cancelAnimationFrame = (timer) => w.clearTimeout(timer)
   w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(5))
   w.localStorage.setItem('lsb_base:__core:urlPoll', JSON.stringify(0))
   w.localStorage.setItem('lsb_base:skin:__config', JSON.stringify({ uiMode: 'ios27' }))

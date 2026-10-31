@@ -119,8 +119,35 @@ test('插件网络层暴露同源重定向最终地址而非原请求路径', as
   }
 })
 
-test('正式版氢号是 2.4.1，面板标题不带 RC', () => {
-  assert.equal(VERSION, '2.4.1')
+test('插件并发读取相同页面只发送一个 GET，各自获得可独立修改的 Document', async () => {
+  const originalFetch = globalThis.fetch
+  let calls = 0
+  let release
+  const held = new Promise((resolve) => { release = resolve })
+  globalThis.fetch = async (url) => {
+    calls++
+    await held
+    return { status: 200, ok: true, url: String(url), headers: { forEach() {} }, text: async () => '<h1>shared</h1>' }
+  }
+  const core = boot()
+  let api
+  core.register({ id: 'dedup-probe', permissions: ['read'] }, (value) => { api = value })
+  try {
+    const pending = [api.net.doc('/topic/2', { queue: false }), api.net.doc('/topic/2', { queue: false })]
+    release()
+    const [a, b] = await Promise.all(pending)
+    assert.equal(calls, 1)
+    assert.equal(a.querySelector('h1').textContent, 'shared')
+    a.querySelector('h1').textContent = 'changed'
+    assert.equal(b.querySelector('h1').textContent, 'shared')
+  } finally {
+    core.shutdown()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('正式版氢号是 2.4.2，面板标题不带 RC', () => {
+  assert.equal(VERSION, '2.4.2')
   const core = boot()
   assert.equal(core.ui.title, 'LINUX.SB · 氢')
   assert.doesNotMatch(core.ui.title, /RC/)

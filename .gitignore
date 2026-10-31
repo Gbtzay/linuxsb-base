@@ -2,6 +2,8 @@ node_modules/
 .superpowers/
 .tmp*
 *.log
+artifacts/
+diffcheck*.out
 .DS_Store
 Thumbs.db
 .env

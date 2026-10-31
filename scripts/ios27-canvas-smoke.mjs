@@ -56,6 +56,11 @@ async function waitForSpaSettled(page, expectedPath) {
   }, expectedPath)
 }
 async function enableIos27ModeBeforeNavigation(page) {
+  // Fixed HTML snapshots must not execute the site's changing remote scripts.
+  // Keep native CSS/images; the userscripts under test are injected explicitly.
+  await page.route('**/*', (route) => route.request().resourceType() === 'script'
+    ? route.fulfill({ status: 200, contentType: 'application/javascript', body: '' })
+    : route.fallback())
   await page.addInitScript(() => {
     const configKey = 'lsb_base:skin:__config'
     let config = {}
@@ -681,6 +686,26 @@ try {
       announcementBefore: topicBack.announcementBefore,
     }, `${label}: topic back navigation did not restore the canvas without stealing focus`)
 
+    // Reproduce the native toolbar's post-commit reflow without depending on remote JS.
+    await page.evaluate(() => {
+      if (innerWidth >= 700) return
+      window.addEventListener('popstate', function reflowHome() {
+        if (location.pathname !== '/') return
+        window.removeEventListener('popstate', reflowHome)
+        requestAnimationFrame(() => {
+          const toolbar = document.querySelector('.topic-toolbar')
+          const before = toolbar.getBoundingClientRect().height
+          const tabs = [...toolbar.querySelectorAll('.tab')]
+          const tops = tabs.map((tab) => tab.offsetTop)
+          tabs.forEach((tab, i) => {
+            tab.classList.toggle('tab-wrapped', tops[i] > tops[0])
+            tab.classList.toggle('tab-line-start', i === 0 || tops[i] !== tops[i - 1])
+            tab.classList.toggle('tab-line-end', i === tabs.length - 1 || tops[i] !== tops[i + 1])
+          })
+          window.__ios27HistoryReflow = { before, after: toolbar.getBoundingClientRect().height }
+        })
+      })
+    })
     await page.goBack()
     await page.waitForURL('https://linux.sb/')
     await waitForSpaSettled(page, '/')
@@ -710,6 +735,20 @@ try {
     assert.equal(homeBack.list, true, `${label}: browser back did not restore the list content`)
     assert.equal(homeBack.focusPreserved, true, `${label}: history back stole focus`)
     assert.equal(homeBack.announcement, homeBack.announcementBefore, `${label}: history back announced a route`)
+    if (width < 700) {
+      await page.waitForFunction(() => !!window.__ios27HistoryReflow)
+      await page.waitForTimeout(500)
+      const afterReflow = await page.evaluate(() => ({
+        y: window.scrollY,
+        expected: window.__ios27TopicHomeScrollY,
+        ...window.__ios27HistoryReflow,
+        rootAnchor: (document.scrollingElement || document.documentElement).style.getPropertyValue('overflow-anchor'),
+      }))
+      assert.ok(afterReflow.after >= afterReflow.before + 5, `${label}: native toolbar reflow was not reproduced: ${JSON.stringify(afterReflow)}`)
+      assert.ok(Math.abs(afterReflow.y - afterReflow.expected) <= 1,
+        `${label}: delayed native reflow moved history scroll (actual ${afterReflow.y}, expected ${afterReflow.expected})`)
+      assert.equal(afterReflow.rootAnchor, '', `${label}: history protection left an inline anchor override`)
+    }
     await page.screenshot({ path: join(outputDir, `topic-back-${label}.png`), fullPage: false })
 
     await page.goForward()

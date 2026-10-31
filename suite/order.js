@@ -3,6 +3,7 @@ export const ORDER = [
   'floor-stats',
   'hot-floor-badge',
   'resume-reading',
+  'reading-center',
   'read-mark',
   'topic-marks',
   'home-return',

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { outputDirectory, readBuildProfile, applyPluginBuildProfile } from './build-profile.mjs'
 import { SUITE_VERSION } from '../suite/version.js'
+import { composeSkinSource } from './build-skin.mjs'
 
 const root = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(root, '..')
@@ -24,8 +25,12 @@ export function stripHeader(source) {
   return { header: match[0], body: source.slice(match[0].length) }
 }
 
+export function readPluginSource(id) {
+  return id === 'skin' ? composeSkinSource({ root: repoRoot }) : readFileSync(join(repoRoot, 'plugins', `${id}.user.js`), 'utf8')
+}
+
 export function readPluginBody(id, profile) {
-  const raw = readFileSync(join(repoRoot, 'plugins', `${id}.user.js`), 'utf8')
+  const raw = readPluginSource(id)
   if (raw.charCodeAt(0) === 0xfeff) throw new Error(`${id}：源码带 UTF-8 BOM，不能安全拼接进套件产物`)
   if (/\r/.test(raw)) throw new Error(`${id}：源码含 CRLF 行尾，请统一保存为 LF 后再打包`)
   const { body } = stripHeader(raw)
@@ -33,7 +38,7 @@ export function readPluginBody(id, profile) {
 }
 
 export function readPluginMeta(id) {
-  const raw = readFileSync(join(repoRoot, 'plugins', `${id}.user.js`), 'utf8')
+  const raw = readPluginSource(id)
   const headerVersion = raw.match(/@version\s+([\d.]+)/)?.[1] || null
   const headerName = raw.match(/@name\s+(.+)/)?.[1]?.trim() || id
   const manifestVersion = raw.match(/\bversion:\s*'([\d][\w.\-+]*)'/)?.[1] || null

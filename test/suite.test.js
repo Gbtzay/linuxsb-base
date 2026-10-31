@@ -3,6 +3,8 @@ import { afterEach, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
+import { readPluginSource } from '../scripts/build-common.mjs'
+import { syncSkinSource } from '../scripts/build-skin.mjs'
 
 const suiteCode = readFileSync(new URL('../dist-dev/linuxsb-suite.user.js', import.meta.url), 'utf8')
 const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
@@ -190,8 +192,9 @@ test('称号行情、UR 规划和积分-称号工作台只进入 Oxygen', () => 
   const planner = readFileSync(new URL('../plugins/title-forge-planner.user.js', import.meta.url), 'utf8')
   const workbench = readFileSync(new URL('../plugins/points-title-workbench.user.js', import.meta.url), 'utf8')
   const quotes = readFileSync(new URL('../plugins/title-quotes.user.js', import.meta.url), 'utf8')
-  assert.match(planner, /@version\s+0\.1\.0/)
-  assert.match(planner, /version:\s*'0\.1\.0'/)
+  const plannerVersion = planner.match(/@version\s+([\d.]+)/)?.[1]
+  assert.ok(plannerVersion, 'planner declares a userscript version')
+  assert.equal(planner.match(/version:\s*'([\d.]+)'/)?.[1], plannerVersion)
   assert.match(planner, /'title-quotes':\s*'\^1\.0\.19'/)
   assert.doesNotMatch(planner, /api\.ui\.tab\(/)
   assert.match(workbench, /id:\s*'points-title-workbench'/)
@@ -270,9 +273,9 @@ test('AI 工作台登记在 AI 副驾之后且不进入 LTS', () => {
 })
 
 test('动作代理版本与基座及工作台版本对齐', () => {
-  assert.match(readFileSync(new URL('../src/core/core-version.js', import.meta.url), 'utf8'), /VERSION = '2\.4\.1'/)
-  assert.match(readFileSync(new URL('../package.json', import.meta.url), 'utf8'), /"version": "2\.4\.1"/)
-  assert.match(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'), /"version": "2\.4\.1"/)
+  assert.match(readFileSync(new URL('../src/core/core-version.js', import.meta.url), 'utf8'), /VERSION = '2\.4\.2'/)
+  assert.match(readFileSync(new URL('../package.json', import.meta.url), 'utf8'), /"version": "2\.4\.2"/)
+  assert.match(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'), /"version": "2\.4\.2"/)
   assert.match(readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8'), /@version\s+1\.4\.0/)
   assert.match(readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8'), /version:\s*'1\.4\.0'/)
   assert.match(readFileSync(new URL('../plugins/ai-summary.user.js', import.meta.url), 'utf8'), /base:\s*'\^0\.1\.53'/)
@@ -304,8 +307,9 @@ test('跨主题研究只进 Oxygen：候选界面与引用适配存在，LTS 不
 })
 
 test('产物新鲜度：每个插件正文都来自当前源码', () => {
+  syncSkinSource({ check: true })
   for (const id of MEMBERS) {
-    const source = readFileSync(new URL(`../plugins/${id}.user.js`, import.meta.url), 'utf8')
+    const source = readPluginSource(id)
     const header = source.match(/^\/\/ ==UserScript==\r?\n[\s\S]*?\/\/ ==\/UserScript==\r?\n*/)
     assert.ok(header, `${id} 源码缺少 userscript 头`)
     const body = applyPluginBuildProfile(id, source.slice(header[0].length), 'dev').trim()
@@ -387,7 +391,7 @@ test('Greasy Fork：正式版对外名称与简介不带 RC，开发版带标记
   assert.match(releaseSuiteCode, /@name\s+LINUX\.SB 氧\s*$/m)
   assert.match(releaseBaseCode, /@name:en\s+LINUX\.SB Hydrogen\s*$/m)
   assert.match(releaseSuiteCode, /@name:en\s+LINUX\.SB Oxygen\s*$/m)
-  assert.match(releaseBaseCode, /@version\s+2\.4\.1/)
+  assert.match(releaseBaseCode, /@version\s+2\.4\.2/)
   assert.equal(releaseSuiteCode.match(/@version\s+([\d.]+)/)?.[1], configuredSuiteVersion)
   assert.match(releaseBaseCode, /@description\s+linux\.sb 脚本基座/)
   assert.match(releaseSuiteCode, /@description\s+linux\.sb 正式功能套件/)

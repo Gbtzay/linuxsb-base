@@ -281,15 +281,44 @@ test('称号行情：分页缺失时不把部分快照标记为完整', async ()
   assert.equal(market.coverage.failedPages, 1)
 })
 
-test('称号行情：按需刷新复用进行中的采集请求', async () => {
-  const html = () => marketPage(card('路人甲', 'N', 10, 'a', 36) + pager(1))
-  const { w, calls } = await boot('https://linux.sb/', {}, html)
-  const first = w.LSB.bus.request('title-quotes:refresh')
-  const second = w.LSB.bus.request('title-quotes:refresh')
-  const [one, two] = await Promise.all([first, second])
+test('称号行情：按需刷新复用进行中的采集请求', { timeout: 10000 }, async (t) => {
+  const html = marketPage(card('路人甲', 'N', 10, 'a', 36) + pager(2))
+  let holdSecondPage = false
+  let enteredSecondPage, releaseSecondPage
+  const secondPageStarted = new Promise((resolve) => { enteredSecondPage = resolve })
+  const secondPageResponse = new Promise((resolve) => { releaseSecondPage = resolve })
+  const { w, calls } = await boot('https://linux.sb/', {}, (href) => {
+    if (holdSecondPage && /[?&]p=2(?:&|$)/.test(href)) {
+      enteredSecondPage()
+      return secondPageResponse
+    }
+    return html
+  })
+  const pending = []
+  t.after(async () => {
+    releaseSecondPage(html)
+    await Promise.allSettled(pending)
+    w.LSB.disable('title-quotes')
+    w.close()
+  })
+  // The election may already have collected a snapshot during boot. Finish
+  // that work before measuring the two explicit refresh callers below.
+  await w.LSB.bus.request('title-quotes:refresh')
+  calls.length = 0
+  holdSecondPage = true
+  pending.push(w.LSB.bus.request('title-quotes:refresh'))
+  await secondPageStarted
+  // Page one is no longer in flight: transport-level GET deduplication cannot
+  // hide a second collection started instead of sharing the active cycle.
+  pending.push(w.LSB.bus.request('title-quotes:refresh'))
+  releaseSecondPage(html)
+  const [one, two] = await Promise.all(pending)
   assert.equal(one.coverage.complete, true)
   assert.equal(two.coverage.complete, true)
+  assert.equal(one.coverage.fetchedPages, 2)
   assert.equal(calls.filter((x) => /\/gacha_market\?p=1/.test(x.href)).length, 1)
+  assert.equal(calls.filter((x) => /\/gacha_market\?p=2/.test(x.href)).length, 1)
+  assert.deepEqual(one, two)
 })
 
 test('称号行情：四锚点；不足 4 个不硬凑；最高最低不进中位', async () => {

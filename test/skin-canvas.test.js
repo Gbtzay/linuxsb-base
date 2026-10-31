@@ -1,7 +1,8 @@
-import test from 'node:test'
+import test, { afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
+import * as compatibilityCanvas from '../src/shell-canvas.js'
 import {
   clampSurfaceRect,
   defaultCanvasState,
@@ -10,7 +11,7 @@ import {
   resolveSurfaceMode,
   siteKeyFromLocation,
   widthClass,
-} from '../src/shell-canvas.js'
+} from '../plugins/skin/canvas-state.js'
 
 const baseCode = readFileSync(new URL('../dist-dev/linuxsb-base.user.js', import.meta.url), 'utf8')
 const skinCode = readFileSync(new URL('../plugins/skin.user.js', import.meta.url), 'utf8')
@@ -22,14 +23,32 @@ const fixtures = {
   settings: readFileSync(new URL('./fixtures/settings.html', import.meta.url), 'utf8'),
 }
 
+const fixtureWindows = new Set()
+afterEach(async () => {
+  const windows = [...fixtureWindows]
+  fixtureWindows.clear()
+  try {
+    for (const w of windows) if (w.document) w.LSB?.disable('skin')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  } finally {
+    for (const w of windows) if (w.document) w.close()
+  }
+})
+
 function makeDom(kind, width = 1200, skinConfig = null, canvasState = null, prepare = null) {
   const path = kind === 'home' ? '/' : kind === 'forum' ? '/forum/1' : kind === 'topic' ? '/topic/1' : kind === 'user' ? '/user/1' : '/settings'
   const dom = new JSDOM(fixtures[kind], { url: `https://linux.sb${path}`, runScripts: 'outside-only' })
   const w = dom.window
+  fixtureWindows.add(w)
   w.unsafeWindow = w
   Object.defineProperty(w, 'innerWidth', { configurable: true, value: width })
   Object.defineProperty(w, 'innerHeight', { configurable: true, value: 800 })
-  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
+  w.requestAnimationFrame = (fn) => w.setTimeout(() => fn(Date.now()), 0)
+  w.cancelAnimationFrame = (id) => w.clearTimeout(id)
+  // JSDOM has no media playback; individual media cases can override these.
+  w.HTMLMediaElement.prototype.load = () => {}
+  w.HTMLMediaElement.prototype.play = () => Promise.resolve()
+  w.HTMLMediaElement.prototype.pause = () => {}
   w.scrollTo = () => {}
   w.localStorage.setItem('lsb_base:skin:__config', JSON.stringify({ uiMode: 'ios27', ...(skinConfig || {}) }))
   if (canvasState) w.localStorage.setItem('lsb_base:skin:canvas-state:v2', JSON.stringify(canvasState))
@@ -40,6 +59,7 @@ function makeDom(kind, width = 1200, skinConfig = null, canvasState = null, prep
 }
 
 test('单画布状态边界、站点隔离和预设默认值', () => {
+  assert.strictEqual(compatibilityCanvas.defaultCanvasState, defaultCanvasState, '旧入口必须转出同一实现')
   assert.equal(widthClass(1100), 'wide')
   assert.equal(widthClass(1099), 'mid')
   assert.equal(widthClass(699), 'narrow')
@@ -57,6 +77,43 @@ test('单画布状态边界、站点隔离和预设默认值', () => {
   assert.equal(resolveSurfaceMode('narrow', 'ai-card'), 'fullscreen')
   assert.equal(resolveSurfaceMode('narrow', 'site-card'), 'fullscreen')
   assert.equal(migrateLegacySkinState({ shell: false }).enabled, false)
+})
+
+test('画布默认值与站点覆盖不会共享可变状态', () => {
+  const state = defaultCanvasState()
+  const override = { appearance: { fontSize: 18 }, surfaceDefaults: { siteCard: { width: 300 } }, layout: { wide: { siteCard: { x: 20 } } } }
+  const beforeState = structuredClone(state)
+  const beforeOverride = structuredClone(override)
+  const merged = mergeCanvasState(state, override)
+  assert.equal(merged.appearance.fontSize, 18)
+  assert.equal(merged.surfaceDefaults.siteCard.width, 300)
+  assert.equal(merged.surfaceDefaults.siteCard.height, 560)
+  merged.layout.wide.siteCard.x = 999
+  merged.surfaceDefaults.siteCard.height = 100
+  assert.deepEqual(state, beforeState)
+  assert.deepEqual(override, beforeOverride)
+  state.global.appearance.fontSize = 30
+  state.global.surfaceDefaults.siteCard.width = 1
+  assert.equal(defaultCanvasState().global.appearance.fontSize, 14)
+  assert.equal(defaultCanvasState().global.surfaceDefaults.siteCard.width, 360)
+})
+
+test('旧配置迁移保留媒体引用与布局快照，不修改输入', () => {
+  const raw = { shell: false, backgroundVideoEnabled: true, backgroundVideoUrl: 'https://example.com/bg.mp4', backgroundVideoLocalKey: 'old-video', backgroundImageLocalKey: 'image', fontLocalKey: 'old-font', layoutMode: 'legacy', baseFontSize: '18' }
+  const media = { videoId: 'new-video', fontKey: 'new-font' }
+  const before = structuredClone(raw)
+  const migrated = migrateLegacySkinState(raw, media)
+  assert.equal(migrated.enabled, false)
+  assert.equal(migrated.global.appearance.background, 'video')
+  assert.equal(migrated.global.appearance.backgroundVideoUrl, raw.backgroundVideoUrl)
+  assert.equal(migrated.global.appearance.backgroundImageLocalKey, 'image')
+  assert.equal(migrated.global.appearance.backgroundVideoLocalKey, 'new-video')
+  assert.equal(migrated.global.appearance.fontLocalKey, 'new-font')
+  assert.equal(migrated.global.appearance.fontSize, 18)
+  assert.equal(migrated.legacyLayoutSnapshot.backgroundVideoLocalKey, 'old-video')
+  assert.equal(migrated.legacyLayoutSnapshot.layoutMode, 'legacy')
+  assert.deepEqual(raw, before)
+  assert.deepEqual(media, { videoId: 'new-video', fontKey: 'new-font' })
 })
 
 test('旧皮肤配置只迁移一次并保留关闭壳选择', async () => {

@@ -9,12 +9,14 @@ import { fileURLToPath } from 'node:url'
 
 import { ORDER, ORDER_RELEASE, SUITE_EXCLUDE } from './suite/order.js'
 import { outputDirectory, readBuildProfile, readPluginBody, readPluginMeta, readSuiteCenter, SUITE_VERSION } from './scripts/build-common.mjs'
+import { syncSkinSource } from './scripts/build-skin.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const profile = readBuildProfile()
 const distDir = outputDirectory(profile)
 const isDev = profile === 'dev'
 const members = isDev ? ORDER : ORDER_RELEASE
+if (members.includes('skin')) syncSkinSource()
 
 const pluginFiles = readdirSync(join(__dirname, 'plugins'))
   .filter((f) => f.endsWith('.user.js'))

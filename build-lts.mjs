@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ORDER, ORDER_LTS } from './suite/order.js'
 import { readBuildProfile, readPluginBody, stripHeader, SUITE_VERSION } from './scripts/build-common.mjs'
+import { syncSkinSource } from './scripts/build-skin.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const profile = readBuildProfile()
@@ -30,6 +31,7 @@ if (!existsSync(suitePath)) throw new Error('缺少 dist/linuxsb-suite.user.js�
 const base = readFileSync(basePath, 'utf8')
 const baseParts = stripHeader(base)
 const version = SUITE_VERSION
+if (ORDER_LTS.includes('skin')) syncSkinSource()
 const mods = ORDER_LTS.map((id) => readPluginBody(id, profile))
 const suiteCenter = readFileSync(join(__dirname, 'suite', 'suite-center.js'), 'utf8').replace(
   '__SUITE_MEMBERS__',

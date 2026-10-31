@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
-import { AI_MODULES, ORDER, ORDER_RELEASE } from '../suite/order.js'
+import { AI_MODULES, ORDER_RELEASE } from '../suite/order.js'
 import { JSDOM } from 'jsdom'
 
 const publicBasePath = new URL('../dist/linuxsb-base.user.js', import.meta.url)
@@ -53,8 +53,8 @@ test('public distributions exclude AI APIs, plugins, and skin entry points', asy
   await waitForPlugins(w)
 
   const pluginIds = w.LSB.info().plugins.map((plugin) => plugin.id)
-  assert.equal(ORDER_RELEASE.length, 20, 'public Oxygen should contain 20 non-AI modules')
-  assert.equal(ORDER.length, 25, 'the full developer Oxygen should contain 25 modules')
+  assert.deepEqual(Array.from(pluginIds).filter((id) => !['suite', 'build-profile-probe'].includes(id)).sort(),
+    [...ORDER_RELEASE].sort(), 'public Oxygen should register exactly its declared non-AI members')
   for (const id of ORDER_RELEASE) assert.ok(pluginIds.includes(id), `public Oxygen should register ${id}`)
   for (const id of AI_MODULES) {
     assert.equal(pluginIds.includes(id), false, `public Oxygen must not register ${id}`)

@@ -1,5 +1,5 @@
 /** 界面精修：分项开关产出对应 CSS / 状态类；氢壳叠层；配置变更即时生效；themes 共存检测 */
-import { test } from 'node:test'
+import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { JSDOM } from 'jsdom'
@@ -10,13 +10,29 @@ const topicHtml = readFileSync(new URL('./fixtures/topic1.html', import.meta.url
 const homeHtml = readFileSync(new URL('./fixtures/home.html', import.meta.url), 'utf8')
 const userHtml = readFileSync(new URL('./fixtures/user1.html', import.meta.url), 'utf8')
 const cloudflareChallengeHtml = readFileSync(new URL('./fixtures/cloudflare-challenge.html', import.meta.url), 'utf8')
+const fixtureWindows = new Set()
+
+afterEach(async () => {
+  // Keep old fixtures' polling/observers out of later navigation assertions.
+  const windows = [...fixtureWindows]
+  fixtureWindows.clear()
+  for (const w of windows) if (w.document) w.LSB?.disable('skin')
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  for (const w of windows) if (w.document) w.close()
+})
 
 function makeDom(html, url, preload = {}) {
   const dom = new JSDOM(html, { url, runScripts: 'outside-only' })
   const w = dom.window
+  fixtureWindows.add(w)
   w.unsafeWindow = w
-  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
+  w.requestAnimationFrame = (fn) => w.setTimeout(() => fn(Date.now()), 0)
+  w.cancelAnimationFrame = (id) => w.clearTimeout(id)
   w.scrollTo = () => {}
+  // A zero-height jsdom list looks as if it is already at the bottom. Model a
+  // long untouched homepage; infinite-scroll tests explicitly move its edge.
+  const list = w.document.querySelector('.main-panel > ul.post-list:not(.topic-post-list)')
+  if (list) list.getBoundingClientRect = () => ({ top: 0, bottom: 100000 })
   w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
   for (const [k, v] of Object.entries(preload)) w.localStorage.setItem(k, JSON.stringify(v))
   const tick = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -70,6 +86,16 @@ function makeTopicSpaHome(preload = {}) {
   return makeHome(topicSpaPreload(preload))
 }
 
+function makeReadingHome(uiMode, preload = {}) {
+  const result = makeTopicSpaHome(withSkinConfig(preload, { uiMode }))
+  Object.defineProperty(result.w, 'innerWidth', { configurable: true, value: 1440 })
+  return result
+}
+
+function testReadingModes(title, run) {
+  for (const mode of ['legacy', 'ios27']) test(`${mode} 阅读路由：${title}`, () => run(mode))
+}
+
 function makeTopicSpaSite(preload = {}) {
   return makeDom(topicHtml, 'https://linux.sb/topic/1', topicSpaPreload(preload))
 }
@@ -95,6 +121,53 @@ function makeLegacyHome(preload = {}) {
 function makeLegacyUser(preload = {}) {
   return makeLegacyDom(userHtml, 'https://linux.sb/user/1', preload)
 }
+
+for (const mode of ['legacy', 'ios27']) {
+  test(`${mode} 资料所有权：停用归还实际卡片，不误认同类节点`, async (t) => {
+    const { w, tick } = makeReadingHome(mode)
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(30); w.close() })
+    const card = w.document.querySelector('.sidebar-card.user-card')
+    const parent = card.parentNode
+    await loadBase(w, PLUG('skin.user.js'))
+    const decoy = w.document.createElement('div')
+    decoy.className = mode === 'legacy' ? 'lsb-shell-user-card' : 'lsb-canvas-self-user-card'
+    w.document.body.prepend(decoy)
+    w.LSB.disable('skin')
+    await tick(30)
+    assert.equal(card.parentNode, parent)
+    assert.equal(card.isConnected, true)
+    assert.equal(decoy.parentNode, w.document.body)
+  })
+
+  test(`${mode} 资料所有权：用户 ID 前缀相同不能作为本人接管`, async (t) => {
+    const { w, tick } = makeReadingHome(mode)
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(30); w.close() })
+    const card = w.document.querySelector('.sidebar-card.user-card')
+    const link = card.querySelector('a.user-name')
+    link.setAttribute('href', link.getAttribute('href') + '0')
+    await loadBase(w, PLUG('skin.user.js'))
+    const host = w.document.querySelector(mode === 'legacy' ? '#lsb-shell [data-lsb-shell-me]' : '[data-canvas-profile-host]')
+    assert.equal(host?.contains(card), false)
+  })
+}
+
+test('ios27 资料所有权：停用还原个人卡 ID 和通知属性', async (t) => {
+  const { w, tick } = makeReadingHome('ios27')
+  t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(30); w.close() })
+  const card = w.document.querySelector('.sidebar-card.user-card')
+  card.id = 'native-user-card'
+  const bell = [...card.querySelectorAll('a')].find((a) => a.getAttribute('href')?.includes('tab=notifications'))
+  assert.ok(bell)
+  bell.setAttribute('title', '原通知')
+  bell.setAttribute('aria-label', '原标签')
+  await loadBase(w, PLUG('skin.user.js'))
+  w.LSB.disable('skin')
+  await tick(30)
+  assert.equal(card.id, 'native-user-card')
+  assert.equal(bell.getAttribute('title'), '原通知')
+  assert.equal(bell.getAttribute('aria-label'), '原标签')
+  assert.equal(bell.hasAttribute('data-canvas-profile-bell'), false)
+})
 
 function makeMeilisearchTopForm(w) {
   const form = w.document.createElement('form')
@@ -503,63 +576,6 @@ test('氢壳：帖子里的原生收藏按钮不能被藏掉', async () => {
   assert.ok(fav.querySelector('.meta-icon'), '收藏星星还在')
 })
 
-test.skip('窗口化氢壳只移动正文节点，不复制节点（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w } = makeSite()
-  const outlet = w.document.querySelector('main.wrap')
-  await loadBase(w, PLUG('skin.user.js'))
-  const content = w.document.querySelector('[data-lsb-shell-window="content"]')
-  assert.ok(content)
-  assert.strictEqual(content.querySelector('main.wrap'), outlet)
-  assert.equal(w.document.querySelectorAll('main.wrap').length, 1)
-  assert.equal(w.document.querySelector('#lsb-shell-rail')?.getAttribute('data-lsb-shell-window'), 'nav')
-  assert.equal(w.document.querySelector('#lsb-shell-aside')?.getAttribute('data-lsb-shell-window'), 'site')
-  const dbg = await w.LSB.bus.request('skin:debug')
-  assert.ok(dbg.shell.windows.some((row) => row.id === 'content'))
-})
-
-test.skip('700–899px 窗口模式可见且原生侧栏保持在壳外（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w } = makeSite()
-  Object.defineProperty(w, 'innerWidth', { configurable: true, value: 880 })
-  await loadBase(w, PLUG('skin.user.js'))
-  assert.ok(w.document.documentElement.classList.contains('lsb-skin-shell-windowed'))
-  assert.match(skinCss(w), /lsb-skin-shell-windowed #lsb-shell\[data-lsb-shell-mode="windowed"\]\{display:block\}/)
-  const native = w.document.querySelector('aside.sidebar')
-  assert.ok(native)
-  assert.equal(native.closest('#lsb-shell'), null)
-  assert.ok(native.classList.contains('lsb-native-sidebar-hidden'))
-})
-
-test.skip('窗口化氢壳不把原生版块侧栏搬进正文窗口（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w } = makeSite()
-  await loadBase(w, PLUG('skin.user.js'))
-  const native = w.document.querySelector('aside.sidebar')
-  const board = native?.querySelector('.forum-enhancements-sidebar-card')
-  const content = w.document.querySelector('[data-lsb-shell-window="content"]')
-  assert.ok(native, '夹具包含原生侧栏')
-  assert.ok(board, '夹具包含原生版块列表')
-  assert.ok(content, '正文窗口存在')
-  assert.equal(content.querySelector('aside.sidebar'), null, '原生侧栏不应成为正文窗口内容')
-  assert.equal(native.closest('#lsb-shell'), null, '原生侧栏应留在氢壳之外')
-  assert.strictEqual(board.parentElement, native, '原生版块卡保持在原生侧栏')
-})
-
-test.skip('窗口化氢壳不把原生左侧导航搬进正文窗口（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w } = makeSite()
-  const outlet = w.document.querySelector('main.wrap')
-  const left = w.document.createElement('div')
-  left.className = 'forum-enhancements-left-fixed performance-render-root'
-  left.innerHTML = '<nav class="forum-enhancements-left-navigation"><a href="/">社区首页</a></nav>'
-  outlet.prepend(left)
-
-  await loadBase(w, PLUG('skin.user.js'))
-
-  const content = w.document.querySelector('[data-lsb-shell-window="content"]')
-  assert.ok(content, '正文窗口存在')
-  assert.equal(content.querySelector('.forum-enhancements-left-fixed'), null, '原生左栏不应成为正文窗口内容')
-  assert.equal(left.closest('#lsb-shell'), null, '原生左栏应留在氢壳之外')
-  assert.ok(left.classList.contains('lsb-native-left-hidden'), '原生左栏应被隐藏')
-})
-
 test('停用皮肤还原正文父节点和原生壳状态', async () => {
   const { w, tick } = makeSite()
   const outlet = w.document.querySelector('main.wrap')
@@ -571,123 +587,13 @@ test('停用皮肤还原正文父节点和原生壳状态', async () => {
   assert.equal(w.document.querySelector('#lsb-shell'), null)
 })
 
-test.skip('窗口拖动和缩放在 pointerup 后更新几何与 z 序（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w, tick } = makeSite()
-  await loadBase(w, PLUG('skin.user.js'))
-  const nav = w.document.querySelector('#lsb-shell-rail')
-  const bar = nav.querySelector('[data-lsb-shell-window-bar]')
-  const drag = nav.querySelector('[data-lsb-shell-window-drag]')
-  const handle = nav.querySelector('[data-lsb-shell-resize-edge="e"]')
-  const leftBefore = parseInt(nav.style.left, 10)
-  const widthBefore = parseInt(nav.style.width, 10)
-  bar.dispatchEvent(pointer(w, 'pointerdown', { x: 100, y: 100 }))
-  w.dispatchEvent(pointer(w, 'pointermove', { x: 136, y: 124 }))
-  w.dispatchEvent(pointer(w, 'pointerup', { x: 136, y: 124 }))
-  await tick(10)
-  assert.notEqual(parseInt(nav.style.left, 10), leftBefore)
-  drag.dispatchEvent(pointer(w, 'pointerdown', { x: 136, y: 124 }))
-  w.dispatchEvent(pointer(w, 'pointermove', { x: 160, y: 124 }))
-  w.dispatchEvent(pointer(w, 'pointerup', { x: 160, y: 124 }))
-  await tick(10)
-  assert.notEqual(parseInt(nav.style.left, 10), leftBefore)
-  handle.dispatchEvent(pointer(w, 'pointerdown', { x: 300, y: 100 }))
-  w.dispatchEvent(pointer(w, 'pointermove', { x: 360, y: 100 }))
-  w.dispatchEvent(pointer(w, 'pointerup', { x: 360, y: 100 }))
-  await tick(10)
-  assert.ok(parseInt(nav.style.width, 10) > widthBefore)
-  const dbg = await w.LSB.bus.request('skin:debug')
-  assert.ok(dbg.shell.windows.find((row) => row.id === 'nav').rect)
-})
-
-test.skip('窗口键盘方向键移动/缩放，Escape 结束指针操作（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w, tick } = makeSite()
-  await loadBase(w, PLUG('skin.user.js'))
-  const nav = w.document.querySelector('#lsb-shell-rail')
-  const leftBefore = parseInt(nav.style.left, 10)
-  const heightBefore = parseInt(nav.style.height, 10)
-  nav.focus()
-  nav.dispatchEvent(keydown(w, 'ArrowRight'))
-  nav.dispatchEvent(keydown(w, 'ArrowDown', { shiftKey: true }))
-  await tick(20)
-  assert.ok(parseInt(nav.style.left, 10) > leftBefore)
-  assert.ok(parseInt(nav.style.height, 10) > heightBefore)
-
-  const drag = nav.querySelector('[data-lsb-shell-window-drag]')
-  drag.dispatchEvent(pointer(w, 'pointerdown', { x: 100, y: 100 }))
-  w.dispatchEvent(pointer(w, 'pointermove', { x: 148, y: 100 }))
-  nav.dispatchEvent(keydown(w, 'Escape'))
-  const afterEscape = parseInt(nav.style.left, 10)
-  w.dispatchEvent(pointer(w, 'pointermove', { x: 300, y: 100 }))
-  await tick(20)
-  assert.equal(parseInt(nav.style.left, 10), afterEscape)
-})
-
-test.skip('窗口布局按站点和宽度保存，重新加载复用已保存几何（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const first = makeSite()
-  await loadBase(first.w, PLUG('skin.user.js'))
-  const nav = first.w.document.querySelector('#lsb-shell-rail')
-  nav.querySelector('[data-lsb-shell-window-drag]').dispatchEvent(pointer(first.w, 'pointerdown', { x: 100, y: 100 }))
-  first.w.dispatchEvent(pointer(first.w, 'pointermove', { x: 172, y: 100 }))
-  first.w.dispatchEvent(pointer(first.w, 'pointerup', { x: 172, y: 100 }))
-  await first.tick(30)
-  const key = 'lsb_base:skin:layout:v1:https%3A%2F%2Flinux.sb:medium'
-  const stored = JSON.parse(first.w.localStorage.getItem(key))
-  assert.ok(stored?.windows?.nav)
-  const second = makeSite({ [key]: stored })
-  await loadBase(second.w, PLUG('skin.user.js'))
-  assert.equal(parseInt(second.w.document.querySelector('#lsb-shell-rail').style.left, 10), stored.windows.nav.x)
-})
-
-test.skip('正文窗口滚动桥转发 window scroll API，停用后恢复原方法（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w, tick } = makeSite()
-  const originalScrollTo = w.scrollTo
-  await loadBase(w, PLUG('skin.user.js'))
-  const body = w.document.querySelector('#lsb-shell-window-content [data-lsb-shell-window-body]')
-  assert.ok(body)
-  body.scrollTop = 88
-  body.dispatchEvent(new w.Event('scroll'))
-  assert.equal(w.scrollY, 88)
-  w.scrollTo(0, 32)
-  assert.equal(body.scrollTop, 32)
-  const dbg = await w.LSB.bus.request('skin:debug')
-  assert.equal(dbg.shell.scrollBridge, true)
-  w.LSB.disable('skin')
-  await tick(20)
-  assert.strictEqual(w.scrollTo, originalScrollTo)
-})
-
-test.skip('窄屏窗口切换器只显示一个活动窗口（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const dom = new JSDOM(topicHtml, { url: 'https://linux.sb/topic/1', runScripts: 'outside-only' })
-  const w = dom.window
-  Object.defineProperty(w, 'innerWidth', { configurable: true, value: 640 })
-  w.unsafeWindow = w
-  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
-  w.scrollTo = () => {}
-  w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
-  await loadBase(w, PLUG('skin.user.js'))
-  const switcher = w.document.querySelector('[data-lsb-shell-window-switcher]')
-  assert.ok(switcher)
-  assert.ok(switcher.querySelectorAll('[role="tab"]').length >= 3)
-  const windows = [...w.document.querySelectorAll('[data-lsb-shell-window]')]
-  assert.equal(windows.filter((el) => el.dataset.lsbShellActive === 'true').length, 1)
-  switcher.querySelector('[data-lsb-shell-window-switch="site"]').click()
-  assert.equal(w.document.querySelector('#lsb-shell-aside')?.dataset.lsbShellActive, 'true')
-  assert.equal(windows.filter((el) => el.dataset.lsbShellActive === 'true').length, 1)
-})
-
-test.skip('固定三栏回退模式不挂窗口化工作区（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w } = makeSite({ 'lsb_base:skin:__config': { layoutMode: 'fixed' } })
-  await loadBase(w, PLUG('skin.user.js'))
-  assert.equal(w.document.querySelector('#lsb-shell')?.getAttribute('data-lsb-shell-mode'), null)
-  assert.equal(w.document.querySelector('#lsb-shell-rail')?.getAttribute('data-lsb-shell-window'), 'nav')
-})
-
-test.skip('M15 skin controller 通过公开 API 关闭工作台并持久化站点 tab（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w } = makeSite()
+test('legacy 验收：M15 skin controller 通过公开 API 关闭工作台并持久化站点 tab', async () => {
+  const { w } = makeLegacySite()
   await loadBase(w, PLUG('skin.user.js'))
   w.LSB.__core.ui.shellAsideSelect('site')
   assert.equal(w.document.querySelector('[data-lsb-shell-aside-tab="site"]')?.getAttribute('aria-selected'), 'true')
 })
+
 
 test('界面精修：紧凑密度挂状态类并输出压缩规则', async () => {
   const { w } = makeSite({ 'lsb_base:skin:__config': { density: '紧凑', measure: true } })
@@ -736,8 +642,10 @@ test('界面精修：关闭项不产生任何规则，变更经配置事件即�
 test('界面精修：检测到 themes 插件时在 debug 中如实上报（排版层与其无冲突）', async () => {
   const dom = new JSDOM(topicHtml, { url: 'https://linux.sb/topic/1', runScripts: 'outside-only' })
   const w = dom.window
+  fixtureWindows.add(w)
   w.unsafeWindow = w
-  w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0)
+  w.requestAnimationFrame = (fn) => w.setTimeout(() => fn(Date.now()), 0)
+  w.cancelAnimationFrame = (id) => w.clearTimeout(id)
   w.localStorage.setItem('lsb_base:__core:rate', JSON.stringify(10))
 
   const style = w.document.createElement('style')
@@ -770,59 +678,6 @@ test('界面精修：停用后去掉 html 状态类', async () => {
   )
 })
 
-test.skip('氢壳：首页叠壳、藏顶栏、迁入搜索、版块，无时间轴（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w } = makeHome()
-  await loadBase(w, PLUG('skin.user.js'))
-
-  const root = shell(w)
-  assert.ok(root, '默认挂 #lsb-shell')
-  assert.ok(w.document.documentElement.classList.contains('lsb-skin-shell-on'))
-  assert.ok(w.document.querySelector('body > .top')?.classList.contains('lsb-native-header-hidden'))
-
-  const boards = [...root.querySelectorAll('a[href^="/forum/"]')].map((a) =>
-    (a.querySelector('.lsb-shell-link-label')?.textContent || a.textContent).trim(),
-  )
-  assert.ok(boards.includes('错误地方'), '版块从导航快照')
-  assert.ok(boards.includes('技术交流'))
-  assert.ok(root.querySelector('a[href="/"]'), '全部主题回首页')
-
-  const form = root.querySelector('form.search-form, form.lsb-shell-search')
-  assert.ok(form, '搜索表单在壳内')
-  assert.equal(form.getAttribute('action'), '/search')
-  assert.ok(form.querySelector('input[name="q"], input[type="search"]'))
-  assert.equal(w.document.querySelectorAll('form.search-form').length, 1, '搜索是迁入不是克隆')
-
-  const checkin = root.querySelector('#lsb-shell-rail a[href*="daily_checkin"]')
-  assert.equal(checkin, null, '左栏不再挂每日签到，避免和右栏快捷功能重复')
-  assert.equal(root.querySelector('#lsb-shell-timeline'), null, '首页无时间轴')
-
-  const me = root.querySelector('.sidebar-card.user-card, .lsb-shell-me .user-card')
-  assert.ok(me, '登录用户卡迁入左栏，不随右栏一起藏掉')
-  assert.ok(me.querySelector('a.user-name'), '用户卡仍有昵称入口')
-  assert.equal(
-    w.document.querySelectorAll('.sidebar-card.user-card').length,
-    1,
-    '用户卡是迁入不是克隆',
-  )
-
-  const dbg = await w.LSB.bus.request('skin:debug')
-  assert.equal(dbg.shell.mounted, true)
-  assert.ok(dbg.shell.boards >= 6)
-
-  const railCss = skinCss(w).replace(/\s+/g, '')
-  assert.match(
-    railCss,
-    /\.lsb-shell-rail-scroll\{[^}]*overflow:hidden/,
-    '整栏不滚，多出版块只在版块区滚',
-  )
-  assert.doesNotMatch(railCss, /\.lsb-shell-rail-scroll\{[^}]*overflow:auto/)
-  assert.match(
-    railCss,
-    /\[data-lsb-shell-section="boards"\]\{[^}]*overflow:auto/,
-    '版块区可滚，称号行情钉在下面',
-  )
-})
-
 test('skin 登记列表筛选：只在首页/版块可见，停用后注销', async () => {
   const { w } = makeHome()
   await loadBase(w, PLUG('skin.user.js'))
@@ -841,8 +696,8 @@ test('skin 登记列表筛选：只在首页/版块可见，停用后注销', as
   assert.equal(w.LSB.__core.ai.actions({ route: { type: 'home' } }).some((x) => x.id === 'site.filter'), false)
 })
 
-test.skip('氢壳右栏：注册外部视图后显示站点/AI，切换不销毁站点卡片（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w, until } = makeSite()
+test('legacy 验收：氢壳右栏：注册外部视图后显示站点/AI，切换不销毁站点卡片', async () => {
+  const { w, until } = makeLegacySite()
   await loadBase(w, PLUG('skin.user.js'))
   const card = w.document.querySelector('#lsb-shell-aside .sidebar-card')
   assert.ok(card, '夹具应有可迁移的站点卡片')
@@ -873,10 +728,14 @@ test.skip('氢壳右栏：注册外部视图后显示站点/AI，切换不销毁
   w.document.querySelector('[data-lsb-shell-aside-tab="site"]').click()
   assert.equal(w.document.querySelector('[data-lsb-shell-aside-pane="site"]').hidden, false)
   assert.equal(w.document.querySelector('#lsb-shell-aside .sidebar-card'), card)
+  w.LSB.disable('aside-demo')
+  assert.equal(await until(() => !w.document.querySelector('[data-lsb-shell-aside-tab="demo"]')), true)
+  assert.equal(w.document.querySelector('[data-demo]'), null, '停用外部视图后清理内容和 pane')
+  assert.equal(w.document.querySelector('#lsb-shell-aside .sidebar-card'), card)
 })
 
-test.skip('氢壳右栏偏好：AI 标签在路由变化、窄屏回退和完整刷新后恢复（旧三栏契约，已由单画布测试覆盖）', async () => {
-  const { w, until } = makeSite()
+test('legacy 验收：氢壳右栏偏好：AI 标签在路由变化、窄屏回退和完整刷新后恢复', async () => {
+  const { w, until } = makeLegacySite()
   await loadBase(w, PLUG('skin.user.js'))
   assert.equal(w.document.querySelector('[data-lsb-shell-aside-tab="site"]').getAttribute('aria-selected'), 'true')
   Object.defineProperty(w, 'innerWidth', { value: 1200, configurable: true })
@@ -893,10 +752,13 @@ test.skip('氢壳右栏偏好：AI 标签在路由变化、窄屏回退和完整
   Object.defineProperty(w, 'innerWidth', { value: 900, configurable: true })
   w.dispatchEvent(new w.Event('resize'))
   await new Promise((resolve) => setTimeout(resolve, 80))
-  assert.equal(w.document.querySelector('[data-lsb-shell-aside-tab="site"]').getAttribute('aria-selected'), 'true')
+  assert.equal(w.document.querySelector('#lsb-shell'), null, '900px 时恢复原生页面')
+  Object.defineProperty(w, 'innerWidth', { value: 1200, configurable: true })
+  w.dispatchEvent(new w.Event('resize'))
+  assert.equal(await until(() => w.document.querySelector('[data-lsb-shell-aside-tab="ai-workbench"]')?.getAttribute('aria-selected') === 'true'), true, '恢复宽屏后沿用之前的页签')
   assert.equal(w.localStorage.getItem('lsb_base:skin:aside-active'), '"ai-workbench"')
 
-  const restarted = makeSite({ 'lsb_base:skin:aside-active': 'ai-workbench' })
+  const restarted = makeLegacySite({ 'lsb_base:skin:aside-active': 'ai-workbench' })
   await loadBase(restarted.w, PLUG('skin.user.js'))
   Object.defineProperty(restarted.w, 'innerWidth', { value: 1200, configurable: true })
   restarted.w.dispatchEvent(new restarted.w.Event('resize'))
@@ -906,8 +768,8 @@ test.skip('氢壳右栏偏好：AI 标签在路由变化、窄屏回退和完整
   assert.equal(await restarted.until(() => restarted.w.document.querySelector('[data-lsb-shell-aside-tab="ai-workbench"]')?.getAttribute('aria-selected') === 'true'), true)
 })
 
-test.skip('氢壳：个人卡晚于壳出现时仍迁入左栏（LTS document-start 首屏竞态，旧三栏契约）', async () => {
-  const { w, tick, until } = makeHome()
+test('legacy 验收：氢壳：个人卡晚于壳出现时仍迁入左栏', async () => {
+  const { w, tick, until } = makeLegacyHome()
   const native = w.document.querySelector('aside.sidebar .sidebar-card.user-card')
   assert.ok(native, '夹具要有原生个人卡')
   const html = native.outerHTML
@@ -935,8 +797,8 @@ test.skip('氢壳：个人卡晚于壳出现时仍迁入左栏（LTS document-st
   )
 })
 
-test.skip('氢壳：左栏收全部版块，多出来的交流只挤版块区，不挤掉称号行情（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：左栏收全部版块并保留积分-称号工作台入口', async () => {
+  const { w } = makeLegacyHome()
   let more = w.document.querySelector('.forum-more-region')
   if (!more) {
     more = w.document.createElement('div')
@@ -949,7 +811,9 @@ test.skip('氢壳：左栏收全部版块，多出来的交流只挤版块区，
   extra.textContent = '交流'
   more.append(extra)
 
-  await loadBase(w, PLUG('title-quotes.user.js'), PLUG('skin.user.js'))
+  stubHtmlFetch(w, '')
+  await loadBase(w, PLUG('points-ledger.user.js'), PLUG('title-quotes.user.js'),
+    PLUG('title-forge-planner.user.js'), PLUG('points-title-workbench.user.js'), PLUG('skin.user.js'))
   const boards = [...shell(w).querySelectorAll('[data-lsb-shell-section="boards"] a')].map((a) =>
     (a.querySelector('.lsb-shell-link-label')?.textContent || a.textContent).trim(),
   )
@@ -962,59 +826,14 @@ test.skip('氢壳：左栏收全部版块，多出来的交流只挤版块区，
   const tools = [...shell(w).querySelectorAll('[data-lsb-shell-section="tools"] .lsb-shell-link-label')].map(
     (el) => el.textContent,
   )
-  assert.ok(tools.includes('称号行情'), '版块再多，称号行情也要留在工具区')
+  assert.ok(tools.includes('积分-称号'), '版块再多，统一工作台仍留在工具区')
   const css = skinCss(w).replace(/\s+/g, '')
   assert.match(css, /\[data-lsb-shell-section="boards"\]\{[^}]*overflow:auto/)
   assert.match(css, /\[data-lsb-shell-section="tools"\]\{[^}]*flex:0/)
 })
 
-test.skip('氢壳：左栏工具打开 AI 历史 / 签到日历 / 积分趋势 / 称号行情 / 年度报告（旧三栏契约）', async () => {
-  const { w } = makeHome()
-  w.fetch = async (url) => ({
-    status: 200,
-    ok: true,
-    url: String(url),
-    text: async () => '<html><body></body></html>',
-  })
-  await loadBase(
-    w,
-    PLUG('ai-summary.user.js'),
-    PLUG('checkin-calendar.user.js'),
-    PLUG('points-ledger.user.js'),
-    PLUG('title-quotes.user.js'),
-    PLUG('annual-report.user.js'),
-    PLUG('skin.user.js'),
-  )
-  const tools = shell(w).querySelector('[data-lsb-shell-section="tools"]')
-  const labels = [...tools.querySelectorAll('.lsb-shell-link')].map((b) => b.textContent.trim())
-  assert.deepEqual(labels, ['AI 历史', '签到日历', '积分趋势', '称号行情', '年度报告'])
-  assert.equal(shell(w).querySelector('#lsb-shell-rail a[href*="daily_checkin"]'), null, '站点每日签到仍留给右栏快捷功能')
-  assert.equal(tools.querySelector('[data-lsb-panel="title-quotes"]'), null)
-  const quotes = tools.querySelector('[data-lsb-rpc="title-quotes:open"]')
-  assert.ok(quotes)
-  quotes.click()
-  await new Promise((r) => setTimeout(r, 0))
-  assert.ok(w.document.querySelector('.lsb-title-quotes-float'), '左栏应开浮层')
-  assert.equal(w.document.querySelector('.lsb-panel-settings'), null, '不应打开氢设置面板')
-  assert.equal(
-    w.document.querySelector('.lsb-title-quotes-fab'),
-    null,
-    '氢壳开着不要右下行情钮',
-  )
-
-  const cal = tools.querySelector('[data-lsb-panel="checkin-calendar"]')
-  cal.click()
-  const active = [...w.document.querySelectorAll('.lsb-tab')].find((t) => t.classList.contains('is-active'))
-  assert.equal(active?.textContent, '签到日历')
-  assert.ok(w.document.querySelector('.lsb-panel-settings'))
-
-  tools.querySelector('[data-lsb-panel="ai-summary-history"]').click()
-  const hist = [...w.document.querySelectorAll('.lsb-tab')].find((t) => t.classList.contains('is-active'))
-  assert.equal(hist?.textContent, 'AI 历史')
-})
-
-test.skip('氢壳：左栏版块显示原站主题数（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：左栏版块显示原站主题数', async () => {
+  const { w } = makeLegacyHome()
   await loadBase(w, PLUG('skin.user.js'))
   const boards = shell(w).querySelector('[data-lsb-shell-section="boards"]')
   const row = [...boards.querySelectorAll('a[href^="/forum/"]')].find((a) =>
@@ -1026,14 +845,14 @@ test.skip('氢壳：左栏版块显示原站主题数（旧三栏契约）', asy
   const stored = JSON.parse(w.localStorage.getItem('lsb_base:skin:boardCounts') || 'null')
   assert.equal(stored?.[1], 3862)
 
-  const { w: profile } = makeUser({ 'lsb_base:skin:boardCounts': { 1: 3862, 7: 78 } })
+  const { w: profile } = makeLegacyUser({ 'lsb_base:skin:boardCounts': { 1: 3862, 7: 78 } })
   await loadBase(profile, PLUG('skin.user.js'))
   const cached = [...shell(profile).querySelectorAll('[data-lsb-shell-section="boards"] a[href="/forum/1"]')][0]
   assert.equal(cached?.querySelector('.lsb-shell-count')?.textContent, '3862', '用户页没有侧栏版块卡，沿用首页记住的主题数')
 })
 
-test.skip('氢壳：顶栏站名盖过左栏，并带站点 logo（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：顶栏站名盖过左栏，并带站点 logo', async () => {
+  const { w } = makeLegacyHome()
   await loadBase(w, PLUG('skin.user.js'))
   const brand = shell(w).querySelector('.lsb-shell-brand')
   assert.ok(brand)
@@ -1048,8 +867,8 @@ test.skip('氢壳：顶栏站名盖过左栏，并带站点 logo（旧三栏契�
   assert.ok(headerZ > railZ, '顶栏必须叠在左栏上面，否则左上角的 logo 和站名会被左栏挡住')
 })
 
-test.skip('氢壳：站点大图灯箱落在左右栏之间，不藏壳（旧三栏契约）', async () => {
-  const { w } = makeSite()
+test('legacy 验收：氢壳：站点大图灯箱落在左右栏之间，不藏壳', async () => {
+  const { w } = makeLegacySite()
   await loadBase(w, PLUG('skin.user.js'))
   const compact = skinCss(w).replace(/\s+/g, '')
   assert.doesNotMatch(
@@ -1084,46 +903,6 @@ test.skip('氢壳：站点大图灯箱落在左右栏之间，不藏壳（旧三
   )
 })
 
-test.skip('界面精修：默认不启用媒体，保留安全的玻璃降级规则（旧媒体断言，已由 shell-media 覆盖）', async () => {
-  const { w } = makeSite({ 'lsb_base:skin:__config': { wallpaperUrl: 'https://example.com/w.jpg' } })
-  await loadBase(w, PLUG('skin.user.js'))
-  const root = w.document.documentElement
-  assert.ok(!root.classList.contains('lsb-skin-wallpaper-on'))
-  assert.ok(!root.classList.contains('lsb-skin-glass-on'))
-  assert.equal(root.style.getPropertyValue('--lsb-wallpaper'), '')
-  const dbg = await w.LSB.bus.request('skin:debug')
-  assert.equal(dbg.active.wallpaperUrl, undefined)
-  const compact = skinCss(w).replace(/\s+/g, '')
-  assert.doesNotMatch(compact, /lsb-skin-wallpaper-on/)
-  assert.match(compact, /lsb-skin-glass-on/)
-  assert.doesNotMatch(compact, /blur\(22px\)/)
-  assert.doesNotMatch(compact, /--lsb-wallpaper/)
-  assert.match(compact, /#lsb-shell-rail\{[^}]*background:var\(--bg/)
-  shell(w).querySelector('[data-lsb-shell-settings]').click()
-  const view = w.document.querySelector('.lsb-view')
-  assert.equal(view.querySelectorAll('input[type=file]').length, 2, '设置页提供本地视频/字体入口')
-  assert.match(view.textContent, /本地资源与窗口布局/)
-})
-
-test.skip('氢壳外观令牌和窗口检查器按白名单生效（旧三栏检查器契约，已由单画布外观测试覆盖）', async () => {
-  const { w } = makeSite({
-    'lsb_base:skin:__config': {
-      glass: true,
-      baseFontSize: 20,
-      textColor: '#123456',
-      panelColor: 'url(https://bad.example/x)',
-    },
-  })
-  await loadBase(w, PLUG('skin.user.js'))
-  const root = w.document.documentElement
-  assert.ok(root.classList.contains('lsb-skin-glass-on'))
-  assert.equal(root.style.getPropertyValue('--lsb-shell-font-size'), '20px')
-  assert.equal(root.style.getPropertyValue('--lsb-shell-text'), '#123456')
-  assert.equal(root.style.getPropertyValue('--lsb-shell-panel'), '')
-  w.document.querySelector('#lsb-shell-rail [data-lsb-shell-window-inspect]')?.click()
-  assert.ok(w.document.querySelector('[data-lsb-shell-window-inspector]'))
-})
-
 test('氢壳玻璃参数和配置字体实际写入 CSS 变量', async () => {
   const { w } = makeSite({
     'lsb_base:skin:__config': {
@@ -1138,45 +917,6 @@ test('氢壳玻璃参数和配置字体实际写入 CSS 变量', async () => {
   assert.equal(root.style.getPropertyValue('--lsb-shell-glass-opacity'), '0.58')
   assert.equal(root.style.getPropertyValue('--lsb-shell-glass-blur'), '7px')
   assert.equal(root.style.getPropertyValue('--lsb-shell-font-family'), "'Source Han Sans'")
-})
-
-test.skip('窗口检查器可编辑完整的局部字体、字号、颜色和玻璃令牌并立即应用（旧三栏检查器契约，已由单画布外观测试覆盖）', async () => {
-  const { w } = makeSite()
-  await loadBase(w, PLUG('skin.user.js'))
-  const host = w.document.querySelector('#lsb-shell-rail')
-  host.querySelector('[data-lsb-shell-window-inspect]').click()
-  const panel = w.document.querySelector('[data-lsb-shell-window-inspector]')
-  assert.ok(panel)
-  for (const name of ['fontFamily', 'baseFontSize', 'textColor', 'panelColor', 'accentColor', 'glassOpacity', 'glassBlur']) {
-    assert.ok(panel.querySelector(`[data-lsb-shell-inspector-field="${name}"]`), `检查器缺少 ${name}`)
-  }
-  const values = {
-    fontFamily: "'Inspector Sans'",
-    baseFontSize: '19',
-    textColor: '#112233',
-    panelColor: '#223344',
-    accentColor: '#334455',
-    glassOpacity: '0.55',
-    glassBlur: '10',
-  }
-  for (const [name, value] of Object.entries(values)) {
-    const input = panel.querySelector(`[data-lsb-shell-inspector-field="${name}"]`)
-    input.value = value
-    input.dispatchEvent(new w.Event('input', { bubbles: true }))
-  }
-  panel.querySelector('button.lsb-btn.is-primary').click()
-  assert.equal(host.style.getPropertyValue('--lsb-shell-font-family'), "'Inspector Sans'")
-  assert.equal(host.style.getPropertyValue('--lsb-shell-font-size'), '19px')
-  assert.equal(host.style.getPropertyValue('--lsb-shell-text'), '#112233')
-  assert.equal(host.style.getPropertyValue('--lsb-shell-panel'), '#223344')
-  assert.equal(host.style.getPropertyValue('--lsb-shell-accent'), '#334455')
-  assert.equal(host.style.getPropertyValue('--lsb-shell-glass-opacity'), '0.55')
-  assert.equal(host.style.getPropertyValue('--lsb-shell-glass-blur'), '10px')
-  assert.equal(host.dataset.lsbShellGlass, 'true', '局部玻璃令牌应在全局玻璃关闭时仍启用窗口玻璃')
-  const key = 'lsb_base:skin:layout:v1:https%3A%2F%2Flinux.sb:medium'
-  const stored = JSON.parse(w.localStorage.getItem(key))
-  assert.equal(stored.windows.nav.overrides.glassBlur, '10')
-  assert.equal(stored.windows.nav.overrides.fontFamily, "'Inspector Sans'")
 })
 
 test('视频背景只接受 HTTPS，自动播放失败时保持静态背景', async () => {
@@ -1309,9 +1049,124 @@ test('HTTPS 字体加载成功后只覆盖氢壳字体变量', async () => {
   assert.equal(w.document.documentElement.style.getPropertyValue('--lsb-shell-font-family'), 'LSBShellUserFont')
 })
 
-test.skip('设置面板导入本地视频和字体后实际挂载资源（旧设置入口契约，已由 shell-media 覆盖）', async () => {
-  const { w, tick } = makeSite()
+function controlledFonts(w) {
+  const faces = new Set()
+  const pending = []
+  w.document.fonts = { add: (face) => faces.add(face), delete: (face) => faces.delete(face) }
+  w.FontFace = class {
+    constructor(family, source) { this.family = family; this.source = source }
+    load() {
+      return new Promise((resolve, reject) => pending.push({ face: this, resolve: () => resolve(this), reject }))
+    }
+  }
+  return { faces, pending }
+}
+
+for (const mode of ['legacy', 'ios27']) {
+  test(`${mode} 媒体生命周期：停用后晚到字体必须释放`, async (t) => {
+    const { w, tick } = makeReadingHome(mode, { 'lsb_base:skin:__config': { fontUrl: 'https://cdn.example/slow.woff2' } })
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+    const { faces, pending } = controlledFonts(w)
+    await loadBase(w, PLUG('skin.user.js'))
+    assert.ok(pending.length)
+    w.LSB.disable('skin')
+    for (const item of pending) item.resolve()
+    await tick(20)
+    assert.equal(faces.size, 0, '停用后的字体不能留在 document.fonts')
+    assert.equal(w.document.documentElement.style.getPropertyValue('--lsb-shell-font-family'), '')
+  })
+
+  test(`${mode} 媒体生命周期：旧字体晚到不能替换新字体`, async (t) => {
+    const { w, tick } = makeReadingHome(mode, { 'lsb_base:skin:__config': { fontUrl: 'https://cdn.example/old.woff2' } })
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+    const { faces, pending } = controlledFonts(w)
+    await loadBase(w, PLUG('skin.user.js'))
+    const stateKey = 'lsb_base:skin:canvas-state:v2'
+    const state = JSON.parse(w.localStorage.getItem(stateKey))
+    state.global.appearance.fontUrl = 'https://cdn.example/new.woff2'
+    w.localStorage.setItem(stateKey, JSON.stringify(state))
+    await changeSkinConfig(w, {}, 140)
+    const newer = pending.filter((item) => item.face.source.includes('new.woff2'))
+    assert.ok(newer.length)
+    newer.forEach((item) => item.resolve())
+    await tick(10)
+    pending.filter((item) => item.face.source.includes('old.woff2')).forEach((item) => item.resolve())
+    await tick(10)
+    assert.equal(faces.size, 1)
+    assert.match([...faces][0].source, /new\.woff2/)
+  })
+
+  test(`${mode} 媒体生命周期：无关外观更新保持已加载字体`, async (t) => {
+    const { w, tick } = makeReadingHome(mode, { 'lsb_base:skin:__config': { fontUrl: 'https://cdn.example/stable.woff2' } })
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+    const { pending } = controlledFonts(w)
+    await loadBase(w, PLUG('skin.user.js'))
+    pending.forEach((item) => item.resolve())
+    await tick(10)
+    await changeSkinConfig(w, { density: '紧凑' }, 20)
+    assert.equal(w.document.documentElement.style.getPropertyValue('--lsb-shell-font-family'), 'LSBShellUserFont')
+  })
+}
+
+for (const mode of ['legacy', 'ios27']) test(`${mode} 媒体生命周期：相同本地键再次上传替换视频`, async (t) => {
+  const { w, tick } = makeReadingHome(mode)
+  t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+  w.HTMLMediaElement.prototype.load = () => {}
+  w.HTMLMediaElement.prototype.pause = () => {}
   w.HTMLMediaElement.prototype.play = () => Promise.resolve()
+  const revoked = []
+  w.URL.createObjectURL = (file) => `blob:${file.name}`
+  w.URL.revokeObjectURL = (url) => revoked.push(url)
+  await loadBase(w, PLUG('skin.user.js'))
+  if (mode === 'legacy') shell(w).querySelector('[data-lsb-shell-settings]').click()
+  const input = w.document.querySelector(mode === 'legacy' ? '.lsb-view input[accept="video/*"]' : '[data-canvas-media-file="video"]')
+  assert.ok(input)
+  for (const name of ['first.mp4', 'second.mp4']) {
+    Object.defineProperty(input, 'files', { configurable: true, value: [new w.File([name], name, { type: 'video/mp4' })] })
+    input.dispatchEvent(new w.Event('change', { bubbles: true }))
+    await tick(60)
+  }
+  assert.equal(w.document.querySelector('[data-lsb-shell-video]')?.src, 'blob:second.mp4')
+  assert.deepEqual(revoked, ['blob:first.mp4'])
+})
+
+for (const mode of ['legacy', 'ios27']) test(`${mode} 媒体生命周期：停用后上传完成不能修改外观配置`, async (t) => {
+  const { w, tick, until } = makeReadingHome(mode)
+  t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+  let writeRequest
+  let closed = 0
+  const db = {
+    close() { closed++ },
+    transaction() { return { objectStore() { return { put() { writeRequest = {}; return writeRequest } } } } },
+  }
+  w.indexedDB = { open() {
+    const request = { result: db }
+    queueMicrotask(() => request.onsuccess())
+    return request
+  } }
+  await loadBase(w, PLUG('skin.user.js'))
+  if (mode === 'legacy') shell(w).querySelector('[data-lsb-shell-settings]').click()
+  const input = w.document.querySelector(mode === 'legacy' ? '.lsb-view input[accept="video/*"]' : '[data-canvas-media-file="video"]')
+  assert.ok(input)
+  Object.defineProperty(input, 'files', { configurable: true, value: [new w.File(['video'], 'slow.mp4', { type: 'video/mp4' })] })
+  input.dispatchEvent(new w.Event('change', { bubbles: true }))
+  assert.equal(await until(() => writeRequest), true)
+  w.LSB.disable('skin')
+  const configBefore = w.localStorage.getItem('lsb_base:skin:__config')
+  const appearanceBefore = w.localStorage.getItem('lsb_base:skin:canvas-state:v2')
+  writeRequest.onsuccess()
+  await tick(80)
+  assert.equal(w.localStorage.getItem('lsb_base:skin:__config'), configBefore)
+  assert.equal(w.localStorage.getItem('lsb_base:skin:canvas-state:v2'), appearanceBefore)
+  assert.equal(w.document.querySelector('[data-lsb-shell-video]'), null)
+  assert.equal(closed, 1)
+})
+
+test('legacy 验收：设置面板导入本地视频和字体后实际挂载资源', async () => {
+  const { w, tick } = makeLegacySite()
+  w.HTMLMediaElement.prototype.load = () => {}
+  w.HTMLMediaElement.prototype.play = () => Promise.resolve()
+  w.HTMLMediaElement.prototype.pause = () => {}
   w.URL.createObjectURL = () => 'blob:lsb-local-media'
   w.document.fonts = { add() {}, delete() {} }
   w.FontFace = class {
@@ -1321,34 +1176,24 @@ test.skip('设置面板导入本地视频和字体后实际挂载资源（旧设
   await loadBase(w, PLUG('skin.user.js'))
   shell(w).querySelector('[data-lsb-shell-settings]').click()
   const inputs = [...w.document.querySelectorAll('.lsb-view input[type="file"]')]
-  assert.equal(inputs.length, 2)
+  const videoInput = inputs.find((input) => /video/.test(input.accept))
+  const fontInput = inputs.find((input) => /font|woff/.test(input.accept))
+  assert.ok(videoInput && fontInput)
   const video = new w.File(['video'], 'background.mp4', { type: 'video/mp4' })
-  Object.defineProperty(inputs[0], 'files', { configurable: true, value: [video] })
-  inputs[0].dispatchEvent(new w.Event('change', { bubbles: true }))
+  Object.defineProperty(videoInput, 'files', { configurable: true, value: [video] })
+  videoInput.dispatchEvent(new w.Event('change', { bubbles: true }))
   await tick(80)
   assert.ok(w.document.querySelector('[data-lsb-shell-video]'), '本地视频应挂载到工作区')
 
   const font = new w.File(['font'], 'custom.woff2', { type: 'font/woff2' })
-  Object.defineProperty(inputs[1], 'files', { configurable: true, value: [font] })
-  inputs[1].dispatchEvent(new w.Event('change', { bubbles: true }))
+  Object.defineProperty(fontInput, 'files', { configurable: true, value: [font] })
+  fontInput.dispatchEvent(new w.Event('change', { bubbles: true }))
   await tick(80)
   assert.equal(w.document.documentElement.style.getPropertyValue('--lsb-shell-font-family'), 'LSBShellUserFont')
 })
 
-test.skip('窗口拖动的小幅 pointermove 不被网格吸附吞掉（旧三栏契约，已由单画布交互测试覆盖）', async () => {
-  const { w, tick } = makeSite()
-  await loadBase(w, PLUG('skin.user.js'))
-  const nav = w.document.querySelector('#lsb-shell-rail')
-  const drag = nav.querySelector('[data-lsb-shell-window-drag]')
-  drag.dispatchEvent(pointer(w, 'pointerdown', { x: 100, y: 100 }))
-  w.dispatchEvent(pointer(w, 'pointermove', { x: 105, y: 100 }))
-  await tick(10)
-  assert.match(nav.style.transform, /translate3d\(5px,0px,0\)/)
-  w.dispatchEvent(pointer(w, 'pointerup', { x: 105, y: 100 }))
-})
-
-test.skip('氢壳：搜索贴住左栏与主栏交界，不额外缩进（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：搜索贴住左栏与主栏交界，不额外缩进', async () => {
+  const { w } = makeLegacyHome()
   await loadBase(w, PLUG('skin.user.js'))
   const compact = skinCss(w).replace(/\s+/g, '')
   assert.match(
@@ -1382,8 +1227,8 @@ test.skip('氢壳：搜索贴住左栏与主栏交界，不额外缩进（旧三
   )
 })
 
-test.skip('氢壳：帖子页有时间轴并藏右栏（旧三栏契约，时间轴已并入连续画布）', async () => {
-  const { w } = makeSite()
+test('legacy 验收：氢壳：帖子页有时间轴并藏右栏', async () => {
+  const { w } = makeLegacySite()
   await loadBase(w, PLUG('skin.user.js'))
 
   const root = shell(w)
@@ -1401,8 +1246,8 @@ test.skip('氢壳：帖子页有时间轴并藏右栏（旧三栏契约，时间
   assert.ok(root.querySelector('.sidebar-card.user-card'), '帖内也保留个人卡')
 })
 
-test.skip('氢壳：他人主页右栏迁入资料、简介和私信，不当成自己（旧三栏契约）', async () => {
-  const { w } = makeUser()
+test('legacy 验收：氢壳：他人主页右栏迁入资料、简介和私信，不当成自己', async () => {
+  const { w } = makeLegacyUser()
   await loadBase(w, PLUG('skin.user.js'))
 
   const root = shell(w)
@@ -1448,14 +1293,14 @@ test('旧三栏：从他人主页返回首页后个人资料卡留在左栏', as
   assert.equal(w.document.querySelectorAll('.sidebar-card.user-card').length, 1, '只保留一张个人资料卡')
 })
 
-test.skip('氢壳：帖子页右栏仍有快捷功能和统计，不只每日热帖（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：帖子页右栏仍有快捷功能和统计，不只每日热帖', async () => {
+  const { w } = makeLegacyHome()
   await loadBase(w, PLUG('skin.user.js'))
   const keep = JSON.parse(w.localStorage.getItem('lsb_base:skin:asideKeep') || 'null')
   assert.ok(keep?.quick && /快捷功能/.test(keep.quick), '首页要把快捷功能记住')
   assert.ok(keep?.stats && /站点统计/.test(keep.stats), '首页要把站点统计记住')
 
-  const { w: topic } = makeSite({ 'lsb_base:skin:asideKeep': keep })
+  const { w: topic } = makeLegacySite({ 'lsb_base:skin:asideKeep': keep })
   await loadBase(topic, PLUG('skin.user.js'))
   const aside = shell(topic).querySelector('#lsb-shell-aside')
   const text = aside?.textContent || ''
@@ -1469,8 +1314,8 @@ test.skip('氢壳：帖子页右栏仍有快捷功能和统计，不只每日热
   )
 })
 
-test.skip('氢壳：顶栏搜索在站名右侧，用户入口紧跟搜索；进帖子不丢（旧顶栏迁移契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：顶栏搜索在站名右侧，用户入口紧跟搜索；进帖子不丢', async () => {
+  const { w } = makeLegacyHome()
   w.document.querySelector('.forum-nav').insertAdjacentHTML(
     'beforeend',
     '<a class="forum-link forum-enhancements-custom-top-link" href="/leaderboard?type=points">用户榜单</a>' +
@@ -1490,7 +1335,7 @@ test.skip('氢壳：顶栏搜索在站名右侧，用户入口紧跟搜索；进
   const stored = JSON.parse(w.localStorage.getItem('lsb_base:skin:topExtras') || 'null')
   assert.ok(Array.isArray(stored) && stored.some((x) => x.label === '用户榜单'))
 
-  const { w: topic } = makeSite({ 'lsb_base:skin:topExtras': stored })
+  const { w: topic } = makeLegacySite({ 'lsb_base:skin:topExtras': stored })
   await loadBase(topic, PLUG('skin.user.js'))
   const topicHeader = shell(topic).querySelector('#lsb-shell-header')
   const topicKids = [...topicHeader.children]
@@ -1502,8 +1347,8 @@ test.skip('氢壳：顶栏搜索在站名右侧，用户入口紧跟搜索；进
   assert.ok(!topicExtras.some((t) => /我的/.test(t)))
 })
 
-test.skip('氢壳：顶栏不回放「我的1」，也不把通知角标拼进入口（旧顶栏迁移契约）', async () => {
-  const { w } = makeHome({
+test('legacy 验收：氢壳：顶栏不回放「我的1」，也不把通知角标拼进入口', async () => {
+  const { w } = makeLegacyHome({
     'lsb_base:skin:topExtras': [
       { href: '/gacha', label: '称号中心' },
       { href: '/user/5372', label: '我的1' },
@@ -1524,8 +1369,8 @@ test.skip('氢壳：顶栏不回放「我的1」，也不把通知角标拼进�
   )
 })
 
-test.skip('氢壳：顶栏不挂「我的烧饼」，留给右栏快捷功能（旧顶栏迁移契约）', async () => {
-  const { w } = makeHome({
+test('legacy 验收：氢壳：顶栏不挂「我的烧饼」，留给右栏快捷功能', async () => {
+  const { w } = makeLegacyHome({
     'lsb_base:skin:topExtras': [{ href: '/my', label: '我的烧饼' }, { href: '/gacha', label: '称号中心' }],
   })
   w.document.querySelector('.forum-nav').insertAdjacentHTML(
@@ -1545,28 +1390,8 @@ test.skip('氢壳：顶栏不挂「我的烧饼」，留给右栏快捷功能（
   assert.match(aside.textContent, /快捷功能/)
 })
 
-test.skip('氢壳：样式是氢壳自己的，不是逛吧 Discourse 玻璃秀（旧三栏样式契约）', async () => {
-  const { w } = makeSite()
-  await loadBase(w, PLUG('skin.user.js'))
-  const css = skinCss(w)
-  assert.ok(!/discourse/i.test(css), 'CSS 不含 discourse')
-  assert.equal(w.document.querySelector('[id*="discourse"], [class*="discourse"]'), null)
-  assert.ok(!/animation:[^;]*infinite/i.test(css), '无循环动画')
-  assert.ok(css.includes('prefers-reduced-motion'))
-  assert.ok(css.includes('prefers-reduced-transparency'))
-  assert.ok(css.includes('#lsb-shell'))
-  assert.ok(css.includes('lsb-skin-shell-on li.post-item'))
-  assert.ok(css.includes('--lsb-radius:'), '圆角尺度变量')
-  assert.ok(css.includes('html.lsb-skin-shell-on .forum-main'), '主栏圆角')
-  assert.ok(css.includes('html.lsb-skin-shell-on li.post-entry'), '楼层圆角')
-  assert.ok(
-    !/html\.lsb-skin-shell-on li\.post-entry\{[^}]*overflow:hidden/.test(css),
-    '楼层不能 overflow:hidden，否则楼中楼连线和移入的回复栏会被裁掉',
-  )
-})
-
-test.skip('氢壳：站点明暗切换钮迁入顶栏，关壳迁回（旧顶栏迁移契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：氢壳：站点明暗切换钮迁入顶栏，关壳迁回', async () => {
+  const { w, tick } = makeLegacyHome()
   const bar = w.document.querySelector('body > .top .bar')
   const btn = w.document.createElement('button')
   btn.type = 'button'
@@ -1596,8 +1421,8 @@ test.skip('氢壳：站点明暗切换钮迁入顶栏，关壳迁回（旧顶栏
   )
 })
 
-test.skip('氢壳：新顶栏搜索入口迁入，关壳迁回（旧顶栏迁移契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：氢壳：新顶栏搜索入口迁入，关壳迁回', async () => {
+  const { w, tick } = makeLegacyHome()
   w.document.querySelectorAll('form.search-form').forEach((el) => el.remove())
   const bar = w.document.querySelector('body > .top .bar')
   const a = w.document.createElement('a')
@@ -1622,8 +1447,8 @@ test.skip('氢壳：新顶栏搜索入口迁入，关壳迁回（旧顶栏迁移
   )
 })
 
-test.skip('氢壳：新外观菜单迁入顶栏，关壳迁回（旧顶栏迁移契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：氢壳：新外观菜单迁入顶栏，关壳迁回', async () => {
+  const { w, tick } = makeLegacyHome()
   const bar = w.document.querySelector('body > .top .bar')
   const scheme = w.document.createElement('a')
   scheme.className = 'color-scheme-top-link'
@@ -1665,8 +1490,8 @@ test.skip('氢壳：新外观菜单迁入顶栏，关壳迁回（旧顶栏迁移
   )
 })
 
-test.skip('氢壳：切换色系弹层要盖过右栏（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：切换色系弹层要盖过右栏', async () => {
+  const { w } = makeLegacyHome()
   await loadBase(w, PLUG('skin.user.js'))
   const compact = skinCss(w).replace(/\s+/g, '')
   const shellZ = Number(compact.match(/#lsb-shell\{[^}]*z-index:(\d+)/)?.[1] || 0)
@@ -1678,8 +1503,9 @@ test.skip('氢壳：切换色系弹层要盖过右栏（旧三栏契约）', asy
   )
 })
 
-test.skip('氢壳：站点把外观控件补回原顶栏时不再搬走，避免死循环（旧顶栏迁移契约）', async () => {
-  const { w, tick } = makeHome()
+
+test('legacy 验收：氢壳：站点把外观控件补回原顶栏时不再搬走，避免死循环', async () => {
+  const { w, tick } = makeLegacyHome()
   const bar = w.document.querySelector('body > .top .bar')
   const scheme = w.document.createElement('a')
   scheme.className = 'color-scheme-top-link'
@@ -1724,8 +1550,8 @@ test.skip('氢壳：站点把外观控件补回原顶栏时不再搬走，避免
   assert.ok(bar.querySelector('.color-scheme-top-link'))
 })
 
-test.skip('氢壳：开壳时隐藏右下角 H 按钮，关壳后显现（旧顶栏迁移契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：氢壳：开壳时隐藏右下角 H 按钮，关壳后显现', async () => {
+  const { w, tick } = makeLegacyHome()
   await loadBase(w, PLUG('skin.user.js'))
 
   assert.ok(w.document.querySelector('.lsb-launcher'), '基座仍挂启动器节点')
@@ -1747,8 +1573,9 @@ test.skip('氢壳：开壳时隐藏右下角 H 按钮，关壳后显现（旧顶
   assert.ok(w.document.querySelector('.lsb-launcher'), '关壳后 H 按钮节点仍在')
 })
 
-test.skip('氢壳：设置按钮打开氢面板（旧顶栏迁移契约）', async () => {
-  const { w } = makeHome()
+
+test('legacy 验收：氢壳：设置按钮打开氢面板', async () => {
+  const { w } = makeLegacyHome()
   await loadBase(w, PLUG('skin.user.js'))
   const btn = shell(w).querySelector('[data-lsb-shell-settings]')
   assert.ok(btn)
@@ -1756,8 +1583,8 @@ test.skip('氢壳：设置按钮打开氢面板（旧顶栏迁移契约）', asy
   assert.ok(w.document.querySelector('.lsb-panel'), '打开设置面板')
 })
 
-test.skip('氢壳：顶栏迁入用户榜单等入口，右栏迁入快捷功能/热帖/统计（旧三栏契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：氢壳：顶栏迁入用户榜单等入口，右栏迁入快捷功能/热帖/统计', async () => {
+  const { w, tick } = makeLegacyHome()
   const nav = w.document.querySelector('.forum-nav')
   nav.insertAdjacentHTML(
     'beforeend',
@@ -1810,10 +1637,11 @@ test.skip('氢壳：顶栏迁入用户榜单等入口，右栏迁入快捷功能
   await tick(80)
   assert.ok(aside.querySelector('.online-users-card'), '站点后插入的当前在线也迁入')
   assert.equal(w.document.querySelectorAll('.online-users-card').length, 1)
+  assert.equal(online.parentElement, aside.querySelector('[data-lsb-shell-site]'), '晚到卡也应随站点页签隐藏')
 })
 
-test.skip('氢壳：右栏迁入站点广告卡，不跟原生侧栏一起藏掉（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：右栏迁入站点广告卡，不跟原生侧栏一起藏掉', async () => {
+  const { w } = makeLegacyHome()
   const nativeSide = [...w.document.querySelectorAll('aside.sidebar')].find(
     (el) => !el.classList.contains('mobile-menu-drawer'),
   )
@@ -1827,8 +1655,8 @@ test.skip('氢壳：右栏迁入站点广告卡，不跟原生侧栏一起藏掉
   assert.match(aside.textContent, /广告位/)
 })
 
-test.skip('氢壳：右栏迁入站务公告，不跟原生侧栏一起藏掉（旧三栏契约）', async () => {
-  const { w } = makeHome()
+test('legacy 验收：氢壳：右栏迁入站务公告，不跟原生侧栏一起藏掉', async () => {
+  const { w } = makeLegacyHome()
   const nativeSide = [...w.document.querySelectorAll('aside.sidebar')].find(
     (el) => !el.classList.contains('mobile-menu-drawer'),
   )
@@ -1843,8 +1671,8 @@ test.skip('氢壳：右栏迁入站务公告，不跟原生侧栏一起藏掉（
   assert.match(aside.textContent, /站务公告/)
 })
 
-test.skip('氢壳：关壳后右栏卡片与顶栏入口回到原位（旧三栏契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：氢壳：关壳后右栏卡片与顶栏入口回到原位', async () => {
+  const { w, tick } = makeLegacyHome()
   w.document
     .querySelector('.forum-nav')
     .insertAdjacentHTML('beforeend', '<a class="forum-link forum-enhancements-custom-top-link" href="/gacha">称号中心</a>')
@@ -1902,6 +1730,7 @@ test('壳占位：iframe 内不注入基座与单画布占位', async () => {
     url: 'https://linux.sb/',
     runScripts: 'outside-only',
   })
+  fixtureWindows.add(dom.window)
   const fw = dom.window.document.getElementById('f').contentWindow
   assert.notEqual(fw.self, fw.top, '夹具本身就是 iframe')
   fw.unsafeWindow = fw
@@ -2373,9 +2202,9 @@ test('legacy 旧三栏：高延迟帖子软跳期间回首页会恢复无限滚�
   assert.ok(list.querySelector('a[href*="/topic/998876"]'), '下一页旧帖应插入首页列表')
 })
 
-test('首页无限滚动计时器在帖子路由切换窗口内不发起跨路由请求', async () => {
-  const { w, tick } = makeTopicSpaHome({
-    'lsb_base:skin:__config': { uiMode: 'legacy' },
+testReadingModes('首页无限滚动计时器在帖子路由切换窗口内不发起跨路由请求', async (uiMode) => {
+  const { w, tick } = makeReadingHome(uiMode, {
+    'lsb_base:skin:__config': { uiMode },
   })
   Object.defineProperty(w, 'innerWidth', { configurable: true, value: 1200 })
   const calls = stubHtmlFetch(w, topicHtml)
@@ -2399,9 +2228,9 @@ test('首页无限滚动计时器在帖子路由切换窗口内不发起跨路�
     `帖子路由切换后不应沿用首页无限滚动计时器发请求: ${JSON.stringify(calls)}`)
 })
 
-test('首页无限滚动响应晚返回时不污染帖子正文', async () => {
-  const { w, tick, until } = makeTopicSpaHome({
-    'lsb_base:skin:__config': { uiMode: 'legacy' },
+testReadingModes('首页无限滚动响应晚返回时不污染帖子正文', async (uiMode) => {
+  const { w, tick, until } = makeReadingHome(uiMode, {
+    'lsb_base:skin:__config': { uiMode },
   })
   Object.defineProperty(w, 'innerWidth', { configurable: true, value: 1200 })
   const lateHome = homeHtml.replace(
@@ -2419,7 +2248,7 @@ test('首页无限滚动响应晚返回时不污染帖子正文', async () => {
   assert.ok(list, '首页列表应存在')
   assert.ok(pagination, '首页分页条应存在')
   assert.ok(pagination.querySelector('a[href*="p=2"]'), '首页应有第 2 页链接')
-  assert.equal(pagination.getAttribute('data-lsb-shell-inf'), '1',
+  assert.equal(await until(() => pagination.getAttribute('data-lsb-shell-inf') === '1'), true,
     `皮肤应接管首页分页条: ${pagination.outerHTML}`)
   await tick(120)
   list.getBoundingClientRect = () => ({ bottom: 0 })
@@ -2445,8 +2274,8 @@ test('首页无限滚动响应晚返回时不污染帖子正文', async () => {
     '帖子正文楼层数量不能被首页列表项改变')
 })
 
-test('软跳进帖子时实时流首页响应晚返回不写入帖子楼层', async () => {
-  const { w, tick, until } = makeTopicSpaHome({
+testReadingModes('软跳进帖子时实时流首页响应晚返回不写入帖子楼层', async (uiMode) => {
+  const { w, tick, until } = makeReadingHome(uiMode, {
     'lsb_base:__core:urlPoll': 25,
     'lsb_base:live-feed:__config': {
       jitterMs: 0,
@@ -2489,13 +2318,13 @@ test('软跳进帖子时实时流首页响应晚返回不写入帖子楼层', as
     '帖子楼层列表不能出现首页列表项')
 })
 
-test('看过帖子返回缓存首页时，迟到的帖子响应不能污染首页', async () => {
+testReadingModes('看过帖子返回缓存首页时，迟到的帖子响应不能污染首页', async (uiMode) => {
   const lateTopic = topicHtml.replace(
     '</ul>',
     '<li class="post-item post-entry" id="post-999991" data-floor="401">' +
       '<div class="post-content"><p>迟到的帖子评论</p></div></li></ul>',
   )
-  const { w, tick, until } = makeTopicSpaHome({
+  const { w, tick, until } = makeReadingHome(uiMode, {
     'lsb_base:__core:urlPoll': 25,
     'lsb_base:live-feed:__config': {
       jitterMs: 0,
@@ -2593,8 +2422,8 @@ test('看过帖子返回缓存首页时，迟到的帖子响应不能污染首�
   assert.equal(await until(() => flow.calls.some((url) => /[?&]p=2(?:&|$)/.test(url)), 1000), true,
     '返回首页后在真实滚动面板继续下拉应发起下一页请求')
   assert.equal(flow.resolveMatching(/[?&]p=2(?:&|$)/), true)
-  await tick(40)
-  assert.ok(list.querySelector('a[href*="/topic/999992"]'), '返回首页后下一页帖子仍能插入列表')
+  assert.ok(await until(() => list.querySelector('a[href*="/topic/999992"]')),
+    `返回首页后下一页帖子仍能插入列表: ${JSON.stringify(flow.calls)}`)
 })
 
 test('首页原生右栏卡片在帖子软跳往返后仍保留', async () => {
@@ -3442,8 +3271,8 @@ test('软跳事务期间页面级隐藏状态覆盖新挂载的原生顶栏和�
   assert.ok(replacementHeader.classList.contains('lsb-native-header-hidden'), '提交后把新顶栏纳入常规氢壳隐藏状态')
   assert.ok(w.document.querySelector('.topic-post-list'), '远端正文已提交')
 })
-test('停用皮肤会取消挂起软跳并清理页面级隐藏状态', async () => {
-  const { w, tick } = makeTopicSpaHome()
+testReadingModes('停用皮肤会取消挂起软跳并清理页面级隐藏状态', async (uiMode) => {
+  const { w, tick } = makeReadingHome(uiMode)
   const flow = deferredHtmlFetch(w, topicHtml)
   await loadBase(w, PLUG('skin.user.js'))
 
@@ -3824,8 +3653,8 @@ test('帖子软跳拒绝 canonical 与目标不一致的响应', async () => {
   assert.equal(w.document.querySelector('meta[name="description"]').content, oldDescription)
 })
 
-test('快速连续帖子软跳只允许最后一个请求提交', async () => {
-  const { w, tick } = makeTopicSpaHome()
+testReadingModes('快速连续帖子软跳只允许最后一个请求提交', async (uiMode) => {
+  const { w, tick } = makeReadingHome(uiMode)
   const first = topicHtml.replace('LINUX SB上线', '第一主题')
   const second = topicHtml.replaceAll('/topic/1', '/topic/2').replaceAll('LINUX SB上线', '第二主题')
   const flow = deferredHtmlFetch(w, (url) => /\/topic\/1/.test(String(url)) ? first : second)
@@ -3911,6 +3740,42 @@ test('帖子软跳沿用远端在线用户清单并给新头像补绿点', async
     '软跳后异步加入的头像也应自动补绿点')
   await tick(0)
 })
+
+for (const mode of ['legacy', 'ios27']) {
+  test(`${mode} 在线生命周期：请求在途时关闭再开启仍能恢复周期刷新`, async (t) => {
+    const { w, tick, until } = makeReadingHome(mode)
+    const pending = []
+    w.document.body.insertAdjacentHTML('beforeend',
+      '<span hidden data-online-users-ids="4242" data-online-users-label="在线"></span>'
+      + '<a href="/user/4343"><img class="avatar-img" alt="重启在线用户"></a>')
+    w.fetch = async (url, init = {}) => {
+      const response = (ids) => ({ status: 200, ok: true, url: String(url), text: async () =>
+        `${homeHtml}<span hidden data-online-users-ids="${ids}" data-online-users-label="在线"></span>` })
+      if (!isOnlineUserRequest(url, init)) return response('4242')
+      return new Promise((resolve) => pending.push((ids) => resolve(response(ids))))
+    }
+    const held = holdLongTimers(w)
+    t.after(async () => {
+      if (w.document) w.LSB?.disable('skin')
+      pending.forEach((resolve) => resolve('4242'))
+      await tick(80)
+      w.close()
+    })
+    await loadBase(w, PLUG('skin.user.js'))
+    await held.flush()
+    assert.equal(await until(() => pending.length === 1), true)
+    await changeSkinConfig(w, { shell: false })
+    await changeSkinConfig(w, { shell: true })
+    pending[0]('4343')
+    await tick(80)
+    assert.equal(w.document.querySelector('[data-online-users-ids]').dataset.onlineUsersIds, '4242',
+      '关闭前请求的结果不能应用到重启的氢壳')
+    await held.flush()
+    assert.equal(await until(() => pending.length === 2), true, '重新开启后应继续请求在线清单')
+    pending[1]('4343')
+    assert.equal(await until(() => !!w.document.querySelector('img[alt="重启在线用户"] + .online-users-dot')), true)
+  })
+}
 
 test('在线状态变化后低频刷新清单并增删头像绿点', async () => {
   const { w, until } = makeHome()
@@ -4022,6 +3887,58 @@ test('站点动态替换顶栏搜索占位链接后仍迁入新版 Meilisearch �
   }
 })
 
+for (const mode of ['legacy', 'ios27']) {
+  test(`${mode} 入口拆分：没有实际功能的活动插件不显示入口`, async (t) => {
+    const { w, tick } = makeReadingHome(mode)
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+    await loadBase(w, PLUG('skin.user.js'))
+    w.LSB.register({ id: 'reading-center', name: '阅读中心', version: '1.0.0' }, () => {})
+    await changeSkinConfig(w, {})
+    if (mode === 'ios27') {
+      w.document.querySelector('[data-canvas-open="tool-sheet"]').click()
+      w.document.querySelector('[data-tool-action="plugin-features-sheet"]').click()
+    }
+    assert.equal(w.document.querySelector('[data-lsb-rpc="reading-center:open"], [data-plugin-feature-action="reading-center"]'), null)
+  })
+
+  test(`${mode} 入口拆分：停用后的旧工具按钮不能打开其它面板`, async (t) => {
+    const { w, tick } = makeReadingHome(mode)
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+    await loadBase(w, PLUG('skin.user.js'))
+    w.LSB.register({ id: 'checkin-calendar', name: '签到', version: '1.0.0' }, (api) => {
+      api.ui.tab({ name: '签到', render: (host) => { host.textContent = '签到功能' } })
+    })
+    await changeSkinConfig(w, {})
+    if (mode === 'ios27') {
+      w.document.querySelector('[data-canvas-open="tool-sheet"]').click()
+      w.document.querySelector('[data-tool-action="plugin-features-sheet"]').click()
+    }
+    const action = w.document.querySelector('[data-lsb-panel="checkin-calendar"], [data-plugin-feature-action="checkin-calendar"]')
+    assert.ok(action)
+    w.LSB.disable('checkin-calendar')
+    action.click()
+    assert.equal(w.document.querySelector('.lsb-panel'), null)
+    assert.match(w.document.querySelector('.lsb-toast')?.textContent || '', /当前不可用/)
+  })
+
+  test(`${mode} 入口拆分：搜索还原只处理自己接管的节点`, async (t) => {
+    const { w, tick } = makeReadingHome(mode)
+    t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(80); w.close() })
+    const form = w.document.querySelector('form.search-form')
+    const home = form.parentNode, next = form.nextSibling
+    await loadBase(w, PLUG('skin.user.js'))
+    const foreign = w.document.createElement('div')
+    foreign.className = 'lsb-shell-search'
+    foreign.textContent = '其它插件内容'
+    w.document.body.prepend(foreign)
+    w.LSB.disable('skin')
+    assert.equal(form.parentNode, home)
+    assert.equal(form.nextSibling, next)
+    assert.equal(foreign.parentNode, w.document.body)
+    assert.equal(foreign.className, 'lsb-shell-search')
+  })
+}
+
 test('新版 data-slot 侧栏不依赖旧 sidebar class', async () => {
   const { w } = makeLegacyHome()
   const sidebar = w.document.querySelector('aside.sidebar')
@@ -4069,7 +3986,7 @@ test('新版 page.before_render slot 可作为主内容出口', async () => {
     'skin 应通过 page.before_render 找到主内容并挂载旧三段式')
 })
 
-test('在线清单刷新会更新站点显示的当前在线人数，但不改写卡片其他内容', async () => {
+test('在线清单刷新保持站点显示的当前在线人数与卡片其他内容', async () => {
   const { w, until } = makeLegacyHome()
   const online = w.document.createElement('div')
   online.className = 'card sidebar-card online-users-card'
@@ -4179,6 +4096,20 @@ test('回到缓存首页后立即重新取在线清单并更新绿点', async ()
     held.flush()
     w.LSB.disable('skin')
   }
+})
+
+test('关闭氢壳和停用插件归还原生history滚动模式', async (t) => {
+  const { w, tick } = makeTopicSpaHome()
+  t.after(async () => { if (w.document) w.LSB?.disable('skin'); await tick(50); w.close() })
+  w.history.scrollRestoration = 'auto'
+  await loadBase(w, PLUG('skin.user.js'))
+  assert.equal(w.history.scrollRestoration, 'manual')
+  await changeSkinConfig(w, { shell: false })
+  assert.equal(w.history.scrollRestoration, 'auto')
+  await changeSkinConfig(w, { shell: true })
+  assert.equal(w.history.scrollRestoration, 'manual')
+  w.LSB.disable('skin')
+  assert.equal(w.history.scrollRestoration, 'auto')
 })
 
 test('历史项保存双轴滚动和地址，并保留既有 state 字段', async () => {
@@ -4480,36 +4411,6 @@ test('帖子 GET 表单带原生标记时仍交给站点处理', async () => {
   assert.equal(calls.some((url) => /\/topic\/1/.test(url)), false, '原生标记表单不应发起壳的 topic GET')
 })
 
-test.skip('氢壳：首页无限滚动追加下一页，不必点分页（旧三栏壳入口契约）', async () => {
-  const { w, tick } = makeHome()
-  const page2 = homeHtml.replace(
-    '<ul class="post-list">',
-    '<ul class="post-list"><li class="post-item"><div class="post-body"><a class="post-title" href="/topic/99002">壳补的第二页帖</a></div></li>',
-  )
-  await loadBase(w, PLUG('skin.user.js'))
-  const pag = w.document.querySelector('.pagination-bar')
-  assert.ok(pag, '首页有分页条')
-  assert.ok(
-    pag.classList.contains('sb-infinite-scroll-pagination-hidden'),
-    '壳要把分页藏掉，改走滚到底加载',
-  )
-  const before = w.document.querySelectorAll('ul.post-list > li.post-item').length
-  const calls = stubHtmlFetch(w, (url) => (/[?&]p=2(?:&|$)/.test(String(url)) ? page2 : homeHtml))
-  w.dispatchEvent(new w.Event('scroll'))
-  await tick(400)
-  assert.ok(
-    calls.some((u) => /[?&]p=2(?:&|$)/.test(u)),
-    '滚到列表底部要去拉 ?p=2，而不是让用户点「下一页」',
-  )
-  assert.ok(
-    [...w.document.querySelectorAll('ul.post-list > li.post-item')].some((li) =>
-      /壳补的第二页帖/.test(li.textContent || ''),
-    ),
-    '下一页帖要追加进当前列表',
-  )
-  assert.ok(w.document.querySelectorAll('ul.post-list > li.post-item').length > before)
-})
-
 test('氢壳：站点自己的无限滚动还在时不重复拉页', async () => {
   const { w, tick } = makeHome()
   w.document.querySelector('.pagination-bar')?.classList.add('sb-infinite-scroll-pagination-hidden')
@@ -4627,6 +4528,9 @@ test('壳内跳转：从版块回首页后无限滚动仍可用', async () => {
   w.document.querySelector('.lsb-shell-brand')?.click()
   await tick(80)
   assert.equal(w.location.pathname, '/')
+  const restoredList = w.document.querySelector('.main-panel > ul.post-list')
+  assert.ok(restoredList, '返回后仍有首页列表')
+  restoredList.getBoundingClientRect = () => ({ bottom: 0 })
   w.dispatchEvent(new w.Event('scroll'))
   await tick(400)
   assert.ok(
@@ -4637,8 +4541,8 @@ test('壳内跳转：从版块回首页后无限滚动仍可用', async () => {
   )
 })
 
-test.skip('壳内跳转：左栏不拆节点，换入的原生侧栏当帧藏住，离开帖子只藏时间轴（旧三栏契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：壳内跳转：左栏不拆节点，换入的原生侧栏当帧藏住，离开帖子只藏时间轴', async () => {
+  const { w, tick } = makeLegacyHome()
   const forumWithAside = homeHtml
     .replace(
       /<main class="wrap">/i,
@@ -4677,8 +4581,8 @@ test.skip('壳内跳转：左栏不拆节点，换入的原生侧栏当帧藏住
   assert.ok(injectedLeft.classList.contains('lsb-native-left-hidden'), '换入当帧就藏原生左栏')
 })
 
-test.skip('壳内跳转：从帖子回首页只藏时间轴，不拆壳（旧三栏契约）', async () => {
-  const { w, tick } = makeSite()
+test('legacy 验收：壳内跳转：从帖子回首页只藏时间轴，不拆壳', async () => {
+  const { w, tick } = makeLegacySite()
   stubHtmlFetch(w, homeHtml)
   await loadBase(w, PLUG('skin.user.js'))
   const rail = w.document.getElementById('lsb-shell-rail')
@@ -4693,8 +4597,8 @@ test.skip('壳内跳转：从帖子回首页只藏时间轴，不拆壳（旧三
   assert.equal(w.document.getElementById('lsb-shell-timeline').hidden, true)
 })
 
-test.skip('氢壳：从帖子回首页，左栏个人卡从回帖改回发帖（旧三栏契约）', async () => {
-  const { w, tick } = makeSite()
+test('legacy 验收：氢壳：从帖子回首页，左栏个人卡从回帖改回发帖', async () => {
+  const { w, tick } = makeLegacySite()
   stubHtmlFetch(w, homeHtml)
   await loadBase(w, PLUG('skin.user.js'))
 
@@ -4717,8 +4621,8 @@ test.skip('氢壳：从帖子回首页，左栏个人卡从回帖改回发帖（
   )
 })
 
-test.skip('壳内跳转：顶栏入口不重复迁入，左栏没有最近浏览（旧顶栏迁移契约）', async () => {
-  const { w, tick } = makeHome()
+test('legacy 验收：壳内跳转：顶栏入口不重复迁入，左栏没有最近浏览', async () => {
+  const { w, tick } = makeLegacyHome()
   const extrasHtml =
     '<a class="forum-link forum-enhancements-custom-top-link" href="/leaderboard?type=points">用户榜单</a>' +
     '<a class="forum-link forum-enhancements-custom-top-link" href="https://lz.sb/">LZ.SB</a>' +
@@ -4757,6 +4661,7 @@ test.skip('壳内跳转：顶栏入口不重复迁入，左栏没有最近浏览
   assert.equal(rail.querySelector('[data-lsb-shell-section="recent"]'), null)
   assert.ok(!rail.textContent.includes('最近浏览'), '进出帖子后左栏仍不出现最近浏览')
 })
+
 
 test('壳内跳转：不存在的 /latest 不进入软跳白名单', async () => {
   const { w, tick } = makeHome()
@@ -4864,8 +4769,8 @@ test('壳内跳转：热议路由走软跳', async () => {
   assert.equal(w.location.pathname, '/hot_discussions')
 })
 
-test.skip('氢壳：帖内时间轴能读 .post-time（v8.7.5 不再写 data-performance-time；旧时间轴契约）', async () => {
-  const { w, tick } = makeSite()
+test('legacy 验收：氢壳：帖内时间轴能读 .post-time', async () => {
+  const { w, tick } = makeLegacySite()
   for (const post of w.document.querySelectorAll('li.post-entry')) {
     post.querySelectorAll('time, [data-performance-time]').forEach((el) => el.remove())
     if (!post.querySelector('.post-time')) {
@@ -4879,6 +4784,7 @@ test.skip('氢壳：帖内时间轴能读 .post-time（v8.7.5 不再写 data-per
   await tick(40)
   assert.equal(w.document.querySelector('[data-timeline-date]')?.textContent, '昨天 21:03')
 })
+
 
 test('壳内跳转：淘帖中心和申精走软跳；淘帖详情和认证中心整页', async () => {
   const { w, tick } = makeHome()
@@ -5340,8 +5246,8 @@ test('壳内跳转：软跳文档被后退到非软跳地址才整页重开', as
   assert.equal(reloads(), 1, '软跳主栏还在、地址已是交易页时必须 reload 才能挂上站点脚本')
 })
 
-test.skip('氢壳：首页地点是新帖子；淘帖 / 申精 / 认证有对应文案（旧顶栏地点契约）', async () => {
-  const home = makeHome()
+test('legacy 验收：氢壳：首页地点是新帖子；淘帖 / 申精 / 认证有对应文案', async () => {
+  const home = makeLegacyHome()
   await loadBase(home.w, PLUG('skin.user.js'))
   const homeDbg = await home.w.LSB.bus.request('skin:debug')
   assert.equal(homeDbg.shell.location, '新帖子')
@@ -5369,8 +5275,8 @@ test.skip('氢壳：首页地点是新帖子；淘帖 / 申精 / 认证有对应
   }
 })
 
-test.skip('氢壳：论坛导航淘帖进顶栏；与淘帖中心同址只留一份（旧顶栏地点契约）', async () => {
-  const onlyPlugin = makeHome()
+test('legacy 验收：氢壳：论坛导航淘帖进顶栏；与淘帖中心同址只留一份', async () => {
+  const onlyPlugin = makeLegacyHome()
   onlyPlugin.w.document.querySelector('.forum-nav').insertAdjacentHTML(
     'beforeend',
     '<a class="forum-link plugin-top-menu-link" href="/topic_collections?tab=everyone">淘帖</a>',
@@ -5385,7 +5291,7 @@ test.skip('氢壳：论坛导航淘帖进顶栏；与淘帖中心同址只留一
     '没有增强菜单时，导航里的淘帖也要进顶栏',
   )
 
-  const both = makeHome()
+  const both = makeLegacyHome()
   both.w.document.querySelector('.forum-nav').insertAdjacentHTML(
     'beforeend',
     '<a class="forum-link plugin-top-menu-link" href="/topic_collections?tab=everyone">淘帖</a>' +
@@ -5401,3 +5307,41 @@ test.skip('氢壳：论坛导航淘帖进顶栏；与淘帖中心同址只留一
   assert.ok(labels.includes('认证中心'))
   assert.ok(!labels.includes('淘帖'))
 })
+
+for (const mode of ['legacy', 'ios27']) {
+  test(mode + ' 导航拆分：版块软跳及后退更新导航和文案，复用已有壳', async (t) => {
+    const { w, until } = makeReadingHome(mode)
+    t.after(() => w.close())
+    stubHtmlFetch(w, homeHtml)
+    await loadBase(w, PLUG('skin.user.js'))
+    const shellNode = shell(w)
+    const title = () => w.document.querySelector(mode === 'legacy' ? '[data-lsb-shell-where]' : '[data-canvas-status-title]')?.textContent
+    assert.equal(await until(() => title() === '新帖子'), true)
+    const link = w.document.createElement('a')
+    link.href = '/forum/4'
+    link.textContent = '技术交流'
+    w.document.querySelector('main.wrap').append(link)
+    link.click()
+    assert.equal(await until(() => w.location.pathname === '/forum/4' && title() === '技术交流'), true)
+    assert.equal(shell(w), shellNode)
+    if (mode === 'legacy') {
+      assert.equal(shellNode.querySelector('[data-lsb-shell-section="boards"] a[href="/forum/4"]').classList.contains('is-active'), true)
+      assert.equal(shellNode.querySelector('[data-lsb-shell-section="home"] a').classList.contains('is-active'), false)
+    } else {
+      const current = w.document.querySelectorAll('[data-canvas-navigation-list] a[href="/forum/4"]')
+      assert.equal(current.length, 1)
+      assert.equal(current[0].textContent, '当前页面')
+      assert.ok(w.document.querySelector('[data-canvas-navigation-list] a[href="/index.php?sort=post"]'))
+    }
+    w.history.back()
+    assert.equal(await until(() => w.location.pathname === '/' && title() === '新帖子'), true)
+    assert.equal(shell(w), shellNode)
+    if (mode === 'legacy') {
+      assert.equal(shellNode.querySelector('[data-lsb-shell-section="home"] a').classList.contains('is-active'), true)
+      assert.equal(shellNode.querySelector('[data-lsb-shell-section="boards"] a[href="/forum/4"]').classList.contains('is-active'), false)
+    } else {
+      assert.equal(w.document.querySelector('[data-canvas-navigation-list] a[href="/forum/4"]').textContent, '技术交流')
+      assert.equal(w.document.querySelectorAll('[data-canvas-navigation-list] a[href="/"]').length, 1)
+    }
+  })
+}

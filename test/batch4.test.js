@@ -198,7 +198,7 @@ test('年度报告：聚合各模块数据渲染 + 导出 Markdown；缺失模�
   assert.match(view, /\+200/, '积分净增计算正确')
   assert.match(view, /4200/)
   assert.match(view, /5 天/, '签到天数统计')
-  assert.match(view, /2 帖/, '阅读足迹计数')
+  assert.match(view, /3 帖/, '两个历史主题和本次打开的主楼均计入阅读足迹')
   assert.match(view, /对应模块未安装或无数据/, '未安装模块降级提示')
 
   const md = await dbg.buildMd()

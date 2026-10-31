@@ -12,6 +12,124 @@ function response(text = '{"ok":1}', status = 200) {
   return { status, ok: status >= 200 && status < 300, url: 'https://linux.sb/current', headers: { 'x-test': 'ok' }, text }
 }
 
+function heldTransport() {
+  const calls = []
+  const transport = (url, options) => new Promise((resolve, reject) => {
+    calls.push({ url, options, resolve, reject })
+  })
+  return { calls, transport }
+}
+
+test('相同 owner 的并发 GET 合并传输，各调用方独立解析且完成后不缓存', async () => {
+  const { calls, transport } = heldTransport()
+  const broker = new RequestBroker({ origin: 'https://linux.sb', transport })
+  const owner = context('reader', ['read'])
+  const first = broker.request({ owner, path: '/topic/1', response: ['json'], headers: { Accept: 'application/json' } })
+  const second = broker.request({ owner, path: 'https://linux.sb/topic/1', response: ['json', 'text'], headers: { accept: 'application/json' } })
+  calls.forEach((call) => call.resolve(response('{"n":1}')))
+  const [a, b] = await Promise.all([first, second])
+  assert.equal(calls.length, 1)
+  assert.deepEqual(a.json, { n: 1 })
+  assert.equal(a.text, undefined)
+  assert.equal(b.text, '{"n":1}')
+  a.json.n = 5
+  assert.equal(b.json.n, 1)
+  const later = broker.request({ owner, path: '/topic/1', response: ['json'] })
+  assert.equal(calls.length, 2)
+  calls[1].resolve(response('{"n":2}'))
+  assert.deepEqual((await later).json, { n: 2 })
+})
+
+test('取消一个共享 GET 不取消另一个消费者', async () => {
+  const { calls, transport } = heldTransport()
+  const broker = new RequestBroker({ origin: 'https://linux.sb', transport })
+  const owner = context('reader', ['read'])
+  const controller = new AbortController()
+  const first = broker.request({ owner, path: '/shared', signal: controller.signal })
+  const second = broker.request({ owner, path: '/shared' })
+  const cancelled = assert.rejects(first, (error) => error.code === 'request.aborted')
+  controller.abort()
+  const transportCancelled = calls[0].options.signal.aborted
+  calls.forEach((call) => call.resolve(response('survivor')))
+  await cancelled
+  assert.equal((await second).text, 'survivor')
+  assert.equal(transportCancelled, false)
+  assert.equal(calls.length, 1)
+})
+
+test('所有消费者取消后立即中止共享 GET，新请求不复用迟到结果', async () => {
+  const { calls, transport } = heldTransport()
+  const broker = new RequestBroker({ origin: 'https://linux.sb', transport })
+  const owner = context('reader', ['read'])
+  const a = new AbortController()
+  const b = new AbortController()
+  const first = broker.request({ owner, path: '/shared', signal: a.signal })
+  const second = broker.request({ owner, path: '/shared', signal: b.signal })
+  const cancellations = [first, second].map((call) => assert.rejects(call, (error) => error.code === 'request.aborted'))
+  a.abort()
+  b.abort()
+  const cancelledCalls = calls.slice()
+  const fresh = broker.request({ owner, path: '/shared' })
+  cancelledCalls.forEach((call) => call.resolve(response('stale')))
+  calls.at(-1).resolve(response('fresh'))
+  await Promise.all(cancellations)
+  assert.equal((await fresh).text, 'fresh')
+  assert.equal(cancelledCalls.length, 1)
+  assert.ok(cancelledCalls.every((call) => call.options.signal.aborted))
+  assert.equal(calls.length, 2)
+})
+
+test('失败的共享 GET 不保留，后续读取可以重新请求', async () => {
+  const { calls, transport } = heldTransport()
+  const broker = new RequestBroker({ origin: 'https://linux.sb', transport })
+  const owner = context('reader', ['read'])
+  const pending = [broker.request({ owner, path: '/retry' }), broker.request({ owner, path: '/retry' })]
+  const failures = pending.map((call) => assert.rejects(call, (error) => error.code === 'request.failed'))
+  calls.forEach((call) => call.reject(new Error('offline')))
+  await Promise.all(failures)
+  assert.equal(calls.length, 1)
+  const fresh = broker.request({ owner, path: '/retry' })
+  calls[1].resolve(response('recovered'))
+  assert.equal((await fresh).text, 'recovered')
+})
+
+test('GET 合并仍逐个检查权限与路由，且不混合 owner、请求头和传输策略', async () => {
+  const { calls, transport } = heldTransport()
+  let route = 'topic:1'
+  const broker = new RequestBroker({ origin: 'https://linux.sb', transport, snapshot: () => ({ routeFingerprint: route }) })
+  const owner = context('reader', ['read', 'net', 'write'])
+  const defaults = { owner, path: '/topic/1' }
+  const intents = [
+    {}, { owner: context('another', ['read']) },
+    { headers: { accept: 'application/json' } },
+    { retry: 0 }, { timeout: 1000 }, { queue: false }, { backoff: { rate: 42 } },
+    { method: 'POST', body: { _csrf: 'test' } }, { method: 'POST', body: { _csrf: 'test' } },
+    { onChunk() {} }, { onChunk() {} },
+    { path: 'https://api.example.test/data', external: true }, { path: 'https://api.example.test/data', external: true },
+  ]
+  const pending = intents.map((intent) => broker.request({ ...defaults, ...intent }))
+  await assert.rejects(broker.request({ ...defaults, owner: context('denied', []) }), (error) => error.code === 'capability.denied')
+  await assert.rejects(broker.request({ ...defaults, routeScope: 'topic:2' }), (error) => error.code === 'route.scope-mismatch')
+  route = 'topic:2'
+  pending.push(broker.request(defaults))
+  calls.forEach((call) => call.resolve(response()))
+  await Promise.all(pending)
+  assert.equal(calls.length, 14)
+})
+
+test('共享 GET 的短超时消费者退出后仍可完成较晚加入的读取', async () => {
+  const { calls, transport } = heldTransport()
+  const broker = new RequestBroker({ origin: 'https://linux.sb', transport })
+  const owner = context('reader', ['read'])
+  const first = broker.request({ owner, path: '/timeout', timeout: 15 })
+  const timedOut = assert.rejects(first, (error) => error.code === 'request.timeout')
+  const second = broker.request({ owner, path: '/timeout', timeout: 200 })
+  await timedOut
+  calls.at(-1).resolve(response('completed'))
+  assert.equal((await second).text, 'completed')
+  assert.equal(calls.length, 2, '不同传输超时策略不合并')
+})
+
 test('runtime 路由上下文辅助函数统一快照读取和指纹回退', () => {
   assert.deepEqual(snapshotValue(() => ({ routeFingerprint: 'home' })), { routeFingerprint: 'home' })
   assert.deepEqual(snapshotValue(null), {})

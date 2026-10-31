@@ -35,13 +35,13 @@ test('all 和 ai 套件按文件名选择', () => {
 
 test('专项套件固定选择实时流和 skin 文件', () => {
   const files = [
-    'skin-canvas.test.js', 'read-mark.test.js', 'core.test.js',
-    'live-feed-v2.test.js', 'live-feed.test.js', 'skin.test.js',
+    'skin-source.test.js', 'skin-styles.test.js', 'skin-media.test.js', 'skin-entry.test.js', 'skin-navigation.test.js', 'skin-lifecycle.test.js', 'skin-sidebar.test.js', 'skin-online.test.js', 'skin-legacy-aside.test.js', 'skin-config.test.js', 'skin-spa.test.js', 'skin-canvas.test.js', 'read-mark.test.js', 'core.test.js',
+    'live-feed-v2.test.js', 'live-feed.test.js', 'skin.test.js', 'reading-acceptance.test.js',
   ]
   assert.deepEqual(selectTestFiles(files, 'live-feed'), [
     'live-feed.test.js', 'live-feed-v2.test.js', 'read-mark.test.js',
   ])
-  assert.deepEqual(selectTestFiles(files, 'skin'), ['skin-canvas.test.js', 'skin.test.js'])
+  assert.deepEqual(selectTestFiles(files, 'skin'), ['skin-source.test.js', 'skin-styles.test.js', 'skin-media.test.js', 'skin-entry.test.js', 'skin-navigation.test.js', 'skin-lifecycle.test.js', 'skin-sidebar.test.js', 'skin-online.test.js', 'skin-legacy-aside.test.js', 'skin-config.test.js', 'skin-spa.test.js', 'skin-canvas.test.js', 'skin.test.js', 'reading-acceptance.test.js'])
 })
 
 test('未知套件直接拒绝，避免静默运行错误范围', () => {

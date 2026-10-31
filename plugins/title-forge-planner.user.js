@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LSB·UR 合成规划
 // @namespace    https://linux.sb/
-// @version      0.1.0
+// @version      0.1.3
 // @description  根据配方、行情、抽取概率、积分和库存规划 UR 合成路径
 // @author       you
 // @match        https://linux.sb/*
@@ -16,7 +16,7 @@
   const manifest = {
     id: 'title-forge-planner',
     name: 'UR 合成规划',
-    version: '0.1.0',
+    version: '0.1.3',
     description: '根据配方、行情、抽取概率、积分和库存规划 UR 合成路径',
     author: 'you',
     requires: { base: '^0.2.2', plugins: { 'title-quotes': '^1.0.19' } },
@@ -738,6 +738,172 @@
     }
   }
 
+  const FORGE_PREFERENCES_KEY = 'forge-preferences'
+  const FORGE_PREFERENCES_VERSION = 1
+
+  function normalizeForgePreferences(raw) {
+    const source = raw && typeof raw === 'object' ? raw : {}
+    const selection = {}
+    if (source.selection && typeof source.selection === 'object') {
+      for (const [key, value] of Object.entries(source.selection)) {
+        if (key && typeof value === 'boolean') selection[key] = value
+      }
+    }
+    const excludedTitles = [...new Set(
+      (Array.isArray(source.excludedTitles) ? source.excludedTitles : [])
+        .map((key) => String(key || '').trim())
+        .filter(Boolean),
+    )]
+    return {
+      version: FORGE_PREFERENCES_VERSION,
+      selection,
+      excludeSsr: source.excludeSsr === true,
+      excludeRogueR: source.excludeRogueR !== false,
+      excludedTitles,
+    }
+  }
+
+  function forgeMaterialHost(input) {
+    return input?.closest?.(
+      '[data-gacha-forge-material], .gacha-forge-select, [data-gacha-forge-item], [data-gacha-forge-title]',
+    ) || input?.closest?.('label') || input?.parentElement || input
+  }
+
+  function firstAttr(elements, names) {
+    for (const el of elements) {
+      for (const name of names) {
+        const value = el?.getAttribute?.(name)
+        if (value != null && String(value).trim()) return String(value).trim()
+      }
+    }
+    return ''
+  }
+
+  function forgeMaterialMeta(input) {
+    const host = forgeMaterialHost(input)
+    const elements = [input, host]
+    const rawText = textOf(host)
+      .replace(/\b(?:UR|SSR|SR|R|N)\b/gi, '')
+      .replace(/\b[\d,]+\s*\/\s*[\d,]+\b/g, '')
+      .replace(/[×x]\s*[\d,]+(?:\.\d+)?/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const name =
+      firstAttr(elements, [
+        'data-gacha-forge-title',
+        'data-title',
+        'data-title-name',
+        'data-name',
+      ]) ||
+      textOf(host?.querySelector?.('[data-gacha-forge-title-name], .gacha-title-name')) ||
+      titleParts(host).name ||
+      rawText
+    const rarity = (
+      firstAttr(elements, [
+        'data-gacha-forge-rarity',
+        'data-rarity',
+        'data-title-rarity',
+      ]) ||
+      textOf(host?.querySelector?.('[data-gacha-forge-title-rarity], .gacha-title-rarity')) ||
+      titleParts(host).rarity ||
+      textOf(host).match(/\b(UR|SSR|SR|R|N)\b/i)?.[1] ||
+      ''
+    ).toUpperCase()
+    const id = firstAttr(elements, [
+      'data-gacha-forge-title-id',
+      'data-title-id',
+      'data-gacha-title-id',
+      'data-id',
+    ])
+    const fallbackName = name || id || input?.value || ''
+    const key = fallbackName ? keyOf(fallbackName, rarity) : ''
+    return { key, name: fallbackName, rarity, id }
+  }
+
+  function isForgeMaterialInput(input) {
+    if (!input || String(input.type || '').toLowerCase() !== 'checkbox') return false
+    if (input.matches?.('[data-gacha-forge-rarity], [data-gacha-forge-material], [data-gacha-forge-title]')) return true
+    return !!input.closest?.('.gacha-forge-select, [data-gacha-forge-item], [data-gacha-forge-material]')
+  }
+
+  function findForgeMaterialInputs(input = document) {
+    const root = toDocument(input)
+    const seen = new Set()
+    const nodes = []
+    const selectors = [
+      'input[type="checkbox"][data-gacha-forge-rarity]',
+      '[data-gacha-forge-material] input[type="checkbox"]',
+      '[data-gacha-forge-title] input[type="checkbox"]',
+      '.gacha-forge-select input[type="checkbox"]',
+      '[data-gacha-forge-item] input[type="checkbox"]',
+    ]
+    for (const selector of selectors) {
+      for (const el of root.querySelectorAll?.(selector) || []) {
+        if (seen.has(el) || !isForgeMaterialInput(el) || el.closest?.('[data-lsb-forge-controls]')) continue
+        seen.add(el)
+        nodes.push(el)
+      }
+    }
+    return nodes
+  }
+
+  function readForgeSelection(inputs = []) {
+    const selection = {}
+    for (const input of inputs || []) {
+      const meta = forgeMaterialMeta(input)
+      if (meta.key) selection[meta.key] = !!input.checked
+    }
+    return selection
+  }
+
+  function isForgeRogueR(meta) {
+    return meta?.rarity === 'R' && String(meta?.name || '').replace(/\s+/g, '') === '反贼'
+  }
+
+  function forgeExcluded(meta, preferences) {
+    const excluded = new Set(preferences?.excludedTitles || [])
+    return (preferences?.excludeSsr && meta.rarity === 'SSR') ||
+      (preferences?.excludeRogueR && isForgeRogueR(meta)) ||
+      excluded.has(meta.key)
+  }
+
+  function applyForgeSelection(inputs = [], preferences = {}, { dispatch = false } = {}) {
+    const normalized = normalizeForgePreferences(preferences)
+    for (const input of inputs || []) {
+      const meta = forgeMaterialMeta(input)
+      if (!meta.key) continue
+      const excluded = forgeExcluded(meta, normalized)
+      const desired = Object.prototype.hasOwnProperty.call(normalized.selection, meta.key)
+        ? normalized.selection[meta.key]
+        : !!input.checked
+      const checked = desired && !excluded
+      input.disabled = excluded
+      if (excluded) input.setAttribute('aria-disabled', 'true')
+      else input.removeAttribute('aria-disabled')
+      if (input.checked === checked) continue
+      input.checked = checked
+      if (dispatch) input.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    return readForgeSelection(inputs)
+  }
+
+  function selectAllForgeMaterials(inputs = [], preferences = {}, { dispatch = false } = {}) {
+    const normalized = normalizeForgePreferences(preferences)
+    for (const input of inputs || []) {
+      const meta = forgeMaterialMeta(input)
+      if (!meta.key) continue
+      const excluded = forgeExcluded(meta, normalized)
+      input.disabled = excluded
+      if (excluded) input.setAttribute('aria-disabled', 'true')
+      else input.removeAttribute('aria-disabled')
+      const checked = !excluded
+      if (input.checked === checked) continue
+      input.checked = checked
+      if (dispatch) input.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    return readForgeSelection(inputs)
+  }
+
   const SOURCE_NAMES = {
     recipes: '合成表',
     gacha: '抽取概率',
@@ -760,6 +926,10 @@
     let refreshPromise = null
     let hasRendered = false
     let calculatedAt = null
+    let forgePreferences = normalizeForgePreferences(api.store.get(FORGE_PREFERENCES_KEY, null))
+    let forgeControls = null
+    let forgeMount = null
+    let forgeSyncTimer = null
 
     function cloneData(value) {
       try {
@@ -948,6 +1118,178 @@
       return { sources, data }
     }
 
+    function forgePageActive() {
+      return api.page?.type === 'gacha_forge'
+    }
+
+    function forgeMountFor(inputs) {
+      const first = inputs[0]
+      return first?.closest?.('form') ||
+        document.querySelector('[data-gacha-forge-page], .gacha-forge-page, .gacha-center-page') ||
+        first?.parentElement ||
+        document.body
+    }
+
+    function forgeSave(inputs) {
+      forgePreferences = normalizeForgePreferences({
+        ...forgePreferences,
+        selection: {
+          ...forgePreferences.selection,
+          ...readForgeSelection(inputs),
+        },
+      })
+      api.store.set(FORGE_PREFERENCES_KEY, forgePreferences)
+      return forgePreferences
+    }
+
+    function forgeSelectionCount(inputs) {
+      return (inputs || []).reduce((count, input) => count + (input.checked ? 1 : 0), 0)
+    }
+
+    function forgeUpdateSummary(inputs) {
+      const summary = forgeControls?.querySelector?.('[data-lsb-forge-selection-count]')
+      if (summary) summary.textContent = `已选 ${forgeSelectionCount(inputs)} 项`
+    }
+
+    function forgeRemoveControls() {
+      forgeControls?.remove?.()
+      forgeControls = null
+      forgeMount = null
+    }
+
+    function forgeCreateControls(mount) {
+      const controls = document.createElement('div')
+      controls.className = 'lsb-title-forge-controls'
+      controls.setAttribute('data-lsb-forge-controls', '')
+      controls.innerHTML =
+        '<button type="button" class="lsb-btn" data-lsb-forge-select-all>全选材料</button>' +
+        '<label class="lsb-title-forge-exclude"><input type="checkbox" data-lsb-forge-exclude-ssr> 排除 SSR</label>' +
+        '<label class="lsb-title-forge-exclude"><input type="checkbox" data-lsb-forge-exclude-rogue-r> 排除 R 级反贼</label>' +
+        '<span class="lsb-title-forge-selection-count" data-lsb-forge-selection-count></span>'
+      mount.insertBefore(controls, mount.firstChild)
+      controls.querySelector('[data-lsb-forge-exclude-ssr]').checked = forgePreferences.excludeSsr
+      controls.querySelector('[data-lsb-forge-exclude-rogue-r]').checked = forgePreferences.excludeRogueR
+      controls.querySelector('[data-lsb-forge-select-all]').addEventListener('click', (event) => {
+        event.preventDefault()
+        const inputs = findForgeMaterialInputs(document)
+        if (!inputs.length) return
+        if (forgePreferences.excludeSsr) {
+          const excluded = new Set(forgePreferences.excludedTitles)
+          for (const input of inputs) {
+            const meta = forgeMaterialMeta(input)
+            if (meta.rarity === 'SSR' && meta.key) excluded.add(meta.key)
+          }
+          forgePreferences.excludedTitles = [...excluded]
+        }
+        if (forgePreferences.excludeRogueR) {
+          const excluded = new Set(forgePreferences.excludedTitles)
+          for (const input of inputs) {
+            const meta = forgeMaterialMeta(input)
+            if (isForgeRogueR(meta) && meta.key) excluded.add(meta.key)
+          }
+          forgePreferences.excludedTitles = [...excluded]
+        }
+        const selection = selectAllForgeMaterials(inputs, forgePreferences, { dispatch: true })
+        forgePreferences = normalizeForgePreferences({
+          ...forgePreferences,
+          selection: { ...forgePreferences.selection, ...selection },
+        })
+        forgeSave(inputs)
+        forgeUpdateSummary(inputs)
+      })
+      controls.querySelector('[data-lsb-forge-exclude-rogue-r]').addEventListener('change', (event) => {
+        const inputs = findForgeMaterialInputs(document)
+        const checked = !!event.currentTarget.checked
+        const excluded = new Set(forgePreferences.excludedTitles)
+        for (const input of inputs) {
+          const meta = forgeMaterialMeta(input)
+          if (!isForgeRogueR(meta) || !meta.key) continue
+          if (checked) excluded.add(meta.key)
+          else excluded.delete(meta.key)
+        }
+        forgePreferences = normalizeForgePreferences({
+          ...forgePreferences,
+          excludeRogueR: checked,
+          excludedTitles: [...excluded],
+        })
+        applyForgeSelection(inputs, forgePreferences, { dispatch: true })
+        forgeSave(inputs)
+        forgeUpdateSummary(inputs)
+      })
+      controls.querySelector('[data-lsb-forge-exclude-ssr]').addEventListener('change', (event) => {
+        const inputs = findForgeMaterialInputs(document)
+        const checked = !!event.currentTarget.checked
+        const excluded = new Set(forgePreferences.excludedTitles)
+        if (!checked) {
+          for (const key of excluded) {
+            if (String(key).endsWith('@SSR')) excluded.delete(key)
+          }
+        }
+        for (const input of inputs) {
+          const meta = forgeMaterialMeta(input)
+          if (!meta.key || meta.rarity !== 'SSR') continue
+          if (checked) excluded.add(meta.key)
+        }
+        forgePreferences = normalizeForgePreferences({
+          ...forgePreferences,
+          excludeSsr: checked,
+          excludedTitles: [...excluded],
+        })
+        applyForgeSelection(inputs, forgePreferences, { dispatch: true })
+        forgeSave(inputs)
+        forgeUpdateSummary(inputs)
+      })
+      return controls
+    }
+
+    function forgeSync() {
+      forgeSyncTimer = null
+      if (!forgePageActive()) {
+        forgeRemoveControls()
+        return
+      }
+      const inputs = findForgeMaterialInputs(document)
+      if (!inputs.length) {
+        forgeRemoveControls()
+        return
+      }
+      const mount = forgeMountFor(inputs)
+      if (!mount) return
+      if (!forgeControls || forgeMount !== mount || !forgeControls.isConnected) {
+        forgeRemoveControls()
+        forgeMount = mount
+        forgeControls = forgeCreateControls(mount)
+      }
+      if (forgePreferences.excludeSsr) {
+        const excluded = new Set(forgePreferences.excludedTitles)
+        for (const input of inputs) {
+          const meta = forgeMaterialMeta(input)
+          if (meta.rarity === 'SSR' && meta.key) excluded.add(meta.key)
+        }
+        forgePreferences = normalizeForgePreferences({ ...forgePreferences, excludedTitles: [...excluded] })
+      }
+      if (forgePreferences.excludeRogueR) {
+        const excluded = new Set(forgePreferences.excludedTitles)
+        for (const input of inputs) {
+          const meta = forgeMaterialMeta(input)
+          if (isForgeRogueR(meta) && meta.key) excluded.add(meta.key)
+        }
+        forgePreferences = normalizeForgePreferences({ ...forgePreferences, excludedTitles: [...excluded] })
+      }
+      applyForgeSelection(inputs, forgePreferences, { dispatch: true })
+      forgeSave(inputs)
+      const exclude = forgeControls.querySelector('[data-lsb-forge-exclude-ssr]')
+      if (exclude) exclude.checked = forgePreferences.excludeSsr
+      const excludeRogue = forgeControls.querySelector('[data-lsb-forge-exclude-rogue-r]')
+      if (excludeRogue) excludeRogue.checked = forgePreferences.excludeRogueR
+      forgeUpdateSummary(inputs)
+    }
+
+    function scheduleForgeSync() {
+      if (forgeSyncTimer != null) return
+      forgeSyncTimer = setTimeout(forgeSync, 0)
+    }
+
     function refresh() {
       if (refreshPromise) return refreshPromise
       for (const key of Object.keys(SOURCE_NAMES)) setSource(key, { status: 'loading', error: null })
@@ -1049,6 +1391,26 @@
 
     restoreCache()
     api.ui.style('.lsb-title-forge-planner{padding:8px 0;color:var(--text,#222)}.lsb-title-forge-planner-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.lsb-title-forge-planner-head strong{font-size:18px}.lsb-title-forge-planner-head span{font-size:12px;color:var(--muted,#777)}.lsb-title-forge-planner-head button{margin-left:auto}.lsb-title-forge-planner-sources{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin:12px 0}.lsb-title-forge-planner-sources>div{display:flex;flex-direction:column;gap:3px;padding:7px 9px;border:1px solid var(--line-soft,#eee);border-radius:7px}.lsb-title-forge-planner-sources span{font-size:12px;color:var(--muted,#777)}.lsb-title-forge-planner-sources small{color:var(--danger,#b44)}.lsb-title-forge-planner-warning{padding:8px;border:1px solid var(--warning,#c90);border-radius:7px;margin:8px 0}.lsb-title-forge-planner-mode{margin:12px 0;padding:10px;border:1px solid var(--line-soft,#eee);border-radius:9px}.lsb-title-forge-planner-mode h3{margin:0 0 6px}.lsb-title-forge-planner-summary{font-weight:600}.lsb-title-forge-planner-mode article{padding:8px 0;border-top:1px solid var(--line-soft,#eee)}.lsb-title-forge-planner-mode h4{margin:0 0 6px}.lsb-title-forge-planner-mode h4 small{font-weight:400;color:var(--muted,#777)}.lsb-title-forge-planner-plan{display:grid;grid-template-columns:150px 1fr;gap:5px;padding:4px 0;font-size:13px}.lsb-title-forge-planner-plan em{grid-column:2;color:var(--brand,#5eaaa0);font-size:12px}.lsb-title-forge-planner-plan details{grid-column:2}.lsb-title-forge-planner-plan ul{margin:4px 0 0;padding-left:18px}.lsb-title-forge-planner-plan span{color:var(--muted,#666)}@media(max-width:620px){.lsb-title-forge-planner-plan{grid-template-columns:1fr}.lsb-title-forge-planner-plan em,.lsb-title-forge-planner-plan details{grid-column:1}.lsb-title-forge-planner-head button{margin-left:0}}')
+    const forgeStyle = document.createElement('style')
+    forgeStyle.id = 'lsb-title-forge-planner-forge-style'
+    forgeStyle.textContent = '.lsb-title-forge-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:8px 10px;border:1px solid var(--line-soft,#eee);border-radius:7px;background:var(--panel,var(--bg,#fafafa));color:var(--text,#222);font-size:13px}.lsb-title-forge-controls button{margin:0}.lsb-title-forge-exclude{display:inline-flex;align-items:center;gap:5px}.lsb-title-forge-selection-count{color:var(--text-muted,var(--muted,#777));font-size:12px}'
+    document.head.appendChild(forgeStyle)
+    api.on('route:changed', scheduleForgeSync)
+    api.on('dom:changed', scheduleForgeSync)
+    const onForgeMaterialChange = (event) => {
+      if (!forgePageActive() || !isForgeMaterialInput(event.target)) return
+      const inputs = findForgeMaterialInputs(document)
+      forgeSave(inputs)
+      forgeUpdateSummary(inputs)
+    }
+    document.addEventListener('change', onForgeMaterialChange)
+    api.onDispose(() => {
+      if (forgeSyncTimer != null) clearTimeout(forgeSyncTimer)
+      document.removeEventListener('change', onForgeMaterialChange)
+      forgeStyle.remove()
+      forgeRemoveControls()
+    })
+    forgeSync()
     api.handle('title-forge-planner:refresh', () => refresh().then(() => publicSnapshot()))
     api.handle('title-forge-planner:calculate', (input = {}) => calculatePlans(input))
     api.handle('title-forge-planner:debug', () => ({
@@ -1065,6 +1427,12 @@
       expectedGachaCost,
       summarizeMode,
       calculatePlans,
+      normalizeForgePreferences,
+      forgeMaterialMeta,
+      findForgeMaterialInputs,
+      readForgeSelection,
+      applyForgeSelection,
+      selectAllForgeMaterials,
       planResult,
       refresh,
       state: () => ({ sourceState: cloneData(sourceState), data: cloneData(data), calculatedAt }),

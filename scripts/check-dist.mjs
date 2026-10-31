@@ -5,7 +5,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AI_MODULES, ORDER, ORDER_LTS, ORDER_RELEASE, SUITE_EXCLUDE } from '../suite/order.js'
 import { SUITE_VERSION } from '../suite/version.js'
-import { applyPluginBuildProfile, stripHeader as stripHeaderCommon } from './build-common.mjs'
+import { applyPluginBuildProfile, readPluginSource, stripHeader as stripHeaderCommon } from './build-common.mjs'
+import { syncSkinSource } from './build-skin.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const read = (file) => readFileSync(join(root, file), 'utf8')
@@ -15,6 +16,7 @@ const fail = []
 const check = (condition, message) => {
   if (!condition) fail.push(message)
 }
+syncSkinSource({ check: true })
 
 const base = read('dist/linuxsb-base.user.js')
 const suite = read('dist/linuxsb-suite.user.js')
@@ -52,7 +54,7 @@ check(
 )
 const documentedModules = readme.match(/正式氧[^\n]*内含\s*(\d+)\s*个(?:非 AI )?模块/)?.[1]
 check(documentedModules === String(ORDER_RELEASE.length), `README.md 正式模块数 ${documentedModules || 'missing'} ≠ ${ORDER_RELEASE.length}`)
-check(readme.includes('25 个模块'), 'README.md 缺少开发版完整模块数')
+check(readme.includes(`${ORDER.length} 个模块`), 'README.md 缺少开发版完整模块数')
 check(pkg.scripts?.['build:dev']?.includes('--profile=dev'), 'package.json 缺少独立 build:dev 配置')
 check(pkg.scripts?.['verify:dev-dist'], 'package.json 缺少开发版产物校验脚本')
 check(!exists('dist-dev/linuxsb-lts.user.js'), 'dist-dev 不得包含开发版 LTS')
@@ -76,7 +78,7 @@ check(!suite.includes("id: 'hover-profile'"), '正式 Oxygen 不应包含已下�
 check(!lts.includes("id: 'hover-profile'"), 'LTS 不应包含已下架的用户画像悬浮卡')
 
 for (const id of ORDER_RELEASE) {
-  const source = read(`plugins/${id}.user.js`)
+  const source = readPluginSource(id)
   check(source.charCodeAt(0) !== 0xfeff, `${id} 源码带 UTF-8 BOM`)
   check(!/\r\n/.test(source), `${id} 源码含 CRLF 行尾`)
   const body = applyPluginBuildProfile(id, stripHeader(source).trim(), 'release')
@@ -84,7 +86,7 @@ for (const id of ORDER_RELEASE) {
   check(suite.includes(`(${id})`), `${id} 缺少正式 Oxygen 模块段落`)
 }
 for (const id of ORDER_LTS) {
-  const source = read(`plugins/${id}.user.js`)
+  const source = readPluginSource(id)
   const body = applyPluginBuildProfile(id, stripHeader(source).trim(), 'release')
   check(lts.includes(body), `${id} 当前正式源码正文未进入 LTS 产物`)
 }

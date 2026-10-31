@@ -14,7 +14,22 @@ function gmAvailable() {
 class Backend {
   constructor() {
     this._mem = new Map()
+    this._gmListeners = new Map()
     this._lsRef = null
+  }
+
+  /** GM 的内存缓存只有在键变更可观察时才安全；同键只登记一次。 */
+  _observeGm(key) {
+    if (this._gmListeners.has(key)) return true
+    if (typeof GM_addValueChangeListener !== 'function') return false
+    try {
+      const id = GM_addValueChangeListener(key, () => this._mem.delete(key))
+      if (!Number.isInteger(id) || id < 0) return false
+      this._gmListeners.set(key, id)
+      return true
+    } catch {
+      return false
+    }
   }
 
   /** 测试里每次换 JSDOM 会换 localStorage 实例，缓存必须跟着丢掉 */
@@ -34,13 +49,14 @@ class Backend {
   get(key, def) {
     this._syncCacheScope()
     if (gmAvailable()) {
-      if (this._mem.has(key)) {
+      const cacheable = this._observeGm(key)
+      if (cacheable && this._mem.has(key)) {
         const hit = this._mem.get(key)
         return hit.value === undefined ? def : hit.value
       }
       const v = GM_getValue(key, undefined)
       if (v === undefined) return def
-      this._mem.set(key, { value: v })
+      if (cacheable) this._mem.set(key, { value: v })
       return v
     }
     try {
@@ -62,8 +78,12 @@ class Backend {
   set(key, value) {
     this._syncCacheScope()
     if (gmAvailable()) {
-      this._mem.set(key, { value })
-      return GM_setValue(key, value)
+      const cacheable = this._observeGm(key)
+      const result = GM_setValue(key, value)
+      // 先持久化：写入失败不能让后续读取误以为已保存。
+      if (cacheable) this._mem.set(key, { value })
+      else this._mem.delete(key)
+      return result
     }
     try {
       const raw = JSON.stringify(value)

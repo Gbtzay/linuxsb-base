@@ -34,5 +34,17 @@ jobs:
       - name: Verify build profiles
         run: npm run verify:profiles
 
+      - name: Verify test skip budget
+        run: npm run verify:test-skips
+
+      - name: Verify committed generated artifacts are fresh
+        run: git diff --exit-code -- plugins/skin.user.js dist
+
       - name: Run complete test suite
         run: npm run test:all
+
+      - name: Install Chromium for browser smoke tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser smoke tests
+        run: npm run smoke:browser

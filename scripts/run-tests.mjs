@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
+import { syncSkinSource } from './build-skin.mjs'
 
 const TEST_DIR = fileURLToPath(new URL('../test/', import.meta.url))
 const AI_FILE = /^ai-.*\.test\.js$/
@@ -30,7 +31,7 @@ const QUICK_FILES = [
 const SCOPED_FILES = {
   quick: QUICK_FILES,
   'live-feed': ['live-feed.test.js', 'live-feed-v2.test.js', 'read-mark.test.js'],
-  skin: ['skin-canvas.test.js', 'skin.test.js'],
+  skin: ['skin-source.test.js', 'skin-styles.test.js', 'skin-media.test.js', 'skin-entry.test.js', 'skin-navigation.test.js', 'skin-lifecycle.test.js', 'skin-sidebar.test.js', 'skin-online.test.js', 'skin-legacy-aside.test.js', 'skin-config.test.js', 'skin-spa.test.js', 'skin-canvas.test.js', 'skin.test.js', 'reading-acceptance.test.js'],
 }
 
 export function selectTestFiles(files, suite = 'quick') {
@@ -55,6 +56,7 @@ async function discoverTestFiles() {
 }
 
 export async function main(argv = []) {
+  syncSkinSource({ check: true })
   const first = argv[0]
   const hasSuite = Boolean(first && !first.startsWith('-'))
   const suite = hasSuite ? first : 'quick'

@@ -115,6 +115,36 @@ async function bootPlanner({
   return { w, tick, calls, dbg, until }
 }
 
+function forgePageHtml() {
+  return `<html><body>
+    <main class="gacha-forge-page" data-gacha-forge-page>
+      <form class="gacha-forge-form" action="/gacha_forge">
+        <div class="gacha-forge-select" data-gacha-forge-title-id="ssr-1" data-name="传说之龙" data-rarity="SSR">
+          <label><input type="checkbox" data-gacha-forge-rarity="SSR" data-gacha-forge-quantity="3" value="ssr-1">传说之龙 SSR</label>
+          <input type="number" data-gacha-forge-material-input data-gacha-forge-material-rarity="SSR" min="1" max="3" value="3">
+        </div>
+        <div class="gacha-forge-select" data-gacha-forge-title-id="sr-1" data-name="万人迷" data-rarity="SR">
+          <label><input type="checkbox" data-gacha-forge-rarity="SR" data-gacha-forge-quantity="2" value="sr-1">万人迷 SR</label>
+          <input type="number" data-gacha-forge-material-input data-gacha-forge-material-rarity="SR" min="1" max="2" value="2">
+        </div>
+        <button type="submit" data-gacha-forge-button="SR">熔炼</button>
+      </form>
+    </main>
+  </body></html>`
+}
+
+async function bootForge({ preload = {}, html = forgePageHtml() } = {}) {
+  const { w, tick } = makeDom(html, 'https://linux.sb/gacha_forge_center', preload)
+  w.fetch = async (url) => {
+    const path = new URL(String(url), 'https://linux.sb/').pathname
+    const body = path === '/gacha_recipes' ? fixture('gacha-recipes.html') : path === '/gacha' ? fixture('gacha.html') : path === '/gacha_profile' ? fixture('gacha-profile.html') : ''
+    return { status: 200, ok: true, url: String(url), text: async () => body }
+  }
+  await loadBase(w, PLUG('title-quotes.user.js'), PLUG('title-forge-planner.user.js'))
+  const dbg = await w.LSB.bus.request('title-forge-planner:debug')
+  return { w, tick, dbg }
+}
+
 test('UR 规划器：保留正式 RPC，不注册独立 UI 页签', async () => {
   const { w, tick } = await bootPlanner()
   w.LSB.open('title-forge-planner')
@@ -482,4 +512,110 @@ test('UR 规划器：来源失败时只标记受影响来源且不产生空成�
   assert.equal(result.sources.gacha.status, 'unavailable')
   assert.equal(result.data.gachaPools.length, 0)
   assert.match(result.sources.gacha.error, /页面格式无法识别|挑战未完成|数据不足/)
+})
+
+test('称号熔炼页：一键全选材料时排除 SSR，并保存选择和排除称号', async () => {
+  const { w, dbg } = await bootForge()
+  const controls = w.document.querySelector('[data-lsb-forge-controls]')
+  assert.ok(controls)
+  const exclude = controls.querySelector('[data-lsb-forge-exclude-ssr]')
+  const selectAll = controls.querySelector('[data-lsb-forge-select-all]')
+  assert.ok(exclude)
+  assert.ok(selectAll)
+  const forgeStyle = w.document.querySelector('#lsb-title-forge-planner-forge-style')
+  assert.ok(forgeStyle)
+  assert.match(forgeStyle.textContent, /background:var\(--panel,var\(--bg,#fafafa\)\)/)
+  assert.doesNotMatch(forgeStyle.textContent, /var\(--card,#fff\)/)
+
+  exclude.click()
+  selectAll.click()
+
+  const boxes = [...w.document.querySelectorAll('[data-gacha-forge-rarity]')]
+  assert.equal(boxes.find((box) => box.dataset.gachaForgeRarity === 'SSR').checked, false)
+  assert.equal(boxes.find((box) => box.dataset.gachaForgeRarity === 'SR').checked, true)
+
+  const saved = JSON.parse(w.localStorage.getItem('lsb_base:title-forge-planner:forge-preferences'))
+  assert.equal(saved.excludeSsr, true)
+  assert.equal(saved.selection['传说之龙@SSR'], false)
+  assert.equal(saved.selection['万人迷@SR'], true)
+  assert.ok(saved.excludedTitles.includes('传说之龙@SSR'))
+  assert.equal(typeof dbg.normalizeForgePreferences, 'function')
+})
+
+test('称号熔炼页：全选默认排除 R 级反贼', async () => {
+  const { w } = await bootForge({
+    html: `<html><body><main class="gacha-forge-page">
+      <form class="gacha-forge-form">
+        <div class="gacha-forge-select" data-gacha-forge-title-id="rogue-r" data-name="反贼" data-rarity="R">
+          <label><input type="checkbox" data-gacha-forge-rarity="R" value="rogue-r">反贼 R</label>
+        </div>
+        <div class="gacha-forge-select" data-gacha-forge-title-id="normal-r" data-name="普通称号" data-rarity="R">
+          <label><input type="checkbox" data-gacha-forge-rarity="R" value="normal-r">普通称号 R</label>
+        </div>
+      </form>
+    </main></body></html>`,
+  })
+  const controls = w.document.querySelector('[data-lsb-forge-controls]')
+  const excludeRogue = controls?.querySelector('[data-lsb-forge-exclude-rogue-r]')
+  assert.ok(excludeRogue)
+  assert.equal(excludeRogue.checked, true)
+
+  controls.querySelector('[data-lsb-forge-select-all]').click()
+
+  const boxes = [...w.document.querySelectorAll('[data-gacha-forge-rarity]')]
+  assert.equal(boxes.find((box) => box.value === 'rogue-r').checked, false)
+  assert.equal(boxes.find((box) => box.value === 'normal-r').checked, true)
+  const saved = JSON.parse(w.localStorage.getItem('lsb_base:title-forge-planner:forge-preferences'))
+  assert.equal(saved.excludeRogueR, true)
+})
+
+test('称号熔炼页：刷新后恢复勾选状态与排除 SSR 状态', async () => {
+  const preferences = {
+    version: 1,
+    selection: { '传说之龙@SSR': true, '万人迷@SR': true },
+    excludeSsr: true,
+    excludedTitles: ['传说之龙@SSR'],
+  }
+  const { w } = await bootForge({
+    preload: { 'lsb_base:title-forge-planner:forge-preferences': preferences },
+  })
+  const boxes = [...w.document.querySelectorAll('[data-gacha-forge-rarity]')]
+  assert.equal(boxes.find((box) => box.dataset.gachaForgeRarity === 'SSR').checked, false)
+  assert.equal(boxes.find((box) => box.dataset.gachaForgeRarity === 'SR').checked, true)
+  assert.equal(w.document.querySelector('[data-lsb-forge-exclude-ssr]').checked, true)
+})
+
+test('称号熔炼页：缺少标题 data 属性时仍按可见文字识别稀有度', async () => {
+  const { w, dbg } = await bootForge({
+    html: `<html><body><main class="gacha-forge-page">
+      <form><div class="gacha-forge-select">
+        <label><input type="checkbox" data-gacha-forge-rarity="ssr" value="title-1">传说之龙 SSR</label>
+        <input data-gacha-forge-material-input value="1">
+      </div></form>
+    </main></body></html>`,
+  })
+  assert.equal(typeof dbg.forgeMaterialMeta, 'function')
+  const inputs = dbg.findForgeMaterialInputs(w.document)
+  assert.equal(inputs.length, 1)
+  assert.deepEqual(plain(dbg.forgeMaterialMeta(inputs[0])), {
+    key: '传说之龙@SSR',
+    name: '传说之龙',
+    rarity: 'SSR',
+    id: '',
+  })
+})
+
+test('称号熔炼页：离开熔炼路由时移除增强控件，返回后重新挂载', async () => {
+  const { w, tick } = await bootForge()
+  assert.ok(w.document.querySelector('[data-lsb-forge-controls]'))
+
+  w.history.pushState({}, '', '/')
+  w.dispatchEvent(new w.PopStateEvent('popstate'))
+  await tick(20)
+  assert.equal(w.document.querySelector('[data-lsb-forge-controls]'), null)
+
+  w.history.pushState({}, '', '/gacha_forge_center')
+  w.dispatchEvent(new w.PopStateEvent('popstate'))
+  await tick(20)
+  assert.ok(w.document.querySelector('[data-lsb-forge-controls]'))
 })

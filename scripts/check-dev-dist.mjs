@@ -5,7 +5,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { AI_MODULES, ORDER } from '../suite/order.js'
 import { SUITE_VERSION } from '../suite/version.js'
-import { applyPluginBuildProfile, stripHeader as stripHeaderCommon } from './build-common.mjs'
+import { applyPluginBuildProfile, readPluginSource, stripHeader as stripHeaderCommon } from './build-common.mjs'
+import { syncSkinSource } from './build-skin.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const dir = join(root, 'dist-dev')
@@ -13,6 +14,7 @@ const fail = []
 const check = (condition, message) => {
   if (!condition) fail.push(message)
 }
+syncSkinSource({ check: true })
 const read = (file) => readFileSync(join(root, file), 'utf8')
 const stripHeader = (source) => stripHeaderCommon(source).body
 const versionOf = (source) => source.match(/@version\s+([\d.]+)/)?.[1] || null
@@ -52,13 +54,13 @@ if (base && suite) {
   check(!suite.includes("id: 'hover-profile'"), '开发 Oxygen 不应包含已下架的用户画像悬浮卡')
   for (const id of AI_MODULES) check(suite.includes(`id: '${id}'`), `开发 Oxygen 缺少 AI 模块 ${id}`)
   for (const id of ORDER) {
-    const source = read(`plugins/${id}.user.js`)
+    const source = readPluginSource(id)
     const body = applyPluginBuildProfile(id, stripHeader(source).trim(), 'dev')
     check(suite.includes(body), `${id} 当前源码正文未进入开发 Oxygen 产物`)
     check(suite.includes(`(${id})`), `${id} 缺少开发 Oxygen 模块段落`)
   }
   check(readme.includes('dist-dev/'), 'README.md 缺少开发产物目录说明')
-  check(conventions.includes('25** 个套件模块'), 'docs/CONVENTIONS.md 缺少开发模块数说明')
+  check(conventions.includes(`**${ORDER.length}** 个套件模块`), 'docs/CONVENTIONS.md 缺少开发模块数说明')
 }
 
 if (fail.length) {

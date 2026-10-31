@@ -34,59 +34,44 @@ export class DomWatcher {
   }
 
   _onMutations(records) {
-    // Set 去重：站点一次性插入大批楼层时，父节点的 querySelectorAll 会把
-    // 同一元素再收一遍（它自身也在 addedNodes 里）。旧实现直接 push 到数组，
-    // 下游解析层会对同一楼层重复计数。
-    const posts = new Set()
-    const items = new Set()
-    const added = []
+    // 一个批次可能同时报告新父节点和它的后代，只保留最外层新增子树。
+    const added = new Set()
     for (const rec of records) {
       for (const node of rec.addedNodes) {
-        if (node.nodeType !== 1) continue
-        if (node.matches?.('li.post-entry') && !node.classList.contains('reply-pin-duplicate')) posts.add(node)
-        else if (
-          node.matches?.('li.post-item')
-          && !node.classList.contains('post-entry')
-          && !node.classList.contains('topic-collections-collection-row')
-        ) {
-          items.add(node)
-        }
-        for (const el of node.querySelectorAll?.('li.post-entry:not(.reply-pin-duplicate)') || []) posts.add(el)
-        for (const el of node.querySelectorAll?.('li.post-item:not(.post-entry):not(.topic-collections-collection-row)') || []) {
-          items.add(el)
-        }
-        added.push(node)
+        if (node.nodeType === 1) added.add(node)
       }
     }
-    this._scanBatch(added)
+    const roots = [...added].filter((node) => {
+      for (let parent = node.parentNode; parent; parent = parent.parentNode) {
+        if (added.has(parent)) return false
+      }
+      return true
+    })
+    const posts = new Set()
+    const items = new Set()
+    for (const node of roots) {
+      if (node.matches?.('li.post-entry') && !node.classList.contains('reply-pin-duplicate')) posts.add(node)
+      else if (
+        node.matches?.('li.post-item')
+        && !node.classList.contains('post-entry')
+        && !node.classList.contains('topic-collections-collection-row')
+      ) {
+        items.add(node)
+      }
+      for (const el of node.querySelectorAll?.('li.post-entry:not(.reply-pin-duplicate)') || []) posts.add(el)
+      for (const el of node.querySelectorAll?.('li.post-item:not(.post-entry):not(.topic-collections-collection-row)') || []) {
+        items.add(el)
+      }
+    }
+    this._scanBatch(roots)
     if (posts.size) this.bus.emit('dom:posts-added', [...posts], { raw: true, source: 'core' })
     if (items.size) this.bus.emit('dom:list-added', [...items], { raw: true, source: 'core' })
     if (records.length) this._notify()
   }
 
-  /** 同批兄弟节点只扫父节点一次，避免无限滚动 20 条各扫一遍全部 onEach */
+  /** 扫描新增子树，不因同批兄弟节点而回扫已经处理过的整个父容器。 */
   _scanBatch(nodes) {
-    if (!nodes.length) return
-    const byParent = new Map()
-    const orphans = []
-    for (const node of nodes) {
-      const parent = node.parentNode
-      if (parent && parent.nodeType === 1) {
-        let bucket = byParent.get(parent)
-        if (!bucket) {
-          bucket = []
-          byParent.set(parent, bucket)
-        }
-        bucket.push(node)
-      } else {
-        orphans.push(node)
-      }
-    }
-    for (const [parent, kids] of byParent) {
-      if (kids.length > 1) this._scan(parent)
-      else this._scan(kids[0])
-    }
-    for (const node of orphans) this._scan(node)
+    for (const node of nodes) this._scan(node)
   }
 
   /**

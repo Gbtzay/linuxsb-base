@@ -26,6 +26,7 @@ function runBuild(source) {
     copyFileSync(join(repoRoot, 'build-suite.mjs'), join(root, 'build-suite.mjs'))
     copyFileSync(join(repoRoot, 'scripts/build-common.mjs'), join(root, 'scripts/build-common.mjs'))
     copyFileSync(join(repoRoot, 'scripts/build-profile.mjs'), join(root, 'scripts/build-profile.mjs'))
+    copyFileSync(join(repoRoot, 'scripts/build-skin.mjs'), join(root, 'scripts/build-skin.mjs'))
     copyFileSync(join(repoRoot, 'suite/version.js'), join(root, 'suite/version.js'))
     writeFileSync(join(root, 'package.json'), JSON.stringify({ type: 'module' }))
     writeFileSync(

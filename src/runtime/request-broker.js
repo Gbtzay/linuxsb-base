@@ -1,5 +1,6 @@
 import { sanitizeDiagnostic } from './redaction.js'
 import { routeFingerprint, snapshotValue } from './route-utils.js'
+import { withAbort } from '../abort.js'
 
 const METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'])
 const IDEMPOTENT = new Set(['GET', 'HEAD', 'OPTIONS'])
@@ -69,6 +70,19 @@ function normalizeRepresentations(value) {
   return new Set(input.map((item) => String(item)).filter((item) => ['text', 'json', 'document'].includes(item)))
 }
 
+/** 只合并语义相同的站内只读传输；响应解析仍由每个调用方完成。 */
+function readKey(url, options, route) {
+  if (options.method !== 'GET' || options.external || options.body != null || options.onChunk != null) return null
+  const headers = Object.entries(options.headers).map(([name, value]) => [name.toLowerCase(), String(value)])
+  if (new Set(headers.map(([name]) => name)).size !== headers.length) return null
+  headers.sort(([a], [b]) => a.localeCompare(b))
+  const backoff = ['rate', 'err'].map((name, index) => (
+    Object.prototype.hasOwnProperty.call(options.backoff || {}, name) ? options.backoff[name] : [1500, 800][index]
+  ))
+  if (backoff.some((value) => typeof value !== 'number' || !Number.isFinite(value))) return null
+  return JSON.stringify([url, route, headers, options.timeout, options.retry, backoff, options.queue == null ? true : !!options.queue])
+}
+
 function normalizeResponse(response, requested, requestUrl) {
   const status = Number(response?.status)
   const rawText = typeof response?.text === 'string' ? response.text : ''
@@ -123,6 +137,7 @@ export class RequestBroker {
     this.clock = typeof clock === 'function' ? clock : () => Date.now()
     this._queue = Promise.resolve()
     this._last = 0
+    this._inflight = new WeakMap()
   }
 
   _emit(event) {
@@ -196,6 +211,52 @@ export class RequestBroker {
     throw new TypeError('RequestBroker transport 不支持 raw/request')
   }
 
+  _send(context, url, options, route) {
+    const signal = options.signal
+    if (signal.aborted) return Promise.reject(errorWith('request.aborted', '请求已取消'))
+    const key = readKey(url, options, route)
+    if (key === null) {
+      return withAbort(this._enqueue(() => this._transport(url, options), signal), signal)
+    }
+    let entries = this._inflight.get(context)
+    if (!entries) {
+      entries = new Map()
+      this._inflight.set(context, entries)
+    }
+    let entry = entries.get(key)
+    if (!entry) {
+      entry = { controller: new AbortController(), users: 0, settled: false, promise: null }
+      entries.set(key, entry)
+      const sharedOptions = { ...options, signal: entry.controller.signal }
+      // Keep the synchronous transport start used by the existing facade.
+      entry.promise = this._enqueue(() => this._transport(url, sharedOptions), sharedOptions.signal).finally(() => {
+        entry.settled = true
+        if (entries.get(key) === entry) entries.delete(key)
+      })
+    }
+    entry.users++
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (fn, value) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', stop)
+        entry.users--
+        if (!entry.users && !entry.settled) {
+          // Remove immediately so a new request cannot join an abandoned read.
+          if (entries.get(key) === entry) entries.delete(key)
+          entry.controller.abort()
+        }
+        fn(value)
+      }
+      const stop = () => finish(reject, errorWith('request.aborted', '请求已取消'))
+      signal.addEventListener('abort', stop, { once: true })
+      // Both branches stay attached even after cancellation, consuming late failures.
+      entry.promise.then((value) => finish(resolve, value), (error) => finish(reject, error))
+      if (signal.aborted) stop()
+    })
+  }
+
   async request(intent = {}) {
     const method = String(intent.method || 'GET').toUpperCase()
     if (!METHODS.has(method)) throw errorWith('request.invalid-method', `不支持的请求方法 ${method}`)
@@ -246,24 +307,7 @@ export class RequestBroker {
     const safePath = `${url.pathname}`
     this._emit({ kind: 'request.start', owner: context.owner, purpose, method, path: safePath })
     try {
-      const result = await this._enqueue(async () => {
-        let call
-        try {
-          // Start transport in the current turn so legacy fetch callers can
-          // observe the request before the first await yields control.
-          call = Promise.resolve(this._transport(url.href, transportOptions))
-        } catch (error) {
-          call = Promise.reject(error)
-        }
-        const abort = new Promise((_, reject) => {
-          const stop = () => reject(timedOut ? errorWith('request.timeout', '请求超时') : errorWith('request.aborted', '请求已取消'))
-          controller.signal.addEventListener('abort', stop, { once: true })
-          const settled = call.finally(() => controller.signal.removeEventListener('abort', stop))
-          // settled is also part of the race, so a late transport rejection is handled.
-          settled.catch(() => {})
-        })
-        return Promise.race([call, abort])
-      }, signal)
+      const result = await this._send(context, url.href, transportOptions, routeFingerprint(snapshot))
       const envelope = normalizeResponse(result, normalizeRepresentations(intent.response ?? intent.representations), url.href)
       this._emit({ kind: 'request.finish', owner: context.owner, purpose, method, path: safePath, status: envelope.status, ok: envelope.ok })
       return envelope

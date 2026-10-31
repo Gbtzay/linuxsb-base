@@ -2,7 +2,7 @@
 // @name         LINUX.SB 氢
 // @name:en      LINUX.SB Hydrogen
 // @namespace    https://linux.sb/
-// @version      2.4.1
+// @version      2.4.2
 // @description  linux.sb 脚本基座：站点解析、统一网络请求、设置面板与插件挂载。请与「LINUX.SB 氧」一起使用。
 // @description:en  Userscript base for linux.sb: site parsing, networked requests, settings panel, plugin host. Install LINUX.SB Oxygen for features.
 // @author       xB70sR71
@@ -1295,6 +1295,14 @@
     let input = value == null ? ["text"] : Array.isArray(value) ? value : [value];
     return new Set(input.map((item) => String(item)).filter((item) => ["text", "json", "document"].includes(item)));
   }
+  function readKey(url, options, route) {
+    if (options.method !== "GET" || options.external || options.body != null || options.onChunk != null) return null;
+    let headers = Object.entries(options.headers).map(([name, value]) => [name.toLowerCase(), String(value)]);
+    if (new Set(headers.map(([name]) => name)).size !== headers.length) return null;
+    headers.sort(([a], [b]) => a.localeCompare(b));
+    let backoff = ["rate", "err"].map((name, index) => Object.prototype.hasOwnProperty.call(options.backoff || {}, name) ? options.backoff[name] : [1500, 800][index]);
+    return backoff.some((value) => typeof value != "number" || !Number.isFinite(value)) ? null : JSON.stringify([url, route, headers, options.timeout, options.retry, backoff, options.queue == null ? !0 : !!options.queue]);
+  }
   function normalizeResponse(response, requested, requestUrl) {
     let status = Number(response?.status), rawText = typeof response?.text == "string" ? response.text : "", output = {
       ok: response?.ok == null ? status >= 200 && status < 300 : !!response.ok,
@@ -1328,7 +1336,7 @@
     }, clock = () => Date.now() } = {}) {
       if (!transport) throw new TypeError("RequestBroker 需要 transport");
       this.transport = transport, this.snapshot = snapshot2, this.origin = nowOrigin(origin), this.rate = Math.max(0, Number(rate) || 0), this.timeout = Math.max(1, Number(timeout) || 2e4), this.trace = typeof trace == "function" ? trace : () => {
-      }, this.clock = typeof clock == "function" ? clock : () => Date.now(), this._queue = Promise.resolve(), this._last = 0;
+      }, this.clock = typeof clock == "function" ? clock : () => Date.now(), this._queue = Promise.resolve(), this._last = 0, this._inflight = /* @__PURE__ */ new WeakMap();
     }
     _emit(event) {
       try {
@@ -1383,6 +1391,29 @@
       if (typeof this.transport.request == "function") return this.transport.request({ url, ...options });
       throw new TypeError("RequestBroker transport 不支持 raw/request");
     }
+    _send(context, url, options, route) {
+      let signal = options.signal;
+      if (signal.aborted) return Promise.reject(errorWith("request.aborted", "请求已取消"));
+      let key = readKey(url, options, route);
+      if (key === null)
+        return withAbort(this._enqueue(() => this._transport(url, options), signal), signal);
+      let entries = this._inflight.get(context);
+      entries || (entries = /* @__PURE__ */ new Map(), this._inflight.set(context, entries));
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = { controller: new AbortController(), users: 0, settled: !1, promise: null }, entries.set(key, entry);
+        let sharedOptions = { ...options, signal: entry.controller.signal };
+        entry.promise = this._enqueue(() => this._transport(url, sharedOptions), sharedOptions.signal).finally(() => {
+          entry.settled = !0, entries.get(key) === entry && entries.delete(key);
+        });
+      }
+      return entry.users++, new Promise((resolve, reject) => {
+        let settled = !1, finish = (fn, value) => {
+          settled || (settled = !0, signal.removeEventListener("abort", stop), entry.users--, !entry.users && !entry.settled && (entries.get(key) === entry && entries.delete(key), entry.controller.abort()), fn(value));
+        }, stop = () => finish(reject, errorWith("request.aborted", "请求已取消"));
+        signal.addEventListener("abort", stop, { once: !0 }), entry.promise.then((value) => finish(resolve, value), (error) => finish(reject, error)), signal.aborted && stop();
+      });
+    }
     async request(intent = {}) {
       let method = String(intent.method || "GET").toUpperCase();
       if (!METHODS.has(method)) throw errorWith("request.invalid-method", `不支持的请求方法 ${method}`);
@@ -1424,20 +1455,7 @@
       }, safePath = `${url.pathname}`;
       this._emit({ kind: "request.start", owner: context.owner, purpose, method, path: safePath });
       try {
-        let result = await this._enqueue(async () => {
-          let call;
-          try {
-            call = Promise.resolve(this._transport(url.href, transportOptions));
-          } catch (error) {
-            call = Promise.reject(error);
-          }
-          let abort = new Promise((_, reject) => {
-            let stop = () => reject(timedOut ? errorWith("request.timeout", "请求超时") : errorWith("request.aborted", "请求已取消"));
-            controller.signal.addEventListener("abort", stop, { once: !0 }), call.finally(() => controller.signal.removeEventListener("abort", stop)).catch(() => {
-            });
-          });
-          return Promise.race([call, abort]);
-        }, signal), envelope = normalizeResponse(result, normalizeRepresentations(intent.response ?? intent.representations), url.href);
+        let result = await this._send(context, url.href, transportOptions, routeFingerprint(snapshot2)), envelope = normalizeResponse(result, normalizeRepresentations(intent.response ?? intent.representations), url.href);
         return this._emit({ kind: "request.finish", owner: context.owner, purpose, method, path: safePath, status: envelope.status, ok: envelope.ok }), envelope;
       } catch (cause) {
         let code = timedOut ? "request.timeout" : signal?.aborted || cause?.code === "request.aborted" ? "request.aborted" : cause?.code || "request.failed", safeCause = sanitizeDiagnostic(cause), fallback = code === "request.timeout" ? "请求超时" : code === "request.aborted" ? "请求已取消" : "请求失败", message = typeof safeCause?.message == "string" && safeCause.message ? safeCause.message : fallback, error = errorWith(code, message);
@@ -1714,7 +1732,18 @@
   }
   var Backend = class {
     constructor() {
-      this._mem = /* @__PURE__ */ new Map(), this._lsRef = null;
+      this._mem = /* @__PURE__ */ new Map(), this._gmListeners = /* @__PURE__ */ new Map(), this._lsRef = null;
+    }
+    /** GM 的内存缓存只有在键变更可观察时才安全；同键只登记一次。 */
+    _observeGm(key) {
+      if (this._gmListeners.has(key)) return !0;
+      if (typeof GM_addValueChangeListener != "function") return !1;
+      try {
+        let id = GM_addValueChangeListener(key, () => this._mem.delete(key));
+        return !Number.isInteger(id) || id < 0 ? !1 : (this._gmListeners.set(key, id), !0);
+      } catch {
+        return !1;
+      }
     }
     /** 测试里每次换 JSDOM 会换 localStorage 实例，缓存必须跟着丢掉 */
     _syncCacheScope() {
@@ -1727,12 +1756,13 @@
     }
     get(key, def) {
       if (this._syncCacheScope(), gmAvailable()) {
-        if (this._mem.has(key)) {
+        let cacheable = this._observeGm(key);
+        if (cacheable && this._mem.has(key)) {
           let hit = this._mem.get(key);
           return hit.value === void 0 ? def : hit.value;
         }
         let v = GM_getValue(key, void 0);
-        return v === void 0 ? def : (this._mem.set(key, { value: v }), v);
+        return v === void 0 ? def : (cacheable && this._mem.set(key, { value: v }), v);
       }
       try {
         let raw = localStorage.getItem(key);
@@ -1747,8 +1777,10 @@
       }
     }
     set(key, value) {
-      if (this._syncCacheScope(), gmAvailable())
-        return this._mem.set(key, { value }), GM_setValue(key, value);
+      if (this._syncCacheScope(), gmAvailable()) {
+        let cacheable = this._observeGm(key), result = GM_setValue(key, value);
+        return cacheable ? this._mem.set(key, { value }) : this._mem.delete(key), result;
+      }
       try {
         let raw = JSON.stringify(value);
         localStorage.setItem(key, raw), this._mem.set(key, { raw, value });
@@ -2242,33 +2274,26 @@
       this._observer?.disconnect(), this._observer = null;
     }
     _onMutations(records) {
-      let posts = /* @__PURE__ */ new Set(), items = /* @__PURE__ */ new Set(), added = [];
+      let added = /* @__PURE__ */ new Set();
       for (let rec of records)
         for (let node of rec.addedNodes)
-          if (node.nodeType === 1) {
-            node.matches?.("li.post-entry") && !node.classList.contains("reply-pin-duplicate") ? posts.add(node) : node.matches?.("li.post-item") && !node.classList.contains("post-entry") && !node.classList.contains("topic-collections-collection-row") && items.add(node);
-            for (let el of node.querySelectorAll?.("li.post-entry:not(.reply-pin-duplicate)") || []) posts.add(el);
-            for (let el of node.querySelectorAll?.("li.post-item:not(.post-entry):not(.topic-collections-collection-row)") || [])
-              items.add(el);
-            added.push(node);
-          }
-      this._scanBatch(added), posts.size && this.bus.emit("dom:posts-added", [...posts], { raw: !0, source: "core" }), items.size && this.bus.emit("dom:list-added", [...items], { raw: !0, source: "core" }), records.length && this._notify();
-    }
-    /** 同批兄弟节点只扫父节点一次，避免无限滚动 20 条各扫一遍全部 onEach */
-    _scanBatch(nodes) {
-      if (!nodes.length) return;
-      let byParent = /* @__PURE__ */ new Map(), orphans = [];
-      for (let node of nodes) {
-        let parent = node.parentNode;
-        if (parent && parent.nodeType === 1) {
-          let bucket = byParent.get(parent);
-          bucket || (bucket = [], byParent.set(parent, bucket)), bucket.push(node);
-        } else
-          orphans.push(node);
+          node.nodeType === 1 && added.add(node);
+      let roots = [...added].filter((node) => {
+        for (let parent = node.parentNode; parent; parent = parent.parentNode)
+          if (added.has(parent)) return !1;
+        return !0;
+      }), posts = /* @__PURE__ */ new Set(), items = /* @__PURE__ */ new Set();
+      for (let node of roots) {
+        node.matches?.("li.post-entry") && !node.classList.contains("reply-pin-duplicate") ? posts.add(node) : node.matches?.("li.post-item") && !node.classList.contains("post-entry") && !node.classList.contains("topic-collections-collection-row") && items.add(node);
+        for (let el of node.querySelectorAll?.("li.post-entry:not(.reply-pin-duplicate)") || []) posts.add(el);
+        for (let el of node.querySelectorAll?.("li.post-item:not(.post-entry):not(.topic-collections-collection-row)") || [])
+          items.add(el);
       }
-      for (let [parent, kids] of byParent)
-        kids.length > 1 ? this._scan(parent) : this._scan(kids[0]);
-      for (let node of orphans) this._scan(node);
+      this._scanBatch(roots), posts.size && this.bus.emit("dom:posts-added", [...posts], { raw: !0, source: "core" }), items.size && this.bus.emit("dom:list-added", [...items], { raw: !0, source: "core" }), records.length && this._notify();
+    }
+    /** 扫描新增子树，不因同批兄弟节点而回扫已经处理过的整个父容器。 */
+    _scanBatch(nodes) {
+      for (let node of nodes) this._scan(node);
     }
     /**
      * 对匹配 selector 的元素执行 fn，包含未来新增的。
@@ -2428,7 +2453,7 @@
   };
 
   // src/core/core-version.js
-  var VERSION = "2.4.1";
+  var VERSION = "2.4.2";
 
   // src/core/permissions.js
   var PERMISSIONS = {

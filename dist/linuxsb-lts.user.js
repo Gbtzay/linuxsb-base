@@ -2,7 +2,7 @@
 // @name         LINUX.SB（LTS）
 // @name:en      LINUX.SB (LTS)
 // @namespace    https://linux.sb/
-// @version      2.0.36
+// @version      2.0.64
 // @description  【LTS】一份脚本含基座与精简功能包。请先卸掉「LINUX.SB 氢」和「LINUX.SB 氧」。冻新功能，只修阻断。
 // @description:en  [LTS] Base + feature pack in one script. Uninstall Hydrogen and Oxygen first. Feature-frozen.
 // @author       xB70sR71
@@ -49,7 +49,7 @@
     return
   }
   W.__LSB_CHANNEL__ = 'lts'
-  W.__LSB_LTS_VERSION__ = "2.0.36";
+  W.__LSB_LTS_VERSION__ = "2.0.64";
 (() => {
   var __defProp = Object.defineProperty;
   var __export = (target, all) => {
@@ -1318,6 +1318,14 @@
     let input = value == null ? ["text"] : Array.isArray(value) ? value : [value];
     return new Set(input.map((item) => String(item)).filter((item) => ["text", "json", "document"].includes(item)));
   }
+  function readKey(url, options, route) {
+    if (options.method !== "GET" || options.external || options.body != null || options.onChunk != null) return null;
+    let headers = Object.entries(options.headers).map(([name, value]) => [name.toLowerCase(), String(value)]);
+    if (new Set(headers.map(([name]) => name)).size !== headers.length) return null;
+    headers.sort(([a], [b]) => a.localeCompare(b));
+    let backoff = ["rate", "err"].map((name, index) => Object.prototype.hasOwnProperty.call(options.backoff || {}, name) ? options.backoff[name] : [1500, 800][index]);
+    return backoff.some((value) => typeof value != "number" || !Number.isFinite(value)) ? null : JSON.stringify([url, route, headers, options.timeout, options.retry, backoff, options.queue == null ? !0 : !!options.queue]);
+  }
   function normalizeResponse(response, requested, requestUrl) {
     let status = Number(response?.status), rawText = typeof response?.text == "string" ? response.text : "", output = {
       ok: response?.ok == null ? status >= 200 && status < 300 : !!response.ok,
@@ -1351,7 +1359,7 @@
     }, clock = () => Date.now() } = {}) {
       if (!transport) throw new TypeError("RequestBroker 需要 transport");
       this.transport = transport, this.snapshot = snapshot2, this.origin = nowOrigin(origin), this.rate = Math.max(0, Number(rate) || 0), this.timeout = Math.max(1, Number(timeout) || 2e4), this.trace = typeof trace == "function" ? trace : () => {
-      }, this.clock = typeof clock == "function" ? clock : () => Date.now(), this._queue = Promise.resolve(), this._last = 0;
+      }, this.clock = typeof clock == "function" ? clock : () => Date.now(), this._queue = Promise.resolve(), this._last = 0, this._inflight = /* @__PURE__ */ new WeakMap();
     }
     _emit(event) {
       try {
@@ -1406,6 +1414,29 @@
       if (typeof this.transport.request == "function") return this.transport.request({ url, ...options });
       throw new TypeError("RequestBroker transport 不支持 raw/request");
     }
+    _send(context, url, options, route) {
+      let signal = options.signal;
+      if (signal.aborted) return Promise.reject(errorWith("request.aborted", "请求已取消"));
+      let key = readKey(url, options, route);
+      if (key === null)
+        return withAbort(this._enqueue(() => this._transport(url, options), signal), signal);
+      let entries = this._inflight.get(context);
+      entries || (entries = /* @__PURE__ */ new Map(), this._inflight.set(context, entries));
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = { controller: new AbortController(), users: 0, settled: !1, promise: null }, entries.set(key, entry);
+        let sharedOptions = { ...options, signal: entry.controller.signal };
+        entry.promise = this._enqueue(() => this._transport(url, sharedOptions), sharedOptions.signal).finally(() => {
+          entry.settled = !0, entries.get(key) === entry && entries.delete(key);
+        });
+      }
+      return entry.users++, new Promise((resolve, reject) => {
+        let settled = !1, finish = (fn, value) => {
+          settled || (settled = !0, signal.removeEventListener("abort", stop), entry.users--, !entry.users && !entry.settled && (entries.get(key) === entry && entries.delete(key), entry.controller.abort()), fn(value));
+        }, stop = () => finish(reject, errorWith("request.aborted", "请求已取消"));
+        signal.addEventListener("abort", stop, { once: !0 }), entry.promise.then((value) => finish(resolve, value), (error) => finish(reject, error)), signal.aborted && stop();
+      });
+    }
     async request(intent = {}) {
       let method = String(intent.method || "GET").toUpperCase();
       if (!METHODS.has(method)) throw errorWith("request.invalid-method", `不支持的请求方法 ${method}`);
@@ -1447,20 +1478,7 @@
       }, safePath = `${url.pathname}`;
       this._emit({ kind: "request.start", owner: context.owner, purpose, method, path: safePath });
       try {
-        let result = await this._enqueue(async () => {
-          let call;
-          try {
-            call = Promise.resolve(this._transport(url.href, transportOptions));
-          } catch (error) {
-            call = Promise.reject(error);
-          }
-          let abort = new Promise((_, reject) => {
-            let stop = () => reject(timedOut ? errorWith("request.timeout", "请求超时") : errorWith("request.aborted", "请求已取消"));
-            controller.signal.addEventListener("abort", stop, { once: !0 }), call.finally(() => controller.signal.removeEventListener("abort", stop)).catch(() => {
-            });
-          });
-          return Promise.race([call, abort]);
-        }, signal), envelope = normalizeResponse(result, normalizeRepresentations(intent.response ?? intent.representations), url.href);
+        let result = await this._send(context, url.href, transportOptions, routeFingerprint(snapshot2)), envelope = normalizeResponse(result, normalizeRepresentations(intent.response ?? intent.representations), url.href);
         return this._emit({ kind: "request.finish", owner: context.owner, purpose, method, path: safePath, status: envelope.status, ok: envelope.ok }), envelope;
       } catch (cause) {
         let code = timedOut ? "request.timeout" : signal?.aborted || cause?.code === "request.aborted" ? "request.aborted" : cause?.code || "request.failed", safeCause = sanitizeDiagnostic(cause), fallback = code === "request.timeout" ? "请求超时" : code === "request.aborted" ? "请求已取消" : "请求失败", message = typeof safeCause?.message == "string" && safeCause.message ? safeCause.message : fallback, error = errorWith(code, message);
@@ -1737,7 +1755,18 @@
   }
   var Backend = class {
     constructor() {
-      this._mem = /* @__PURE__ */ new Map(), this._lsRef = null;
+      this._mem = /* @__PURE__ */ new Map(), this._gmListeners = /* @__PURE__ */ new Map(), this._lsRef = null;
+    }
+    /** GM 的内存缓存只有在键变更可观察时才安全；同键只登记一次。 */
+    _observeGm(key) {
+      if (this._gmListeners.has(key)) return !0;
+      if (typeof GM_addValueChangeListener != "function") return !1;
+      try {
+        let id = GM_addValueChangeListener(key, () => this._mem.delete(key));
+        return !Number.isInteger(id) || id < 0 ? !1 : (this._gmListeners.set(key, id), !0);
+      } catch {
+        return !1;
+      }
     }
     /** 测试里每次换 JSDOM 会换 localStorage 实例，缓存必须跟着丢掉 */
     _syncCacheScope() {
@@ -1750,12 +1779,13 @@
     }
     get(key, def) {
       if (this._syncCacheScope(), gmAvailable()) {
-        if (this._mem.has(key)) {
+        let cacheable = this._observeGm(key);
+        if (cacheable && this._mem.has(key)) {
           let hit = this._mem.get(key);
           return hit.value === void 0 ? def : hit.value;
         }
         let v = GM_getValue(key, void 0);
-        return v === void 0 ? def : (this._mem.set(key, { value: v }), v);
+        return v === void 0 ? def : (cacheable && this._mem.set(key, { value: v }), v);
       }
       try {
         let raw = localStorage.getItem(key);
@@ -1770,8 +1800,10 @@
       }
     }
     set(key, value) {
-      if (this._syncCacheScope(), gmAvailable())
-        return this._mem.set(key, { value }), GM_setValue(key, value);
+      if (this._syncCacheScope(), gmAvailable()) {
+        let cacheable = this._observeGm(key), result = GM_setValue(key, value);
+        return cacheable ? this._mem.set(key, { value }) : this._mem.delete(key), result;
+      }
       try {
         let raw = JSON.stringify(value);
         localStorage.setItem(key, raw), this._mem.set(key, { raw, value });
@@ -2265,33 +2297,26 @@
       this._observer?.disconnect(), this._observer = null;
     }
     _onMutations(records) {
-      let posts = /* @__PURE__ */ new Set(), items = /* @__PURE__ */ new Set(), added = [];
+      let added = /* @__PURE__ */ new Set();
       for (let rec of records)
         for (let node of rec.addedNodes)
-          if (node.nodeType === 1) {
-            node.matches?.("li.post-entry") && !node.classList.contains("reply-pin-duplicate") ? posts.add(node) : node.matches?.("li.post-item") && !node.classList.contains("post-entry") && !node.classList.contains("topic-collections-collection-row") && items.add(node);
-            for (let el of node.querySelectorAll?.("li.post-entry:not(.reply-pin-duplicate)") || []) posts.add(el);
-            for (let el of node.querySelectorAll?.("li.post-item:not(.post-entry):not(.topic-collections-collection-row)") || [])
-              items.add(el);
-            added.push(node);
-          }
-      this._scanBatch(added), posts.size && this.bus.emit("dom:posts-added", [...posts], { raw: !0, source: "core" }), items.size && this.bus.emit("dom:list-added", [...items], { raw: !0, source: "core" }), records.length && this._notify();
-    }
-    /** 同批兄弟节点只扫父节点一次，避免无限滚动 20 条各扫一遍全部 onEach */
-    _scanBatch(nodes) {
-      if (!nodes.length) return;
-      let byParent = /* @__PURE__ */ new Map(), orphans = [];
-      for (let node of nodes) {
-        let parent = node.parentNode;
-        if (parent && parent.nodeType === 1) {
-          let bucket = byParent.get(parent);
-          bucket || (bucket = [], byParent.set(parent, bucket)), bucket.push(node);
-        } else
-          orphans.push(node);
+          node.nodeType === 1 && added.add(node);
+      let roots = [...added].filter((node) => {
+        for (let parent = node.parentNode; parent; parent = parent.parentNode)
+          if (added.has(parent)) return !1;
+        return !0;
+      }), posts = /* @__PURE__ */ new Set(), items = /* @__PURE__ */ new Set();
+      for (let node of roots) {
+        node.matches?.("li.post-entry") && !node.classList.contains("reply-pin-duplicate") ? posts.add(node) : node.matches?.("li.post-item") && !node.classList.contains("post-entry") && !node.classList.contains("topic-collections-collection-row") && items.add(node);
+        for (let el of node.querySelectorAll?.("li.post-entry:not(.reply-pin-duplicate)") || []) posts.add(el);
+        for (let el of node.querySelectorAll?.("li.post-item:not(.post-entry):not(.topic-collections-collection-row)") || [])
+          items.add(el);
       }
-      for (let [parent, kids] of byParent)
-        kids.length > 1 ? this._scan(parent) : this._scan(kids[0]);
-      for (let node of orphans) this._scan(node);
+      this._scanBatch(roots), posts.size && this.bus.emit("dom:posts-added", [...posts], { raw: !0, source: "core" }), items.size && this.bus.emit("dom:list-added", [...items], { raw: !0, source: "core" }), records.length && this._notify();
+    }
+    /** 扫描新增子树，不因同批兄弟节点而回扫已经处理过的整个父容器。 */
+    _scanBatch(nodes) {
+      for (let node of nodes) this._scan(node);
     }
     /**
      * 对匹配 selector 的元素执行 fn，包含未来新增的。
@@ -2451,7 +2476,7 @@
   };
 
   // src/core/core-version.js
-  var VERSION = "2.4.1";
+  var VERSION = "2.4.2";
 
   // src/core/permissions.js
   var PERMISSIONS = {
@@ -4364,12 +4389,11 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
   const manifest = {
     id: 'resume-reading',
     name: '断点续读',
-    version: '1.0.5',
+    version: '1.0.6',
     description: '记住每帖读到哪层，回来一键续读，未读楼层标 NEW',
     author: 'you',
     requires: { base: '^0.1.0' },
     permissions: ['read', 'storage', 'ui', 'events'],
-    pages: ['topic'],
     config: {
       minAsk: { type: 'number', label: '至少读到第几楼才提示续读', default: 3 },
       autoJump: { type: 'switch', label: '同一页时自动跳转（不再弹条）', default: false },
@@ -4388,220 +4412,303 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
 
     /* ── 存储层：单键 + 容量/时效修剪 ── */
     function loadAll() {
-      return api.store.get('positions', {}) || {}
+      const all = api.store.get('positions', {})
+      return all && typeof all === 'object' && !Array.isArray(all) ? all : {}
     }
     function prune(all) {
       const deadline = Date.now() - cfg.keepDays * 864e5
-      let list = Object.entries(all).filter(([, r]) => r.ts > deadline)
+      let list = Object.entries(all).filter(([, r]) => r?.ts > deadline)
       list.sort((a, b) => b[1].ts - a[1].ts)
       list = list.slice(0, Math.max(50, cfg.cap))
       return Object.fromEntries(list)
     }
     function saveRec(rec, tidArg) {
       const t = tidArg || tidOf()
+      if (!Number.isSafeInteger(Number(t)) || Number(t) <= 0) return null
       const all = loadAll()
       all[t] = { ...(all[t] || {}), ...rec, ts: rec.ts || Date.now() }
       api.store.set('positions', prune(all))
+      api.emit('changed', { topicId: Number(t) })
       return all[t]
     }
     function load() {
       return loadAll()[tidOf()] || null
     }
 
-    /* ── 阅读位置追踪 ── */
-    let curFloor = 0
-    let dirty = false
-    const hideTimers = new Set()
-    const hiding = new WeakSet()
-    const NEW_HIDE_MS = 5000
-    const flush = () => {
-      if (!dirty) return
-      dirty = false
-      saveRec({ f: curFloor, p: pageOf(), title: api.snapshot?.topic?.title || '' })
+    function records() {
+      return Object.entries(prune(loadAll())).flatMap(([id, r]) => {
+        const topicId = Number(id), floor = Number(r.f), page = Number(r.p || 1)
+        if (!Number.isSafeInteger(topicId) || topicId <= 0 || !Number.isSafeInteger(floor) || floor < 0
+          || !Number.isSafeInteger(page) || page < 1 || !Number.isFinite(Number(r.ts))) return []
+        const href = api.routes.topic(topicId, page) + (floor > 0 ? `${page > 1 ? '&' : '?'}floor=${floor}` : '')
+        return [{ topicId, title: typeof r.title === 'string' ? r.title : '', floor, page,
+          updatedAt: Number(r.ts), source: 'resume-reading', href }]
+      }).sort((a, b) => b.updatedAt - a.updatedAt || b.topicId - a.topicId)
     }
-    const flushLater = api.util.throttle(flush, 1200)
+    api.handle('resume-reading:list', records)
+    api.handle('resume-reading:get', ({ topicId } = {}) => records().find((r) => r.topicId === Number(topicId)) || null)
 
-    function lastVisibleFloor() {
-      let max = 0
-      for (const li of document.querySelectorAll('li.post-entry')) {
-        const rect = li.getBoundingClientRect?.() || { top: 0, height: 0, width: 0 }
-        if (!rect.height && !rect.width) continue
-        if (rect.top <= window.innerHeight * 0.72) {
-          const f = Number(li.getAttribute('data-floor') || 0)
-          if (f > max) max = f
-        } else {
-          break // DOM 顺序≈视觉顺序，可提前结束；乱序也不会漏（max 取最大）
+    function startTopic() {
+      // A route may already expose the next snapshot when the old session flushes.
+      const topicId = api.page.id, page = api.page.page || 1
+      const title = api.snapshot?.topic?.title || ''
+      const tidOf = () => topicId
+      const pageOf = () => page
+      const load = () => loadAll()[topicId] || null
+      const disposers = []
+      const own = (fn) => disposers.push(fn)
+      let alive = true
+      function throttle(fn, wait) {
+        let timer = null, last = 0
+        own(() => clearTimeout(timer))
+        return () => {
+          if (!alive) return
+          const remaining = wait - (Date.now() - last)
+          if (remaining <= 0) {
+            clearTimeout(timer)
+            timer = null
+            last = Date.now()
+            fn()
+          } else if (!timer) timer = setTimeout(() => {
+            timer = null
+            last = Date.now()
+            if (alive) fn()
+          }, remaining)
         }
       }
-      return max
-    }
-    const onScroll = api.util.throttle(() => {
-      const f = lastVisibleFloor()
-      if (f > curFloor) {
-        curFloor = f
-        dirty = true
-        flushLater()
+
+      /* ── 阅读位置追踪 ── */
+      let curFloor = 0
+      let dirty = false
+      const hideTimers = new Set()
+      const hiding = new WeakSet()
+      const NEW_HIDE_MS = 5000
+      const flush = () => {
+        if (!dirty) return
+        dirty = false
+        saveRec({ f: curFloor, p: pageOf(), title }, topicId)
       }
-      if (valid && f > 0) scheduleHideUpTo(f)
-    }, 600)
+      const flushLater = throttle(flush, 1200)
 
-    const onVisibility = () => {
-      if (document.hidden) flush()
-    }
-
-    /* ── 未读标记 ── */
-    const saved = load()
-    const valid = saved && saved.f >= (cfg.minAsk || 3)
-
-    api.ui.style(`
-      .lsb-new{display:inline-block;margin-left:6px;font-size:10px;font-weight:700;color:#fff;
-        background:var(--brand,#5eaaa0);border-radius:4px;padding:1px 5px;vertical-align:middle;line-height:1.3}
-      li.post-entry.lsb-flash{background:var(--warning-soft,#fff3d6)!important;transition:background 1.4s ease}
-      .lsb-resume-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:99997;
-        display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:999px;
-        background:var(--panel,#fff);border:1px solid var(--line,#ddd);color:var(--text,#222);
-        font-size:13px;box-shadow:0 6px 20px var(--shadow-medium,rgba(0,0,0,.2))}
-      .lsb-resume-bar .lsb-btn{white-space:nowrap}
-    `)
-
-    function newAnchor(li) {
-      const uid = [...li.querySelectorAll('.post-user-group')].find(
-        (g) => g.classList.contains('user-uid-badge') || /^UID\b/i.test((g.textContent || '').trim()),
-      )
-      if (uid) return uid
-      return li.querySelector('a.post-title.post-author')
-    }
-
-    function setUnread(li, unread) {
-      li.classList.toggle('lsb-unread', unread)
-      let badge = li.querySelector('.lsb-new')
-      if (!unread) {
-        badge?.remove()
-        return
+      function lastVisibleFloor() {
+        let max = 0
+        for (const li of document.querySelectorAll('li.post-entry')) {
+          const rect = li.getBoundingClientRect?.() || { top: 0, height: 0, width: 0 }
+          if (!rect.height && !rect.width) continue
+          if (rect.top <= window.innerHeight * 0.72) {
+            const f = Number(li.getAttribute('data-floor') || 0)
+            if (f > max) max = f
+          } else {
+            break // DOM 顺序≈视觉顺序，可提前结束；乱序也不会漏（max 取最大）
+          }
+        }
+        return max
       }
-      if (!badge) {
-        badge = document.createElement('span')
-        badge.className = 'lsb-new'
-        badge.textContent = 'NEW'
-      }
-      const anchor = newAnchor(li)
-      if (anchor) {
-        if (badge.previousElementSibling !== anchor) anchor.after(badge)
-      } else if (!li.contains(badge)) {
-        li.appendChild(badge)
-      }
-    }
+      const onScroll = throttle(() => {
+        const f = lastVisibleFloor()
+        if (f > curFloor) {
+          curFloor = f
+          dirty = true
+          flushLater()
+        }
+        if (valid && f > 0) scheduleHideUpTo(f)
+      }, 600)
 
-    function scheduleHideUpTo(readFloor) {
-      for (const li of document.querySelectorAll('li.post-entry.lsb-unread')) {
-        const f = Number(li.getAttribute('data-floor') || 0)
-        if (!(f > 0) || f > readFloor || hiding.has(li)) continue
-        hiding.add(li)
-        const t = setTimeout(() => {
-          hideTimers.delete(t)
-          setUnread(li, false)
-        }, NEW_HIDE_MS)
-        hideTimers.add(t)
+      const onVisibility = () => {
+        if (document.hidden) flush()
       }
-    }
 
-    function markUnread(fromFloor) {
-      let n = 0
-      for (const li of document.querySelectorAll(api.sel.topicPosts)) {
-        const f = Number(li.getAttribute('data-floor') || 0)
-        const unread = f > fromFloor
-        setUnread(li, unread)
-        if (unread) n++
-      }
-      return n
-    }
-    // 之后 AJAX 新增的楼层也按已读线标记
-    api.dom.each('li.post-entry', (li) => {
-      if (!valid) return
-      const f = Number(li.getAttribute('data-floor') || 0)
-      setUnread(li, f > saved.f)
-    })
-    let unreadCount = valid ? markUnread(saved.f) : 0
-    window.addEventListener('scroll', onScroll, { passive: true })
-    window.addEventListener('pagehide', flush)
-    document.addEventListener('visibilitychange', onVisibility)
-    api.onDispose(() => {
-      // 三个监听都要摘：旧实现只摘了 scroll，pagehide/visibilitychange 会在
-      // 插件停用后继续写存储。
-      window.removeEventListener('scroll', onScroll)
-      window.removeEventListener('pagehide', flush)
-      document.removeEventListener('visibilitychange', onVisibility)
-      for (const t of hideTimers) clearTimeout(t)
-      hideTimers.clear()
-      flush()
-    })
-    onScroll()
+      /* ── 未读标记 ── */
+      const saved = load()
+      const valid = saved && saved.f >= (cfg.minAsk || 3)
+      // Floor numbers span pages: reopening an earlier page must not erase a
+      // later checkpoint merely because the first few replies are visible.
+      curFloor = Number(saved?.f) || 0
+      saveRec({ f: saved?.f || 0, p: saved?.p || page, title: title || saved?.title || '' }, topicId)
 
-    /* ── 续读提示条 ── */
-    function floorEl(floor) {
-      const n = Number(floor)
-      if (!Number.isFinite(n) || n <= 0) {
-        return (
-          document.querySelector('li.post-entry:not([data-floor])')
-          || document.querySelector(`${api.sel.postEntry}:first-child`)
-          || document.querySelector(api.sel.postEntry)
+      api.ui.style(`
+        .lsb-new{display:inline-block;margin-left:6px;font-size:10px;font-weight:700;color:#fff;
+          background:var(--brand,#5eaaa0);border-radius:4px;padding:1px 5px;vertical-align:middle;line-height:1.3}
+        li.post-entry.lsb-flash{background:var(--warning-soft,#fff3d6)!important;transition:background 1.4s ease}
+        .lsb-resume-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:64px;z-index:99997;
+          display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:999px;
+          background:var(--panel,#fff);border:1px solid var(--line,#ddd);color:var(--text,#222);
+          font-size:13px;box-shadow:0 6px 20px var(--shadow-medium,rgba(0,0,0,.2))}
+        .lsb-resume-bar .lsb-btn{white-space:nowrap}
+      `)
+
+      function newAnchor(li) {
+        const uid = [...li.querySelectorAll('.post-user-group')].find(
+          (g) => g.classList.contains('user-uid-badge') || /^UID\b/i.test((g.textContent || '').trim()),
         )
+        if (uid) return uid
+        return li.querySelector('a.post-title.post-author')
       }
-      return document.querySelector(`${api.sel.postEntry}[data-floor="${n}"]`)
-    }
 
-    function jump(floor) {
-      const el = floorEl(floor)
-      if (!el) {
-        api.ui.toast(`#${floor} 楼不在当前页`, { type: 'error' })
-        return false
-      }
-      try {
-        el.scrollIntoView({ block: 'center', behavior: 'smooth' })
-      } catch {
-        /* jsdom 无此方法 */
-      }
-      el.classList.add('lsb-flash')
-      setTimeout(() => el.classList.remove('lsb-flash'), 1800)
-      return true
-    }
-
-    function dismissBar(bar) {
-      bar?.remove()
-    }
-
-    if (valid) {
-      const samePage = saved.p === pageOf()
-      if (samePage && cfg.autoJump) {
-        jump(saved.f)
-      } else {
-        const bar = document.createElement('div')
-        bar.className = 'lsb-resume-bar'
-        const info = document.createElement('span')
-        info.textContent =
-          `上次读到 #${saved.f}${unreadCount ? ` · 还有 ${unreadCount} 层没看` : ''}` +
-          (samePage ? '' : ` · 在第 ${saved.p} 页`)
-        const go = document.createElement('button')
-        go.className = 'lsb-btn is-primary'
-        go.textContent = samePage ? '接着看' : `去第 ${saved.p} 页`
-        go.onclick = () => {
-          if (samePage) jump(saved.f)
-          else window.location.assign(api.routes.topic(tidOf(), saved.p))
-          dismissBar(bar)
+      function setUnread(li, unread) {
+        li.classList.toggle('lsb-unread', unread)
+        let badge = li.querySelector('.lsb-new')
+        if (!unread) {
+          badge?.remove()
+          return
         }
-        const no = document.createElement('button')
-        no.className = 'lsb-btn'
-        no.textContent = '忽略'
-        no.onclick = () => dismissBar(bar)
-        bar.append(info, go, no)
-        document.body.appendChild(bar)
-        const autoHide = setTimeout(() => dismissBar(bar), 15000) // 15 秒不打扰自动消失
-        api.onDispose(() => {
-          clearTimeout(autoHide)
-          dismissBar(bar)
-        })
+        if (!badge) {
+          badge = document.createElement('span')
+          badge.className = 'lsb-new'
+          badge.textContent = 'NEW'
+        }
+        const anchor = newAnchor(li)
+        if (anchor) {
+          if (badge.previousElementSibling !== anchor) anchor.after(badge)
+        } else if (!li.contains(badge)) {
+          li.appendChild(badge)
+        }
+      }
+
+      function scheduleHideUpTo(readFloor) {
+        for (const li of document.querySelectorAll('li.post-entry.lsb-unread')) {
+          const f = Number(li.getAttribute('data-floor') || 0)
+          if (!(f > 0) || f > readFloor || hiding.has(li)) continue
+          hiding.add(li)
+          const t = setTimeout(() => {
+            hideTimers.delete(t)
+            setUnread(li, false)
+          }, NEW_HIDE_MS)
+          hideTimers.add(t)
+        }
+      }
+
+      function markUnread(fromFloor) {
+        let n = 0
+        for (const li of document.querySelectorAll(api.sel.topicPosts)) {
+          const f = Number(li.getAttribute('data-floor') || 0)
+          const unread = f > fromFloor
+          setUnread(li, unread)
+          if (unread) n++
+        }
+        return n
+      }
+      // 之后 AJAX 新增的楼层也按已读线标记
+      function markNode(li) {
+        if (!valid) return
+        const f = Number(li.getAttribute('data-floor') || 0)
+        setUnread(li, f > saved.f)
+      }
+      let unreadCount = valid ? markUnread(saved.f) : 0
+      window.addEventListener('scroll', onScroll, { passive: true })
+      window.addEventListener('pagehide', flush)
+      document.addEventListener('visibilitychange', onVisibility)
+      own(() => {
+        // 三个监听都要摘：旧实现只摘了 scroll，pagehide/visibilitychange 会在
+        // 插件停用后继续写存储。
+        window.removeEventListener('scroll', onScroll)
+        window.removeEventListener('pagehide', flush)
+        document.removeEventListener('visibilitychange', onVisibility)
+        for (const t of hideTimers) clearTimeout(t)
+        hideTimers.clear()
+        flush()
+        for (const li of document.querySelectorAll('li.post-entry.lsb-unread, li.post-entry.lsb-flash')) {
+          setUnread(li, false)
+          li.classList.remove('lsb-flash')
+        }
+      })
+      onScroll()
+
+      /* ── 续读提示条 ── */
+      function floorEl(floor) {
+        const n = Number(floor)
+        if (!Number.isFinite(n) || n <= 0) {
+          return (
+            document.querySelector('li.post-entry:not([data-floor])')
+            || document.querySelector(`${api.sel.postEntry}:first-child`)
+            || document.querySelector(api.sel.postEntry)
+          )
+        }
+        return document.querySelector(`${api.sel.postEntry}[data-floor="${n}"]`)
+      }
+
+      function jump(floor) {
+        const el = floorEl(floor)
+        if (!el) {
+          api.ui.toast(`#${floor} 楼不在当前页`, { type: 'error' })
+          return false
+        }
+        try {
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+        } catch {
+          /* jsdom 无此方法 */
+        }
+        el.classList.add('lsb-flash')
+        const timer = setTimeout(() => { hideTimers.delete(timer); el.classList.remove('lsb-flash') }, 1800)
+        hideTimers.add(timer)
+        return true
+      }
+
+      function dismissBar(bar) {
+        bar?.remove()
+      }
+
+      if (valid) {
+        const samePage = saved.p === pageOf()
+        if (samePage && cfg.autoJump) {
+          jump(saved.f)
+        } else {
+          const bar = document.createElement('div')
+          bar.className = 'lsb-resume-bar'
+          const info = document.createElement('span')
+          info.textContent =
+            `上次读到 #${saved.f}${unreadCount ? ` · 还有 ${unreadCount} 层没看` : ''}` +
+            (samePage ? '' : ` · 在第 ${saved.p} 页`)
+          const go = document.createElement('button')
+          go.className = 'lsb-btn is-primary'
+          go.textContent = samePage ? '接着看' : `去第 ${saved.p} 页`
+          go.onclick = () => {
+            if (samePage) jump(saved.f)
+            else window.location.assign(api.routes.topic(tidOf(), saved.p))
+            dismissBar(bar)
+          }
+          const no = document.createElement('button')
+          no.className = 'lsb-btn'
+          no.textContent = '忽略'
+          no.onclick = () => dismissBar(bar)
+          bar.append(info, go, no)
+          document.body.appendChild(bar)
+          const autoHide = setTimeout(() => dismissBar(bar), 15000) // 15 秒不打扰自动消失
+          own(() => {
+            clearTimeout(autoHide)
+            dismissBar(bar)
+          })
+        }
+      }
+
+      return {
+        load, jump, markNode, unreadCount,
+        saveFloor: (f) => {
+          if (!alive) return null
+          curFloor = f
+          return saveRec({ f, p: page, title }, topicId)
+        },
+        markCount: () => markUnread(curFloor || (saved ? saved.f : 0)),
+        dispose() {
+          alive = false
+          for (const fn of disposers.splice(0)) fn()
+        },
       }
     }
+
+    let session = null, sessionKey = ''
+    function syncTopic() {
+      const key = api.page.type === 'topic' ? `${api.page.id}:${api.page.page || 1}` : ''
+      if (key === sessionKey) return
+      session?.dispose()
+      session = null
+      sessionKey = key
+      if (key) session = startTopic()
+    }
+    syncTopic()
+    api.on('route:changed', syncTopic)
+    api.dom.each('li.post-entry', (li) => session?.markNode(li))
+    api.onDispose(() => { session?.dispose(); session = null })
 
     /* ── 面板：最近阅读 ── */
     function timeAgo(ts) {
@@ -4639,6 +4746,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         clear.onclick = async () => {
           if (await api.ui.confirm('确定清空所有阅读记录？不可恢复。')) {
             api.store.set('positions', {})
+            api.emit('changed', {})
             api.ui.toast('已清空', { type: 'success' })
             host.innerHTML = ''
             api.ui.showTab('resume-reading')
@@ -4653,14 +4761,11 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       load,
       saveRec,
       all: loadAll,
-      saveFloor: (f) => {
-        curFloor = f
-        return saveRec({ f, p: pageOf(), title: api.snapshot?.topic?.title || '' })
-      },
+      saveFloor: (f) => session?.saveFloor(f),
       barVisible: () => !!document.querySelector('.lsb-resume-bar'),
-      markCount: () => markUnread(curFloor || (saved ? saved.f : 0)),
-      unreadCount,
-      jump,
+      markCount: () => session?.markCount() || 0,
+      unreadCount: session?.unreadCount || 0,
+      jump: (floor) => session?.jump(floor) || false,
     }))
 
     return {}
@@ -6670,13 +6775,16 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
 })()
 
 ;
+// Generated by scripts/build-skin.mjs. Edit plugins/skin/ sources; run npm run build:skin.
+
+
 (function () {
   'use strict'
 
   const manifest = {
     id: 'skin',
     name: '界面精修',
-    version: '2.0.33',
+    version: '2.0.59',
     description: '旧三段式与 iOS 27 单画布双模式，保留正文排版与站内安全链',
     author: 'you',
     requires: { base: '^0.2.3' },
@@ -6718,17 +6826,10 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     },
   }
 
-  /* M17 单一画布状态契约：保持纯函数，DOM 与存储适配留在 setup。 */
   const CANVAS_STATE_VERSION = 2
   const CANVAS_STATE_KEY = 'canvas-state:v2'
   const CANVAS_WIDTH_CLASSES = ['wide', 'mid', 'narrow']
-  const CLOUDFLARE_CHALLENGE_ATTR = 'data-lsb-cloudflare-challenge'
-  const SPA_ROUTE_PENDING_CLASS = 'lsb-canvas-route-pending'
-  const SPA_ROUTE_COMMITTED_EVENT = 'lsb:route-committed'
-  const CLOUDFLARE_CHALLENGE_MARKERS = '#challenge-stage, #challenge-form, #challenge-running, #cf-challenge-running, .cf-browser-verification, [data-cf-challenge]'
-  const CLOUDFLARE_CHALLENGE_TITLE_COPY = /(?:just a moment|attention required|checking your browser|checking if (?:the )?site connection is secure)/i
-  const CLOUDFLARE_CHALLENGE_BODY_COPY = /(?:checking your browser|verify (?:that )?you are human|enable javascript and cookies to continue|performing (?:a )?security (?:check|verification)|complete (?:the )?security check|请完成.{0,12}验证|请进行.{0,12}验证|正在验证|人机验证)/i
-  const CLOUDFLARE_CHALLENGE_COPY_SELECTOR = 'h1, h2, h3, p, [role="heading"], #challenge-error-text, #challenge-body-text, [data-cf-challenge-message]'
+
   const CANVAS_DEFAULT_APPEARANCE = Object.freeze({
     background: 'static', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '',
     opacity: 0.72, blur: 18, fontFamily: '', fontUrl: '', fontLocalKey: '',
@@ -6738,33 +6839,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
   const CANVAS_DEFAULT_SURFACES = Object.freeze({
     siteCard: { width: 360, height: 560 }, evidenceCard: { width: 420, height: 320 },
   })
-  const CANVAS_AI_MARKUP = { capsule: '', tool: '', query: '', card: '' }
-
-  function isCloudflareChallengeDocument(doc) {
-    if (!doc?.querySelector) return false
-    if (doc.documentElement?.getAttribute(CLOUDFLARE_CHALLENGE_ATTR) === 'true') return true
-    if (!doc.querySelector(CLOUDFLARE_CHALLENGE_MARKERS)) return false
-    if (CLOUDFLARE_CHALLENGE_TITLE_COPY.test(String(doc.title || ''))) return true
-    const view = doc.defaultView
-    for (const node of doc.querySelectorAll(CLOUDFLARE_CHALLENGE_COPY_SELECTOR)) {
-      if (!CLOUDFLARE_CHALLENGE_BODY_COPY.test(node.textContent || '')) continue
-      let visible = true
-      for (let current = node; current?.nodeType === 1; current = current.parentElement) {
-        if (current.hidden || current.getAttribute('aria-hidden') === 'true') {
-          visible = false
-          break
-        }
-        const style = view?.getComputedStyle?.(current)
-        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0')) {
-          visible = false
-          break
-        }
-        if (current === doc.body || !current.parentElement) break
-      }
-      if (visible) return true
-    }
-    return false
-  }
 
   function canvasFinite(value, fallback = 0) {
     const n = Number(value)
@@ -6883,154 +6957,1869 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
     return bucket === 'mid' ? 'sheet' : 'fullscreen'
   }
+  const FONT_SANS =
+    "system-ui,-apple-system,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans SC',sans-serif"
+  const FONT_MONO =
+    "ui-monospace,SFMono-Regular,'Cascadia Code',Consolas,'JetBrains Mono','Noto Sans Mono CJK SC',monospace"
 
-  // ═══════════════════════════════════════════════════════════
-  // 章节索引（本文件 8205 行，全仓最大，改动前先定位章节）：
-  //   A: 画布状态 — defaultCanvasState / mergeCanvasState / clampSurfaceRect / migrateLegacySkinState / read/saveCanvasState
-  //   B: 工具与壳样式 — shellCss / canvasCss / css / applyShellTokens / 媒体/字体/视频
-  //   C: 原生结构接管 — restyle / markNative / nativeHeaders/Sidebars / asideWide / uiMode resize
-  //   D: 氢壳视图与窗口 — aside/shellAside* / window/shellWindow* / canvas 状态持久化
-  //   E: 插件特性与工具菜单 — collectBoards / renderPluginFeatureEntries / collectTools
-  //   F: 导航与搜索 — pagePath / locationText / shellSearchHost / adoptSearch
-  // 拆分建议：按 A–F 提 plugins/skin/*.js 子模块，由 build-suite.mjs 聚合（复用 skin 的 @LSB_DEV_AI_START 机制）。
-  // ═══════════════════════════════════════════════════════════
-  function setup(api) {
-    let cfg = api.config()
-
-    // ── A: 配置与画布状态（effectiveUiMode/canvasViewport/readSaveCanvasState） ──
-    function effectiveUiMode() {
-      return cfg?.uiMode === 'ios27' ? 'ios27' : 'legacy'
-    }
-
-    const SEARCH_FORM_SELECTOR = 'form.search-form, form.meilisearch-search-top-form, form[role="search"][aria-label="站内搜索"]'
-    const TOP_SEARCH_FORM_SELECTOR = 'body > .top form.search-form, body > .top form.meilisearch-search-top-form, body > .top form[role="search"][aria-label="站内搜索"]'
-    const topicSpaMigrationKey = 'topicSpaNewWorldDefaultMigrationV1'
-    try {
-      if (api.store.get(topicSpaMigrationKey) !== true) {
-        api.saveConfig({ topicSpa: true })
-        cfg = { ...cfg, topicSpa: true }
-        api.store.set(topicSpaMigrationKey, true)
+  // · B1 shellCss: 旧三段式壳（固定顶栏/左轨/右栏变量与栅格） ──
+  function shellCss() {
+    return `
+      html.lsb-skin-shell-on{
+        --lsb-shell-header:48px;
+        --lsb-shell-rail:240px;
+        --lsb-shell-gutter:12px;
+        --lsb-shell-panel-pad:24px;
+        --lsb-shell-main-inset:calc(var(--lsb-shell-gutter) + var(--lsb-shell-panel-pad));
+        --lsb-shell-aside:280px;
+        --lsb-shell-timeline:72px;
+        --lsb-radius:12px;
+        --lsb-radius-sm:8px;
+        --lsb-radius-lg:16px;
+        background:var(--bg,#f4f5f7);
+        color:var(--text,#222);
       }
-    } catch {
-      // Keep the resolved config when migration storage is unavailable.
-    }
-    let canvasState = null
-    let canvasEffective = null
-    let canvasSiteKey = siteKeyFromLocation(location)
-    let canvasWidthClass = widthClass(window.innerWidth || document.documentElement?.clientWidth || 0)
-    let canvasStateMigrated = false
+      html.lsb-skin-shell-topic{--lsb-shell-main-inset:var(--lsb-shell-gutter)}
+      html.lsb-skin-shell-user{--lsb-shell-main-inset:calc(var(--lsb-shell-gutter) + 12px)}
+      html[data-themes-color-mode="dark"],html[data-dark-mode-theme="dark"]{color-scheme:dark}
+      html[data-themes-color-mode="light"],html[data-dark-mode-theme="light"]{color-scheme:light}
+      #lsb-shell{
+        display:none;position:fixed;inset:0;z-index:7999;pointer-events:none;
+      }
+      #lsb-shell > *{pointer-events:auto}
+      #lsb-shell-header{
+        position:fixed;top:0;left:0;right:0;height:var(--lsb-shell-header);z-index:8002;
+        display:grid;align-items:center;
+        grid-template-columns:var(--lsb-shell-rail) minmax(160px,360px) minmax(0,1fr) auto auto;
+        column-gap:0;padding:0 16px 0 0;
+        background:color-mix(in srgb,var(--panel,#fff) 78%,transparent);
+        backdrop-filter:blur(16px) saturate(140%);
+        -webkit-backdrop-filter:blur(16px) saturate(140%);
+        box-shadow:0 1px 0 color-mix(in srgb,var(--line,#ddd) 55%,transparent);
+        font-family:${FONT_SANS};
+      }
+      #lsb-shell-rail{
+        position:fixed;top:0;left:0;bottom:0;width:var(--lsb-shell-rail);z-index:8001;
+        display:flex;flex-direction:column;
+        background:var(--bg,#f4f5f7);color:var(--text,#222);
+        border-right:1px solid var(--line-soft,#e8e8e8);
+        font-family:${FONT_SANS};
+      }
+      .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:hidden;padding:56px 12px 12px;display:flex;flex-direction:column}
+      .lsb-shell-rail-scroll [data-lsb-shell-section="home"]{flex:0 0 auto}
+      .lsb-shell-rail-scroll [data-lsb-shell-section="boards"]{flex:1 1 auto;min-height:0;overflow:auto}
+      .lsb-shell-rail-scroll [data-lsb-shell-section="tools"]{flex:0 0 auto}
+      .lsb-shell-me{margin:0 0 14px}
+      .lsb-shell-me .sidebar-card.user-card{
+        margin:0;padding:10px 10px;border:0;box-shadow:none;
+        border-radius:var(--lsb-radius);
+        background:color-mix(in srgb,var(--panel,#fff) 72%,transparent);
+      }
+      .lsb-shell-me .user-header-info{gap:8px}
+      .lsb-shell-me .user-avatar-big img,.lsb-shell-me .avatar-img{
+        width:40px!important;height:40px!important;
+      }
+      .lsb-shell-me .user-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .lsb-shell-me .user-rank{font-size:11px;color:var(--text-muted,#888)}
+      .lsb-shell-rail-foot{padding:10px 12px 14px;border-top:1px solid var(--line-soft,#e8e8e8)}
+      .lsb-shell-brand{
+        display:flex;align-items:center;gap:8px;margin:0;width:100%;height:100%;
+        padding:0 14px;font-weight:700;font-size:14px;letter-spacing:-.02em;
+        color:var(--text,#222);text-decoration:none;
+        min-width:0;white-space:nowrap;overflow:hidden;
+      }
+      .lsb-shell-logo{
+        flex:0 0 22px;width:22px;height:22px;border-radius:6px;display:block;
+      }
+      .lsb-shell-search-host{
+        min-width:0;max-width:360px;width:100%;box-sizing:border-box;
+        padding-left:var(--lsb-shell-main-inset);
+      }
+      .lsb-shell-search-host .search-form,.lsb-shell-search-host .lsb-shell-search{
+        display:flex;align-items:center;gap:8px;margin:0;padding:3px 6px 3px 10px;
+        width:100%;max-width:none;justify-self:stretch;
+        grid-column:auto;grid-row:auto;
+        border-radius:var(--lsb-radius);overflow:hidden;
+        background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
+      }
+      .lsb-shell-search-host .search-page-link{
+        display:flex;align-items:center;margin:0;padding:0;width:100%;max-width:none;height:30px;
+        grid-area:auto;grid-column:auto;grid-row:auto;justify-self:stretch;
+        border:1px solid var(--line,#ddd);border-radius:var(--lsb-radius);
+        background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
+        color:var(--text-subtle,#888);text-decoration:none;overflow:hidden;
+      }
+      .lsb-shell-search-host .search-page-fake-input{
+        flex:1;min-width:0;padding:0 10px;font-size:13px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+      }
+      .lsb-shell-search-host .search-page-fake-icon{
+        display:inline-flex;align-items:center;justify-content:center;
+        flex:0 0 30px;width:30px;height:100%;
+      }
+      .lsb-shell-search-host select{
+        border:0;border-radius:var(--lsb-radius-sm);background:transparent;
+        color:var(--text,#222);font-size:12px;height:26px;
+      }
+      .lsb-shell-search-host input[type=search],.lsb-shell-search-host input[name=q]{
+        flex:1;min-width:0;height:26px;border:0;border-radius:var(--lsb-radius-sm);
+        background:transparent;color:var(--text,#222);padding:0 8px;font-size:13px;
+      }
+      .lsb-shell-search-host button{
+        border:0;border-radius:var(--lsb-radius-sm);height:26px;padding:0 10px;
+        background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-size:12px;cursor:pointer;
+      }
+      .lsb-shell-extras{
+        display:flex;align-items:center;gap:14px;min-width:0;overflow:hidden;
+        margin-left:16px;
+      }
+      .lsb-shell-extras a{
+        flex:0 0 auto;color:var(--text,#222);text-decoration:none;font-size:13px;font-weight:500;
+        white-space:nowrap;
+      }
+      .lsb-shell-where{
+        margin-left:16px;font-size:13px;font-weight:600;letter-spacing:-.01em;
+        color:var(--text,#222);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:22vw;
+      }
+      .lsb-shell-theme{margin-left:8px;display:flex;align-items:center;gap:8px;overflow:visible;position:relative}
+      .lsb-shell-theme [data-themes-mode-toggle]{
+        border:0;background:transparent;color:var(--text,#222);cursor:pointer;
+        width:32px;height:32px;padding:4px;border-radius:var(--lsb-radius-sm);
+      }
+      .lsb-shell-theme [data-themes-mode-toggle] svg{display:block;width:18px;height:18px}
+      .lsb-shell-theme .dark-mode-control{position:relative;flex:0 0 auto;grid-area:auto;justify-self:auto}
+      .lsb-shell-theme .dark-mode-menu{z-index:8003}
+      html.lsb-skin-shell-on #color-scheme-modal{z-index:8020!important}
+      html.lsb-skin-shell-on .lsb-shell-theme-modal{z-index:8020!important}
+      .lsb-shell-theme .color-scheme-top-link{
+        display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;
+        grid-area:auto;justify-self:auto;flex:0 0 30px;
+        color:var(--text-muted,#888);text-decoration:none;
+      }
+      .lsb-shell-theme .color-scheme-top-link svg{width:17px;height:17px;display:block}
+      #lsb-shell-aside{
+        display:none;flex-direction:column;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
+        width:var(--lsb-shell-aside);z-index:7999;overflow:hidden;padding:0;
+        background:var(--bg,#f4f5f7);color:var(--text,#222);
+        border-left:1px solid var(--line-soft,#e8e8e8);
+        font-family:${FONT_SANS};
+      }
+      #lsb-shell-aside-tabs{
+        display:flex;align-items:center;gap:4px;min-height:40px;padding:6px 10px;
+        border-bottom:1px solid var(--line-soft,#e8e8e8);background:color-mix(in srgb,var(--panel,#fff) 72%,transparent);
+      }
+      #lsb-shell-aside-tabs[hidden]{display:none!important}
+      #lsb-shell-aside-tabs [data-lsb-shell-aside-tab]{
+        flex:1 1 0;min-width:0;height:28px;padding:0 8px;border:0;border-radius:var(--lsb-radius-sm);
+        background:transparent;color:var(--text-muted,#888);font:inherit;font-size:12px;cursor:pointer;
+      }
+      #lsb-shell-aside-tabs [data-lsb-shell-aside-tab][aria-selected="true"]{
+        background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600;
+      }
+      .lsb-shell-aside-panes{flex:1 1 auto;height:auto;min-height:0}
+      [data-lsb-shell-aside-pane]{height:100%;min-height:0;box-sizing:border-box;overflow:auto;padding:12px 10px 16px}
+      [data-lsb-shell-aside-pane][hidden]{display:none!important}
+      #lsb-shell-aside .sidebar-card{
+        margin:0 0 10px;padding:10px 10px 8px;border-radius:var(--lsb-radius);
+        background:color-mix(in srgb,var(--panel,#fff) 78%,transparent);
+      }
+      .lsb-shell-nav-section{margin:0 0 16px}
+      .lsb-shell-nav-section h2{
+        margin:0 8px 6px;font-size:11px;font-weight:600;color:var(--text-muted,#888);
+        letter-spacing:.04em;
+      }
+      .lsb-shell-nav .lsb-shell-link{
+        display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:var(--lsb-radius-sm);
+        color:var(--text,#222);text-decoration:none;font-size:13px;font-weight:500;
+        width:100%;border:0;background:transparent;cursor:pointer;text-align:left;font-family:inherit;box-sizing:border-box;
+      }
+      .lsb-shell-nav .lsb-shell-link-label{
+        min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+      }
+      .lsb-shell-nav .lsb-shell-count{
+        flex:0 0 auto;font-size:11px;font-weight:500;color:var(--text-muted,#888);
+        font-variant-numeric:tabular-nums;
+      }
+      .lsb-shell-nav a.is-active{
+        background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600;
+      }
+      .lsb-shell-settings{
+        width:100%;height:32px;border:0;border-radius:var(--lsb-radius-sm);cursor:pointer;
+        background:transparent;color:var(--text,#222);font-size:13px;font-weight:600;
+      }
+      .lsb-shell-settings:active,.lsb-shell-nav .lsb-shell-link:active{transform:scale(.98)}
+      #lsb-shell-timeline{
+        position:fixed;top:calc(var(--lsb-shell-header) + 20px);right:14px;bottom:28px;
+        width:var(--lsb-shell-timeline);z-index:7998;
+        display:flex;flex-direction:column;align-items:center;gap:8px;
+        font-family:${FONT_SANS};font-size:11px;font-weight:600;color:var(--text-muted,#888);
+      }
+      #lsb-shell-timeline[hidden]{display:none!important}
+      html.lsb-skin-shell-on .image-lightbox-image{max-width:100%;max-height:100%}
+      .lsb-shell-edge{
+        border:0;background:transparent;color:var(--text,#222);cursor:pointer;
+        font:inherit;font-weight:600;padding:4px;
+      }
+      .lsb-shell-edge:active{transform:scale(.97)}
+      .lsb-shell-now{text-align:center;line-height:1.25}
+      .lsb-shell-now strong{display:block;color:var(--text,#222);font-size:12px}
+      .lsb-shell-track{
+        flex:1;width:3px;padding:0;border:0;border-radius:99px;cursor:pointer;
+        background:var(--line-soft,#e6e6e6);position:relative;min-height:64px;
+      }
+      .lsb-shell-thumb{
+        position:absolute;left:50%;top:var(--lsb-timeline-progress,0%);
+        width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;
+        background:var(--brand,#5eaaa0);
+      }
+      html.lsb-skin-shell-on li.post-item{padding-block:8px!important;border-radius:var(--lsb-radius)}
+      html.lsb-skin-shell-on li.post-item .post-title{
+        font-weight:600;font-size:14px;letter-spacing:-.01em;line-height:1.3;
+      }
+      html.lsb-skin-shell-on li.post-item .post-meta{
+        font-size:12px;font-weight:400;color:var(--text-muted,#888);
+      }
+      html.lsb-skin-shell-on li.post-item .post-avatar img{
+        width:32px!important;height:32px!important;border-radius:50%;
+      }
+      html.lsb-skin-shell-on li.post-item:not(.post-entry) .meta-icon{display:none}
+      html.lsb-skin-shell-on main.wrap{
+        max-width:none!important;margin-left:0!important;margin-right:0!important;width:auto!important;
+        padding-left:var(--lsb-shell-gutter)!important;
+      }
+      html.lsb-skin-shell-on .forum-layout.forum-layout-has-sidebar{gap:12px!important}
+      html.lsb-skin-shell-on main.wrap,
+      html.lsb-skin-shell-on .forum-main,
+      html.lsb-skin-shell-on .home-shell{
+        border-radius:var(--lsb-radius-lg);
+      }
+      html.lsb-skin-shell-on ul.post-list{
+        border-radius:var(--lsb-radius-lg);
+      }
+      /* legacy 首页宽屏把纵向滚动交给中间面板，页面根和右栏保持固定。首页由 JS 明确标记，不能用 .home-shell 判断：首页和帖子页共用这个容器。 */
+      @media(min-width:900px){
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode){
+          box-sizing:border-box!important;height:100vh!important;max-height:100vh!important;overflow:hidden!important;
+        }
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body{
+          box-sizing:border-box!important;display:flex!important;flex-direction:column!important;
+          height:calc(100vh - var(--lsb-shell-header))!important;
+          max-height:calc(100vh - var(--lsb-shell-header))!important;
+          min-height:0!important;margin:0!important;overflow:hidden!important;
+        }
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap{
+          box-sizing:border-box!important;display:flex!important;flex:1 1 auto!important;flex-direction:column!important;
+          width:auto!important;max-width:none!important;margin-left:0!important;margin-right:0!important;padding-right:0!important;
+          height:100%!important;max-height:100%!important;
+          min-width:0!important;min-height:0!important;overflow:hidden!important;
+        }
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell,
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell > .forum-layout.forum-layout-has-sidebar,
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell > .forum-layout.forum-layout-has-sidebar > .forum-main{
+          box-sizing:border-box!important;display:flex!important;flex:1 1 auto!important;flex-direction:column!important;
+          width:100%!important;max-width:none!important;min-width:0!important;min-height:0!important;
+        }
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell{
+          padding-right:0!important;
+        }
+        html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell > .forum-layout.forum-layout-has-sidebar > .forum-main > .main-panel{
+          box-sizing:border-box!important;display:flex!important;flex:1 1 auto!important;flex-direction:column!important;
+          width:100%!important;max-width:none!important;min-width:0!important;min-height:0!important;
+          overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior:contain;scrollbar-gutter:stable;
+        }
+      }
+      html.lsb-skin-shell-on .post-content img,
+      html.lsb-skin-shell-on .post-content video{
+        border-radius:var(--lsb-radius-sm);
+      }
+      html.lsb-skin-shell-on .pagination a,
+      html.lsb-skin-shell-on .pagination span,
+      html.lsb-skin-shell-on .tab-link,
+      html.lsb-skin-shell-on .sort-tabs a{
+        border-radius:var(--lsb-radius-sm)!important;
+      }
+      html.lsb-skin-shell-on .pagination-bar.sb-infinite-scroll-pagination-hidden{
+        display:none!important;
+      }
+      html.lsb-skin-shell-on form.ajax-reply-form,
+      html.lsb-skin-shell-on .reply-box,
+      html.lsb-skin-shell-on textarea{
+        border-radius:var(--lsb-radius)!important;
+      }
+      @media(min-width:900px){
+        html.lsb-skin-shell-on #lsb-shell{display:block}
+        html.lsb-skin-shell-on{padding-top:var(--lsb-shell-header);padding-left:var(--lsb-shell-rail)}
+        html.lsb-skin-shell-topic{padding-right:var(--lsb-shell-timeline)}
+        html.lsb-skin-shell-on .lsb-native-header-hidden,
+        html.lsb-skin-shell-on .forum-more-region{display:none!important}
+        html.lsb-skin-shell-on .lsb-native-sidebar-hidden,
+        html.lsb-skin-shell-on .lsb-native-left-hidden{display:none!important}
+        html.lsb-skin-shell-on .forum-layout.forum-layout-has-sidebar{
+          display:block!important;grid-template-columns:1fr!important;
+        }
+        html.lsb-skin-shell-on .lsb-launcher{display:none!important}
+        html.lsb-skin-shell-user{padding-right:var(--lsb-shell-aside)}
+        html.lsb-skin-shell-user #lsb-shell-aside{display:block}
+        html.lsb-skin-shell-on .image-lightbox-overlay{
+          top:var(--lsb-shell-header);left:var(--lsb-shell-rail);right:0;bottom:0;
+        }
+        html.lsb-skin-shell-topic .image-lightbox-overlay{right:var(--lsb-shell-timeline)}
+        html.lsb-skin-shell-user .image-lightbox-overlay{right:var(--lsb-shell-aside)}
+      }
+      @media(min-width:1100px){
+        html.lsb-skin-shell-on{padding-right:var(--lsb-shell-aside)}
+        html.lsb-skin-shell-topic{padding-right:var(--lsb-shell-aside)}
+        html.lsb-skin-shell-on #lsb-shell-aside{display:flex}
+        html.lsb-skin-shell-on #lsb-shell-timeline{display:none!important}
+        html.lsb-skin-shell-on .image-lightbox-overlay{right:var(--lsb-shell-aside)}
+      }
+      @media(hover:hover) and (pointer:fine){
+        .lsb-shell-nav .lsb-shell-link:hover{background:color-mix(in srgb,var(--bg,#fff) 40%,transparent)}
+        .lsb-shell-extras a:hover{color:var(--brand,#5eaaa0)}
+        .lsb-shell-settings:hover{background:var(--brand-soft,#e8f4f2)}
+      }
+      @media(prefers-reduced-transparency:reduce){
+        #lsb-shell-header{background:var(--panel,#fff);backdrop-filter:none;-webkit-backdrop-filter:none}
+      }
+      @media(prefers-reduced-motion:reduce){
+        html.lsb-skin-shell-on #lsb-shell *{scroll-behavior:auto!important;transform:none!important}
+        #lsb-shell-progress,
+        #lsb-shell-progress [data-lsb-shell-progress-bar]{transition:none!important}
+      }
+      #lsb-shell-progress{
+        --lsb-shell-progress:0;
+        position:fixed;top:0;left:0;right:0;z-index:8002;height:3px;
+        pointer-events:none;opacity:0;background:transparent;
+        transition:opacity 120ms cubic-bezier(.23,1,.32,1);
+      }
+      #lsb-shell-progress[data-phase="loading"],
+      #lsb-shell-progress[data-phase="done"]{opacity:1}
+      #lsb-shell-progress [data-lsb-shell-progress-bar]{
+        display:block;width:100%;height:100%;
+        transform:scaleX(var(--lsb-shell-progress));transform-origin:left center;
+        background:var(--brand,#5eaaa0);
+        transition:transform 200ms cubic-bezier(.23,1,.32,1);
+      }
+      [data-lsb-route-content-enter]{animation:lsb-route-content-in 180ms ease both}
+      @keyframes lsb-route-content-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+      #lsb-route-announcer{
+        position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+        clip-path:inset(50%);white-space:nowrap;border:0;
+      }
+      @media(prefers-reduced-motion:reduce){[data-lsb-route-content-enter]{animation:none!important;transform:none!important}}
+      html.lsb-canvas-reduced-motion [data-lsb-route-content-enter]{animation:none!important;transform:none!important}
+      /* H2 窗口工作区：默认令牌仍继承站点主题，几何由 skin 的 layout controller 写入。 */
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-workspace{
+        position:fixed;top:var(--lsb-shell-header);left:0;right:0;bottom:0;
+        overflow:hidden;pointer-events:none;
+      }
+      /* 窗口模式覆盖 700–899px 的媒体查询空档；窗口已挂载就必须可见。 */
+      html.lsb-skin-shell-windowed #lsb-shell[data-lsb-shell-mode="windowed"]{display:block}
+      html.lsb-skin-shell-windowed .lsb-native-header-hidden,
+      html.lsb-skin-shell-windowed .lsb-native-sidebar-hidden,
+      html.lsb-skin-shell-windowed .lsb-native-left-hidden,
+      html.lsb-skin-shell-windowed .forum-more-region{display:none!important}
+      #lsb-shell-workspace > [data-lsb-shell-video]{
+        position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+        z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
+      }
+      html.lsb-skin-video-on #lsb-shell-workspace > [data-lsb-shell-video]{opacity:1}
+      #lsb-shell-workspace > [data-lsb-shell-image]{
+        position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+        z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
+      }
+      html.lsb-skin-image-on #lsb-shell-workspace > [data-lsb-shell-image]{opacity:1}
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window{
+        position:absolute;display:flex;flex-direction:column;min-width:0;min-height:0;
+        box-sizing:border-box;overflow:hidden;pointer-events:auto;
+        border:1px solid var(--line-soft,#e8e8e8);border-radius:var(--lsb-radius-lg);
+        background:var(--panel,#fff);color:var(--text,#222);
+        box-shadow:0 12px 30px color-mix(in srgb,var(--text,#222) 12%,transparent);
+        z-index:1;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-interacting="drag"]{
+        will-change:transform;contain:layout paint;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-interacting="resize"]{
+        will-change:left,top,width,height;contain:layout paint;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[hidden]{display:none!important}
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-external="true"][data-lsb-shell-open="false"]{display:none!important}
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-bar{
+        display:flex;align-items:center;gap:6px;min-height:32px;flex:0 0 32px;
+        padding:0 8px;border-bottom:1px solid var(--line-soft,#e8e8e8);
+        background:color-mix(in srgb,var(--panel,#fff) 82%,transparent);
+        color:var(--text,#222);user-select:none;touch-action:none;position:relative;z-index:5;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-title{
+        min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+        font:600 12px/1 ${FONT_SANS};
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-drag{
+        flex:1;min-width:16px;height:100%;cursor:grab;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-drag:active{cursor:grabbing}
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-action{
+        flex:0 0 28px;width:28px;height:28px;padding:0;border:0;border-radius:6px;
+        background:transparent;color:var(--text-muted,#888);cursor:pointer;font:inherit;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-action:hover,
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-action:focus-visible{
+        background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);outline:none;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window:focus-visible{
+        outline:2px solid var(--brand,#5eaaa0);outline-offset:2px;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-body{
+        flex:1 1 auto;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail > .lsb-shell-window-body,
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-aside > .lsb-shell-window-body{
+        display:flex;flex-direction:column;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail,
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-aside,
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-window-content{
+        top:0;right:auto;bottom:auto;left:auto;width:auto;height:auto;
+        position:absolute;z-index:auto;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail{padding:0;border-right:0}
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail .lsb-shell-rail-scroll{padding-top:12px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-aside{display:flex;padding:0;border-left:0}
+      #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-window-content main.wrap{
+        width:auto!important;max-width:none!important;margin:0!important;padding:12px!important;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-content-body{
+        flex:1 1 auto;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge]{
+        position:absolute;z-index:4;touch-action:none;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"],
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{
+        top:12px;bottom:12px;width:10px;cursor:ew-resize;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"]{right:-5px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{left:-5px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"],
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{
+        left:12px;right:12px;height:10px;cursor:ns-resize;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"]{bottom:-5px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{top:-5px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"],
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{
+        width:10px;top:12px;bottom:12px;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"]{right:-5px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{left:-5px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"],
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{
+        height:10px;left:12px;right:12px;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"]{bottom:-5px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{top:32px}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="ne"],
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="nw"],
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="se"],
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="sw"]{
+        width:14px;height:14px;
+      }
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="ne"]{right:-5px;top:32px;cursor:nesw-resize}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="nw"]{left:-5px;top:32px;cursor:nwse-resize}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="se"]{right:-5px;bottom:-5px;cursor:nwse-resize}
+      #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="sw"]{left:-5px;bottom:-5px;cursor:nesw-resize}
+      #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher{display:none}
+      @media(max-width:699px){
+        html.lsb-skin-shell-on{padding:0!important;overflow:hidden}
+        html.lsb-skin-shell-on body{overflow:hidden}
+        html.lsb-skin-shell-on #lsb-shell{display:block}
+        html.lsb-skin-shell-on .lsb-native-header-hidden,
+        html.lsb-skin-shell-on .forum-more-region{display:none!important}
+        html.lsb-skin-shell-on .lsb-native-sidebar-hidden,
+        html.lsb-skin-shell-on .lsb-native-left-hidden{display:none!important}
+        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-workspace{top:var(--lsb-shell-header)}
+        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher{
+          display:flex;position:fixed;top:var(--lsb-shell-header);left:0;right:0;height:36px;
+          z-index:8010;gap:4px;padding:4px;background:var(--panel,#fff);overflow:auto;
+        }
+        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher [role="tab"]{
+          flex:1 0 auto;border:0;border-radius:6px;background:transparent;color:var(--text-muted,#888);
+          padding:0 10px;font:600 12px ${FONT_SANS};
+        }
+        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher [aria-selected="true"]{
+          background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);
+        }
+        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-workspace{top:calc(var(--lsb-shell-header) + 44px)}
+        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window:not([data-lsb-shell-active="true"]){display:none}
+      }
+      @media(prefers-reduced-motion:reduce){
+        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window,
+        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window *{transition:none!important;scroll-behavior:auto!important}
+      }
+      html.lsb-skin-shell-on{
+        font-size:var(--lsb-shell-font-size,14px);
+      }
+      html.lsb-skin-shell-on #lsb-shell{
+        font-family:var(--lsb-shell-font-family,${FONT_SANS});
+      }
+      html.lsb-skin-shell-on #lsb-shell-window-content,
+      html.lsb-skin-shell-on #lsb-shell-rail,
+      html.lsb-skin-shell-on #lsb-shell-aside{
+        color:var(--lsb-shell-text,var(--text,#222));
+      }
+      html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window{
+        background:var(--lsb-shell-panel,var(--panel,#fff));
+      }
+      html.lsb-skin-shell-on .lsb-shell-brand,
+      html.lsb-skin-shell-on .lsb-shell-window-action{color:var(--lsb-shell-accent,var(--brand,#5eaaa0))}
+      html.lsb-skin-glass-on #lsb-shell-header,
+      html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window,
+      html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-bar{
+        background:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) var(--lsb-shell-glass-opacity,.72),transparent);
+        backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
+        -webkit-backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
+      }
+      html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"],
+      html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"] .lsb-shell-window-bar{
+        background:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) var(--lsb-shell-glass-opacity,.72),transparent);
+        backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
+        -webkit-backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
+      }
+      @media(prefers-reduced-transparency:reduce){
+        html.lsb-skin-glass-on #lsb-shell-header,
+        html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window,
+        html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-bar{
+          background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;
+        }
+        html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"],
+        html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"] .lsb-shell-window-bar{
+          background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;
+        }
+      }
+    `
+  }
 
-    function canvasViewport() {
+  // · B2 canvasCss: iOS27 单画布（状态/浮层/响应式） ──
+  function canvasCss() {
+    return `
+      html.lsb-skin-shell-on.lsb-canvas-mode{
+        --lsb-canvas-safe-top:env(safe-area-inset-top,0px);
+        --lsb-canvas-chrome-height:56px;
+        --lsb-canvas-safe-bottom:env(safe-area-inset-bottom,0px);
+        --lsb-canvas-surface-bg:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) calc(var(--lsb-shell-glass-opacity,.72) * 100%),transparent);
+        --lsb-glass-fill:var(--lsb-canvas-surface-bg);
+        --lsb-glass-border:color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 18%,transparent);
+        --lsb-glass-highlight:inset 0 1px 0 rgb(255 255 255 / 42%);
+        --lsb-glass-shadow:0 14px 38px color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 18%,transparent);
+        --lsb-glass-blur:var(--lsb-shell-glass-blur,18px);
+        --lsb-glass-saturation:140%;
+        --lsb-canvas-content-bg:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) 94%,var(--bg,#f4f5f7));
+        --lsb-canvas-media-scrim:rgb(8 12 22 / 18%);
+        --lsb-canvas-radius:var(--lsb-shell-radius,16px);
+        min-height:100%;padding:0!important;background:var(--bg,#f4f5f7);color:var(--lsb-shell-text,var(--text,#222));
+        font-size:var(--lsb-shell-font-size,14px);
+      }
+      /* 让资料表面相对页面滚动而非被 body 的隐式滚动容器截断，sticky 才能跟随顶部状态条。 */
+      html.lsb-skin-shell-on.lsb-canvas-mode body{min-height:100%;overflow-x:clip!important;overflow-y:visible!important;padding:0!important;isolation:isolate}
+      html.lsb-skin-shell-on.lsb-canvas-mode #color-scheme-modal{z-index:8020!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-shell-theme-modal{z-index:8020!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:var(--lsb-canvas-media-scrim);opacity:0;transition:opacity 180ms ease}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-video-on body::before,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-image-on body::before{opacity:1}
+      #lsb-shell-progress{
+        --lsb-shell-progress:0;
+        position:fixed;top:0;left:0;right:0;z-index:8002;height:3px;
+        pointer-events:none;opacity:0;background:transparent;
+        transition:opacity 120ms cubic-bezier(.23,1,.32,1)
+      }
+      #lsb-shell-progress[data-phase="loading"],#lsb-shell-progress[data-phase="done"]{opacity:1}
+      #lsb-shell-progress [data-lsb-shell-progress-bar]{display:block;width:100%;height:100%;transform:scaleX(var(--lsb-shell-progress));transform-origin:left center;background:var(--brand,#5eaaa0);transition:transform 200ms cubic-bezier(.23,1,.32,1)}
+      [data-lsb-route-content-enter]{animation:lsb-route-content-in 180ms ease both}
+      @keyframes lsb-route-content-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+      #lsb-route-announcer{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
+      @media(prefers-reduced-motion:reduce){[data-lsb-route-content-enter]{animation:none!important;transform:none!important}}
+      html.lsb-canvas-reduced-motion [data-lsb-route-content-enter]{animation:none!important;transform:none!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root{position:relative;z-index:1;background:var(--lsb-canvas-content-bg);color:var(--lsb-shell-text,var(--text,#222))}
+      html.lsb-skin-shell-on.lsb-canvas-mode main.wrap,
+      html.lsb-skin-shell-on.lsb-canvas-mode .forum-main,
+      html.lsb-skin-shell-on.lsb-canvas-mode .home-shell{
+        box-sizing:border-box;display:block!important;width:auto!important;max-width:1120px!important;
+        margin:0 auto!important;padding:calc(64px + var(--lsb-canvas-safe-top)) 24px calc(116px + var(--lsb-canvas-safe-bottom))!important;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root{padding-top:0!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root .home-shell,html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root .forum-main{padding-top:0!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root .main-panel{padding-top:0!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode:not(.lsb-canvas-page-home) .lsb-canvas-content-root{margin-top:calc(64px + var(--lsb-canvas-safe-top))!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode main.wrap,
+      html.lsb-skin-shell-on.lsb-canvas-mode .forum-main,
+      html.lsb-skin-shell-on.lsb-canvas-mode .home-shell,
+      html.lsb-skin-shell-on.lsb-canvas-mode .main-panel{
+        font-family:var(--lsb-shell-font-family,${FONT_SANS})!important;
+        font-size:var(--lsb-shell-font-size,14px);
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode [data-canvas-profile-slot]{
+        display:block;position:relative;margin:0 0 16px;padding:0;max-width:100%;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode [data-canvas-profile-slot] > .sidebar-card.user-card{
+        display:block!important;width:100%;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
+        border-radius:var(--lsb-canvas-radius);background:var(--lsb-canvas-surface-bg);backdrop-filter:blur(var(--lsb-shell-glass-blur,18px)) saturate(140%);
+        box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 10%,transparent);
+      }
+      [data-canvas-profile-slot] .user-header-info{gap:10px}
+      [data-canvas-profile-slot] .user-avatar-big img,[data-canvas-profile-slot] .avatar-img{width:42px!important;height:42px!important}
+      [data-canvas-profile-slot] .user-links{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+      [data-canvas-profile-slot] .user-links a{display:inline-flex;align-items:center;gap:4px;padding:5px 8px;border-radius:999px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);color:inherit;text-decoration:none;font-size:12px}
+      [data-canvas-profile-slot] .btn-post{display:inline-flex;margin-top:10px}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user main.wrap{max-width:1120px!important;display:flex!important;flex-direction:column!important;gap:0!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile],
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list]{box-sizing:border-box;width:min(980px,100%)!important;max-width:980px!important;margin-left:auto!important;margin-right:auto!important;min-width:0}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile]{
+        position:sticky;top:calc(10px + var(--lsb-canvas-safe-top) + var(--lsb-canvas-chrome-height) + 6px);z-index:25;margin:0 auto!important;overflow:visible;
+        width:fit-content!important;max-width:min(100%,760px)!important;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile] > .sidebar-card.user-card{
+        display:block!important;width:fit-content!important;max-width:100%;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
+        border-radius:var(--lsb-canvas-radius);background:var(--lsb-canvas-surface-bg);backdrop-filter:blur(var(--lsb-shell-glass-blur,18px)) saturate(140%);
+        box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 10%,transparent);transition:none;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list]{margin:12px auto 0!important;padding:12px!important;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
+        border-radius:var(--lsb-canvas-radius);background:var(--lsb-canvas-surface-bg);backdrop-filter:blur(var(--lsb-shell-glass-blur,18px)) saturate(140%);
+        box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 8%,transparent)}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] > .home-shell,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] > .forum-layout,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] > .forum-main,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] .forum-layout.forum-layout-has-sidebar,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] .forum-main,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] .main-panel{
+        display:block!important;width:100%!important;max-width:none!important;margin:0!important;padding:0!important;background:transparent!important;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode .forum-layout.forum-layout-has-sidebar{display:block!important;grid-template-columns:1fr!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .home-shell,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .forum-main{
+        padding:0!important;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot]{
+        width:fit-content!important;max-width:min(100%,760px)!important;margin:0 auto 12px!important;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] > .sidebar-card.user-card{
+        width:fit-content!important;max-width:100%;max-height:none!important;overflow:visible!important;
+        padding:12px 14px;border-radius:var(--lsb-canvas-radius);
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .user-links{display:flex!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .btn-post{display:inline-flex!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .user-avatar-big img,
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .avatar-img{width:36px!important;height:36px!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .home-shell{
+        background:transparent!important;border:0!important;box-shadow:none!important;border-radius:0!important;overflow:visible;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .main-panel{
+        background:var(--lsb-canvas-surface-bg)!important;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
+        border-radius:var(--lsb-canvas-radius)!important;box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 8%,transparent);
+        overflow:hidden;
+      }
+      @media(min-width:700px){
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .lsb-canvas-content-root{
+          display:flex!important;flex-direction:column!important;min-height:0!important;height:100vh!important;max-height:100vh!important;
+          overflow:hidden!important;overscroll-behavior:none;
+        }
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .lsb-canvas-content-root > .home-shell{
+          display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
+        }
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .home-shell > .forum-layout.forum-layout-has-sidebar{
+          display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
+        }
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .forum-layout.forum-layout-has-sidebar > .forum-main{
+          display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
+        }
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .forum-main > .main-panel{
+          display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
+          overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior:contain;scrollbar-gutter:stable;
+        }
+      }
+      @media(max-width:699px){
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .lsb-canvas-content-root{
+          height:auto!important;max-height:none!important;overflow:visible!important;
+        }
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .main-panel{
+          height:auto!important;max-height:none!important;overflow:visible!important;
+        }
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .topic-toolbar{
+        min-height:44px;margin:0!important;padding:8px 12px!important;align-items:center;
+      }
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-native-header-hidden,
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-native-sidebar-hidden,
+      html.lsb-skin-shell-on.lsb-canvas-mode .lsb-native-left-hidden,
+      html.lsb-skin-shell-on.lsb-canvas-mode .forum-more-region{display:none!important}
+      html.lsb-canvas-route-pending body > .top,
+      html.lsb-canvas-route-pending body > header,
+      html.lsb-canvas-route-pending body > .site-header,
+      html.lsb-canvas-route-pending body > [data-site-header],
+      html.lsb-canvas-route-pending .forum-more-region,
+      html.lsb-canvas-route-pending aside.sidebar:not(#mobile-menu-drawer):not(.mobile-menu-drawer),
+      html.lsb-canvas-route-pending .forum-enhancements-left-fixed,
+      html.lsb-canvas-route-pending #mobile-menu,
+      html.lsb-canvas-route-pending .mobile-menu-backdrop,
+      html.lsb-canvas-route-pending .lsb-launcher{display:none!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode aside.sidebar:not(#mobile-menu-drawer):not(.mobile-menu-drawer),
+      html.lsb-skin-shell-on.lsb-canvas-mode .forum-enhancements-left-fixed{display:none!important}
+      html.lsb-skin-shell-on.lsb-canvas-mode li.post-item:not(.post-entry) .meta-icon{display:none}
+      html.lsb-skin-shell-on.lsb-canvas-mode li.post-item{padding-block:8px!important;border-radius:var(--lsb-canvas-radius)}
+      html.lsb-skin-shell-on.lsb-canvas-mode li.post-entry{border-radius:var(--lsb-canvas-radius)}
+      #lsb-shell[data-lsb-canvas-shell]{display:block;position:fixed;inset:0;z-index:7999;pointer-events:none;font-family:var(--lsb-shell-font-family,${FONT_SANS});color:var(--lsb-shell-text,var(--text,#222))}
+      #lsb-shell[data-lsb-canvas-shell] *{box-sizing:border-box}
+      #lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-video],#lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-image]{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease}
+      html.lsb-skin-video-on #lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-video]{opacity:1}
+      html.lsb-skin-image-on #lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-image]{opacity:1}
+      html.lsb-skin-shell-on.lsb-canvas-mode body > [data-lsb-shell-video][data-lsb-shell-video-layer="canvas"]{
+        position:fixed;inset:0;width:100%;height:100%;box-sizing:border-box;object-fit:cover;
+        z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
+      }
+      html.lsb-skin-video-on.lsb-canvas-mode body > [data-lsb-shell-video][data-lsb-shell-video-layer="canvas"]{opacity:1}
+      html.lsb-skin-shell-on.lsb-canvas-mode body > [data-lsb-shell-image][data-lsb-shell-image-layer="canvas"]{
+        position:fixed;inset:0;width:100%;height:100%;box-sizing:border-box;object-fit:cover;
+        z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
+      }
+      html.lsb-skin-image-on.lsb-canvas-mode body > [data-lsb-shell-image][data-lsb-shell-image-layer="canvas"]{opacity:1}
+      html.lsb-skin-shell-on .lsb-launcher{display:none!important}
+      #lsb-shell-surfaces{position:absolute;inset:0;pointer-events:none;--lsb-canvas-chrome-height:56px}
+      #lsb-shell-surfaces > [data-surface]{pointer-events:auto}
+      #lsb-shell-surfaces [data-surface]{font:inherit;color:inherit}
+      [data-canvas-profile-host]{
+        position:fixed;top:calc(10px + var(--lsb-canvas-safe-top));left:max(12px,calc((100% - 1120px) / 2 + 24px));z-index:8004;
+        display:flex;align-items:center;min-width:0;pointer-events:auto;color:inherit;
+      }
+      [data-canvas-profile-host][hidden]{display:none!important}
+      [data-canvas-profile-host] > .sidebar-card.user-card{
+        position:relative;display:block!important;box-sizing:border-box;width:190px;min-width:0;height:var(--lsb-canvas-chrome-height);max-height:var(--lsb-canvas-chrome-height);margin:0;padding:0 72px 0 10px;
+        overflow:visible!important;border:1px solid var(--lsb-glass-border);border-radius:999px;background:var(--lsb-glass-fill);
+        backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
+        box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);transition:box-shadow 160ms ease;
+      }
+      [data-canvas-profile-host]:not([data-expanded="true"]) > .sidebar-card.user-card{overflow:hidden!important;}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-wrap{width:100%;height:100%;padding:0!important;margin:0!important;box-sizing:border-box}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-header{display:flex!important;align-items:center;min-height:100%;height:100%;margin:0!important;padding:0!important}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-header-info{display:flex!important;align-items:center;gap:6px;min-width:0;width:100%;height:100%;padding:0!important}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-avatar-big{display:flex!important;align-items:center;justify-content:center;flex:0 0 36px;width:36px!important;height:36px!important;min-width:36px}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-avatar-big img,[data-canvas-profile-host]:not([data-expanded="true"]) .avatar-img{display:block;width:36px!important;height:36px!important;min-width:36px;object-fit:cover}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-header-info > div{min-width:0;flex:0 1 auto;width:60px}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-name{display:block;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:650;line-height:16px}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-rank,
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-group,
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-title{display:none!important}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-links{position:absolute;top:50%;right:42px;display:flex!important;align-items:center;gap:4px;margin:0!important;transform:translateY(-50%)}
+      [data-canvas-profile-host] .user-links a[data-canvas-profile-bell]{position:relative;display:inline-flex!important;align-items:center;justify-content:center;width:27px;height:27px;padding:0;border-radius:999px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);font-size:0;line-height:1;color:inherit}
+      [data-canvas-profile-host] .user-links a[data-canvas-profile-bell] .meta-icon{width:16px;height:16px;margin:0}
+      [data-canvas-profile-host] .user-links a[data-canvas-profile-bell]:hover,[data-canvas-profile-host] .user-links a[data-canvas-profile-bell]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-canvas-profile-host] .user-links a[data-canvas-profile-bell] .notify-badge{position:absolute;top:-2px;right:-2px;min-width:9px;height:9px;padding:0;border:2px solid var(--lsb-shell-panel,var(--panel,#fff));border-radius:50%;font-size:0;line-height:0;background:var(--danger,#e07a7a)}
+      [data-canvas-profile-host]:not([data-expanded="true"]) .user-links a:not([data-canvas-profile-bell]),
+      [data-canvas-profile-host]:not([data-expanded="true"]) .btn-post{display:none!important}
+      [data-canvas-profile-host][data-expanded="true"]{align-items:flex-start}
+      [data-canvas-profile-host][data-expanded="true"] > .sidebar-card.user-card{position:absolute;top:calc(100% + 8px);left:0;width:min(340px,calc(100vw - 24px));height:auto;max-height:none;padding:12px 14px;border-radius:var(--lsb-canvas-radius);box-shadow:var(--lsb-glass-highlight),0 18px 44px color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 22%,transparent)}
+      [data-canvas-profile-host][data-expanded="true"] .user-links{position:static;display:flex!important;gap:6px;flex-wrap:wrap;margin-top:10px!important}
+      [data-canvas-profile-host][data-expanded="true"] .user-links a:not([data-canvas-profile-bell]){display:inline-flex!important}
+      [data-canvas-profile-host][data-expanded="true"] .user-links a[data-canvas-profile-bell]{display:inline-flex!important;align-items:center;justify-content:center;width:auto!important;min-width:0;height:auto!important;min-height:27px;padding:5px 8px!important;gap:4px;font-size:12px!important;line-height:1.2;white-space:nowrap}
+      [data-canvas-profile-host][data-expanded="true"] .user-links a[data-canvas-profile-bell] .meta-icon{flex:0 0 auto;width:14px;height:14px;margin:0}
+      [data-canvas-profile-expand]{position:absolute;top:50%;right:4px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:16px;line-height:1;transform:translateY(-50%)}
+      [data-canvas-profile-expand]:hover,[data-canvas-profile-expand]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-canvas-profile-host][data-expanded="true"] [data-canvas-profile-expand]{background:var(--brand-soft,#e8f4f2)}
+      @media(max-width:1099px){
+        [data-canvas-profile-host]{top:calc(6px + var(--lsb-canvas-safe-top));left:8px;max-width:190px}
+        [data-canvas-profile-host] > .sidebar-card.user-card{width:190px}
+        #lsb-shell-surfaces [data-surface="top-status"]{left:210px;right:8px;transform:none;max-width:none}
+        #lsb-shell-surfaces [data-surface="top-status"][data-compact="true"]{transform:translateY(-34px)}
+        #lsb-shell-surfaces [data-surface="site-status"]{display:none!important}
+      }
+      @media(max-width:699px){
+        [data-canvas-profile-host]{max-width:184px}
+        [data-canvas-profile-host] > .sidebar-card.user-card{width:184px}
+        [data-canvas-profile-host]:not([data-expanded="true"]) .user-header-info > div,
+        [data-canvas-profile-host]:not([data-expanded="true"]) .user-name,
+        [data-canvas-profile-host]:not([data-expanded="true"]) .user-rank{width:54px;max-width:54px}
+        #lsb-shell-surfaces [data-surface="top-status"]{left:204px;max-width:calc(100vw - 16px);height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height)}
+      }
+      @media(min-width:1100px){
+        #lsb-shell-surfaces [data-surface="top-status"]{width:min(620px,calc(100vw - 24px));max-width:min(620px,calc(100vw - 24px))}
+        #lsb-shell-surfaces [data-surface="site-status"]{position:fixed;top:calc(10px + var(--lsb-canvas-safe-top));right:max(12px,calc((100vw - 1120px) / 2 + 12px));z-index:8000;display:flex;align-items:center;justify-content:flex-end;width:auto;height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height);padding:0;border:0;border-radius:0;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none;overflow:visible}
+        #lsb-shell-surfaces [data-surface="site-status"][hidden]{display:none!important}
+      }
+      [data-canvas-backdrop]{position:fixed;inset:0;z-index:8009;background:rgb(5 8 18 / 52%);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);pointer-events:auto}
+      [data-canvas-backdrop][hidden]{display:none!important}
+      [data-surface="top-status"]{
+        position:fixed;top:calc(10px + var(--lsb-canvas-safe-top));left:50%;transform:translateX(-50%);z-index:8000;
+        display:flex;align-items:center;gap:8px;height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height);max-width:min(840px,calc(100vw - 24px));padding:7px 10px;
+        border:1px solid var(--lsb-glass-border);border-radius:999px;
+        background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
+        box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);transition:opacity 160ms ease,transform 160ms ease;
+      }
+      [data-surface="top-status"][data-compact="true"]{opacity:.78;transform:translate(-50%,-34px)}
+      [data-surface="top-status"] button,[data-surface="tool-capsule"] button,[data-surface="tool-sheet"] button{font:inherit}
+      [data-surface="top-status"] [data-canvas-status-title]{flex:0 0 auto;min-width:0;max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}
+      [data-route-transition="in"]{animation:lsb-route-title-in 180ms ease both}
+      @keyframes lsb-route-title-in{from{opacity:.45;transform:translateY(2px)}to{opacity:1;transform:none}}
+      [data-canvas-status-links]{display:flex;align-items:center;gap:5px;flex:1 1 auto;min-width:0;overflow-x:auto;overscroll-behavior-inline:contain;scrollbar-width:none}
+      [data-canvas-status-links]::-webkit-scrollbar{display:none}
+      [data-canvas-pinned-links]{display:flex;align-items:center;gap:5px;flex:0 0 auto;min-width:0}
+      [data-canvas-status-links] a,[data-canvas-pinned-links] a,[data-canvas-pinned-links] [data-canvas-navigation-trigger]{display:inline-flex;align-items:center;flex:0 0 auto;min-height:30px;padding:0 8px;border:0;border-radius:999px;
+        color:inherit;text-decoration:none;font:inherit;font-size:12px;font-weight:550;white-space:nowrap;background:color-mix(in srgb,var(--panel,#fff) 48%,transparent);cursor:pointer}
+      [data-canvas-status-links] a:hover,[data-canvas-status-links] a:focus-visible,[data-canvas-pinned-links] a:hover,[data-canvas-pinned-links] a:focus-visible,[data-canvas-pinned-links] [data-canvas-navigation-trigger]:hover,[data-canvas-pinned-links] [data-canvas-navigation-trigger]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-canvas-search-host]{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;min-width:34px;max-width:34px;height:34px;margin-left:2px;overflow:visible}
+      [data-canvas-search-host][hidden]{display:none!important}
+      [data-canvas-search-trigger]{display:inline-flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;height:34px;padding:0;border:1px solid var(--lsb-glass-border);border-radius:50%;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);box-shadow:var(--lsb-glass-highlight);color:inherit;cursor:pointer}
+      [data-canvas-search-trigger]:hover,[data-canvas-search-trigger]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-canvas-search-trigger] svg{display:block;width:17px;height:17px;stroke:currentColor;stroke-width:1.8;fill:none;stroke-linecap:round;stroke-linejoin:round}
+      [data-canvas-search-panel]{position:absolute;top:calc(100% + 8px);right:0;z-index:8020;box-sizing:border-box;width:min(320px,calc(100vw - 24px));max-width:calc(100vw - 24px);padding:8px;border:1px solid var(--lsb-glass-border);border-radius:20px;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow)}
+      [data-canvas-search-panel][hidden]{display:none!important}
+      [data-canvas-search-panel] .lsb-shell-search{display:flex!important;align-items:center;gap:4px;box-sizing:border-box;width:100%;min-width:0;max-width:none;height:34px;margin:0;padding:3px 5px 3px 9px;border:1px solid var(--lsb-glass-border);border-radius:999px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);box-shadow:var(--lsb-glass-highlight);overflow:hidden}
+      [data-canvas-search-panel] .lsb-shell-search input[type="search"],[data-canvas-search-panel] .lsb-shell-search input[name="q"]{box-sizing:border-box;flex:1 1 auto;width:100%;min-width:0;height:26px;margin:0;padding:0 5px;border:0;border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:12px}
+      [data-canvas-search-panel] .lsb-shell-search select{flex:0 1 auto;max-width:68px;min-width:0;height:26px;border:0;border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:11px}
+      [data-canvas-search-panel] .lsb-shell-search button{flex:0 0 auto;min-width:28px;height:26px;padding:0 7px;border:0;border-radius:999px;background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font:inherit;font-size:11px;cursor:pointer}
+      [data-canvas-search-panel] .lsb-shell-search.search-page-link{display:flex!important;align-items:center;justify-content:space-between;min-width:40px;padding:0 9px;color:inherit;text-decoration:none;font-size:12px}
+      [data-canvas-site-status-host]{position:relative;isolation:isolate;display:flex;align-items:center;gap:2px;width:auto;height:100%;min-height:var(--lsb-canvas-chrome-height);padding:0 8px 0 14px;border:0;border-radius:999px;background:transparent;box-shadow:none;overflow:visible;z-index:1;cursor:pointer;color:inherit}
+      [data-canvas-site-status-host]::before{content:'';position:absolute;inset:0;z-index:0;border:1px solid var(--lsb-glass-border);border-radius:inherit;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);pointer-events:none}
+      [data-canvas-site-status-host][hidden]{display:none!important}
+      [data-canvas-site-status-body]{display:flex;align-items:center;gap:6px;width:100%;height:100%;min-width:0;overflow:hidden;border:0;border-radius:999px;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none}
+      [data-canvas-site-status-body] > .sidebar-card{display:block!important;flex:0 0 auto!important;width:100%;height:var(--lsb-canvas-chrome-height)!important;max-height:var(--lsb-canvas-chrome-height)!important;overflow:hidden!important;margin:0;padding:0 34px 0 10px;border:0;border-radius:999px;background:transparent;box-shadow:none}
+      [data-canvas-site-status-body] > .sidebar-card .quick-wrap{height:100%;padding:0!important;margin:0!important;display:flex;align-items:center;min-width:0}
+      [data-canvas-site-status-body] > .sidebar-card .quick-title,[data-canvas-site-status-body] > .sidebar-card .daily-hot-topics-head{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:650}
+      [data-canvas-site-status-body] > .sidebar-card .quick-links,[data-canvas-site-status-body] > .sidebar-card .daily-hot-topics-list{display:none!important}
+      [data-canvas-site-status-body] [data-canvas-site-empty-state]{display:block!important;margin:0;padding:0 10px;color:var(--text-muted,#888);font-size:11px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      [data-canvas-site-status-body] [data-canvas-site-empty-state][hidden]{display:none!important}
+      [data-canvas-site-status-host]:not([data-expanded="true"]) [data-canvas-site-status-body]{display:none!important}
+      [data-canvas-site-status-label]{position:relative;z-index:1;display:inline-flex;align-items:center;border:0;padding:0;background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:550;line-height:1;white-space:nowrap;cursor:pointer}
+      [data-canvas-site-status-expand]{position:relative;z-index:1;top:auto;right:auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:14px;line-height:1;transform:none}
+      [data-canvas-site-status-expand]:hover,[data-canvas-site-status-expand]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-canvas-site-status-host][data-expanded="true"]{align-items:center}
+      [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body]{position:absolute;top:calc(100% + 8px);right:0;z-index:2;display:flex;flex-direction:column;align-items:stretch;gap:0;width:min(340px,calc(100vw - 24px));height:auto;max-height:calc(100vh - 90px);overflow:auto;padding:8px 14px;border:1px solid var(--lsb-glass-border);border-radius:34px;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow)}
+      [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] > .sidebar-card{height:auto!important;max-height:none!important;overflow:visible!important;margin:0!important;padding:10px 2px!important;border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important}
+      [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] > .sidebar-card + .sidebar-card{margin-top:0!important;border-top:1px solid color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 12%,transparent)!important}
+      [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] .quick-links,[data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] .daily-hot-topics-list{display:block!important}
+      [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-expand]{background:var(--brand-soft,#e8f4f2)}
+      html.lsb-canvas-page-user #lsb-shell-surfaces [data-surface="top-status"] [data-canvas-status-title]{max-width:24vw}
+      [data-canvas-action]{border:0;background:transparent;color:inherit;cursor:pointer;border-radius:999px;min-width:30px;min-height:30px;padding:0 8px}
+      [data-canvas-action]:hover,[data-canvas-action]:focus-visible{background:color-mix(in srgb,var(--brand-soft,#e8f4f2) 80%,transparent);outline:none}
+      [data-surface="tool-capsule"]{
+        position:fixed;left:50%;bottom:calc(14px + var(--lsb-canvas-safe-bottom));transform:translateX(-50%);z-index:8001;
+        display:flex;align-items:center;gap:4px;padding:6px;border:1px solid var(--lsb-glass-border);
+        border-radius:999px;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
+        box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow)
+      }
+      [data-surface="tool-capsule"] button{min-width:38px;height:34px;border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer}
+      [data-surface="tool-capsule"] button:hover,[data-surface="tool-capsule"] button:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-surface="tool-sheet"], [data-surface="navigation-sheet"], [data-surface="site-card"], [data-surface="appearance-sheet"], [data-surface="ai-card"], [data-surface="plugin-features-sheet"], [data-surface="plugin-settings-sheet"]{
+        position:fixed;left:50%;bottom:calc(70px + var(--lsb-canvas-safe-bottom));transform:translateX(-50%);z-index:8010;
+        width:min(520px,calc(100vw - 24px));max-height:min(70vh,640px);overflow:auto;padding:18px;
+        border:1px solid var(--lsb-glass-border);border-radius:var(--lsb-canvas-radius);
+        background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
+        box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);opacity:1;transition:opacity 180ms ease,transform 180ms ease
+      }
+      [data-surface="tool-sheet"][hidden],[data-surface="navigation-sheet"][hidden],[data-surface="site-card"][hidden],[data-surface="appearance-sheet"][hidden],[data-surface="ai-card"][hidden],[data-surface="plugin-features-sheet"][hidden],[data-surface="plugin-settings-sheet"][hidden],[data-surface="context-pill"][hidden]{display:none!important}
+      [data-surface="context-pill"]{
+        position:fixed;display:flex;align-items:center;gap:3px;padding:4px;
+        border:1px solid var(--lsb-glass-border);border-radius:999px;
+        background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
+        box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);white-space:nowrap
+      }
+      [data-surface="context-pill"] button{min-height:30px;padding:0 10px;border:0;border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer}
+      [data-surface="context-pill"] button:hover,[data-surface="context-pill"] button:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-surface="ai-card"][data-surface-mode="floating"]{left:auto;right:24px;bottom:88px;transform:none;width:420px;max-width:calc(100vw - 32px);height:560px;max-height:calc(100vh - 120px);resize:both;overflow:auto}
+      [data-surface="site-card"][data-surface-mode="floating"],[data-surface="evidence-card"][data-surface-mode="floating"]{transform:none;right:auto;bottom:auto;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);height:auto}
+      [data-surface="site-card"][data-surface-mode="rail"]{
+        position:fixed;top:calc(72px + var(--lsb-canvas-safe-top));right:max(12px,calc((100vw - 1120px) / 2));bottom:calc(70px + var(--lsb-canvas-safe-bottom));left:auto;transform:none;
+        width:min(320px,calc(30vw - 24px));max-width:calc(100vw - 32px);max-height:none;height:auto;overflow:auto;padding:16px;
+        border-radius:20px;z-index:8005;
+      }
+      [data-surface="site-card"][data-surface-mode="rail"] [data-canvas-sheet-head]{cursor:default}
+      [data-surface="site-card"][data-surface-mode="rail"] [data-canvas-resize-handle]{display:none!important}
+      [data-surface="ai-card"]{display:flex;flex-direction:column;gap:10px}
+      [data-surface="ai-card"] [data-canvas-ai-host]{min-height:0;flex:1;overflow:auto}
+      [data-surface="ai-card"][data-surface-mode="sheet"]{bottom:calc(70px + var(--lsb-canvas-safe-bottom));width:min(520px,calc(100vw - 24px));max-height:min(70vh,640px)}
+      [data-surface="ai-card"][data-surface-mode="fullscreen"]{left:8px;right:8px;bottom:calc(58px + var(--lsb-canvas-safe-bottom));transform:none;width:auto;max-height:calc(100vh - 82px);border-radius:22px}
+      [data-surface="ai-card"][data-ai-workbench-mounted]{padding:0!important;gap:0}
+      [data-surface="ai-card"][data-ai-workbench-mounted] > [data-canvas-sheet-head]{display:none!important}
+      [data-surface][data-surface-mode="floating"] [data-canvas-sheet-head]{cursor:grab;user-select:none}
+      [data-surface][data-surface-mode="floating"][data-canvas-dragging="true"]{will-change:transform;cursor:grabbing}
+      [data-surface][data-surface-mode="floating"] [data-canvas-resize-handle]{position:absolute;right:3px;bottom:3px;width:16px;height:16px;cursor:nwse-resize;touch-action:none}
+      [data-surface] [data-canvas-sheet-head]{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:-2px 0 12px;padding-top:8px}
+      [data-canvas-sheet-grabber]{position:absolute;top:0;left:50%;width:34px;height:4px;transform:translateX(-50%);border-radius:999px;background:color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 26%,transparent)}
+      [data-surface][data-canvas-surface-state="opening"]{opacity:0;transform:translateX(-50%) translateY(8px) scale(.985)}
+      [data-surface][data-canvas-surface-state="closing"]{opacity:0;pointer-events:none}
+      [data-surface][data-surface-mode="floating"][data-canvas-surface-state="opening"]{transform:translateY(8px) scale(.985)}
+      [data-surface="site-card"][data-surface-mode="rail"][data-canvas-surface-state="opening"]{transform:translateY(0) scale(1)}
+      [data-surface][data-surface-mode="fullscreen"][data-canvas-surface-state="opening"]{transform:translateY(12px) scale(.99)}
+      [data-surface] [data-canvas-sheet-head] h2{margin:0;font-size:16px;line-height:1.3}
+      [data-surface] [data-canvas-close]{border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer;width:32px;height:32px;font-size:18px}
+      [data-surface] [data-canvas-close]:hover,[data-surface] [data-canvas-close]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
+      [data-surface="tool-sheet"] [data-tool-grid]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:14px}
+      [data-surface="tool-sheet"] [data-tool-action]{min-height:46px;padding:10px;border:1px solid var(--line-soft,#e8e8e8);border-radius:12px;background:color-mix(in srgb,var(--panel,#fff) 48%,transparent);color:inherit;text-align:left;cursor:pointer}
+      [data-surface="tool-sheet"] [data-tool-action]:hover,[data-surface="tool-sheet"] [data-tool-action]:focus-visible{border-color:var(--brand,#5eaaa0);outline:none}
+      [data-surface="tool-sheet"] [data-canvas-query]{display:flex;gap:8px;align-items:flex-end}
+      [data-surface="tool-sheet"] textarea{flex:1;min-height:70px;resize:vertical;border:1px solid var(--line,#ddd);border-radius:12px;padding:9px;background:color-mix(in srgb,var(--panel,#fff) 64%,transparent);color:inherit;font:inherit}
+      [data-surface="tool-sheet"] [data-canvas-send]{min-height:38px;border:0;border-radius:999px;padding:0 16px;background:var(--brand,#5eaaa0);color:#fff;cursor:pointer}
+      [data-surface="plugin-features-sheet"] [data-plugin-feature-list],[data-surface="plugin-settings-sheet"] [data-plugin-settings-list]{display:grid;gap:7px;margin:8px 0 14px}
+      [data-surface="plugin-features-sheet"] [data-plugin-feature-list] .lsb-empty,[data-surface="plugin-settings-sheet"] [data-plugin-settings-list] .lsb-empty{margin:0;padding:10px;border-radius:10px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent)}
+      .lsb-plugin-entry{display:flex;align-items:center;gap:6px;min-width:0;padding:4px;border:1px solid var(--line-soft,#e8e8e8);border-radius:12px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent)}
+      .lsb-plugin-entry-main,.lsb-plugin-entry-settings,.lsb-plugin-settings-entry,[data-plugin-settings-directory],[data-plugin-settings-back]{min-height:38px;border:0;border-radius:9px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+      .lsb-plugin-entry-main{flex:1;min-width:0;padding:7px 10px;text-align:left}
+      .lsb-plugin-entry-settings{flex:0 0 38px;padding:0;font-size:17px}
+      .lsb-plugin-settings-entry{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:8px 10px;border:1px solid var(--line-soft,#e8e8e8);text-align:left}
+      .lsb-plugin-settings-entry small{color:var(--text-muted,#888);font-size:11px}
+      [data-plugin-settings-directory]{padding:7px 12px;border:1px solid var(--line,#ddd);background:color-mix(in srgb,var(--panel,#fff) 48%,transparent)}
+      [data-plugin-settings-back]{margin:-4px 0 8px;padding:4px 9px;color:var(--text-muted,#888)}
+      .lsb-plugin-entry button:hover,.lsb-plugin-settings-entry:hover,[data-plugin-settings-directory]:hover,[data-plugin-settings-back]:hover{background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0)}
+      [data-surface="plugin-features-sheet"] h3,[data-surface="plugin-settings-sheet"] h3{margin:10px 0 6px;font-size:13px}
+      [data-surface="site-card"] [data-canvas-site-sidebar]{display:flex;flex-direction:column;gap:10px;margin-top:14px;max-height:none!important;overflow:visible!important;padding-right:2px}
+      [data-surface="site-card"] [data-canvas-site-sidebar]:empty::before{content:'当前页面没有可用的站点侧栏信息';display:block;padding:12px;border-radius:12px;color:var(--text-muted,#888);background:color-mix(in srgb,var(--panel,#fff) 38%,transparent);font-size:12px}
+      [data-surface="site-card"] [data-canvas-site-empty-state]{display:block;margin:14px 0 0;padding:12px;border-radius:12px;color:var(--text-muted,#888);background:color-mix(in srgb,var(--panel,#fff) 38%,transparent);font-size:12px}
+      [data-surface="site-card"] [data-canvas-site-empty-state][hidden]{display:none!important}
+      [data-surface="site-card"] [data-canvas-site-sidebar] > .sidebar-card{display:block!important;flex:0 0 auto!important;width:100%;height:auto!important;max-height:none!important;overflow:visible!important;margin:0;padding:12px;border:1px solid color-mix(in srgb,var(--line,#ddd) 62%,transparent);border-radius:14px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);box-shadow:none}
+      [data-surface="site-card"] [data-canvas-site-sidebar] .quick-links{max-height:none!important;overflow:visible!important}
+      [data-surface="site-card"]{height:auto;max-height:calc(100vh - 32px)}
+      [data-surface="site-card"][data-surface-mode="sheet"],[data-surface="site-card"][data-surface-mode="fullscreen"]{height:auto;max-height:calc(100vh - 82px)}
+      [data-surface="appearance-sheet"] [data-canvas-appearance-controls]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
+      [data-surface="appearance-sheet"] [data-canvas-background-modes]{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:14px}
+      [data-surface="appearance-sheet"] [data-canvas-background-modes] strong{font-size:12px;color:var(--text-muted,#888);font-weight:600;margin-right:2px}
+      [data-surface="appearance-sheet"] [data-canvas-background-modes] button{min-height:32px;padding:5px 10px;border:1px solid var(--line,#ddd);border-radius:999px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px}
+      [data-surface="appearance-sheet"] [data-canvas-background-modes] button[aria-pressed="true"]{border-color:var(--lsb-shell-accent,var(--brand,#5eaaa0));background:var(--brand-soft,#e8f4f2);color:var(--lsb-shell-accent,var(--brand,#5eaaa0));font-weight:600}
+      [data-surface="appearance-sheet"] [data-canvas-appearance-controls] label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--text-muted,#888)}
+      [data-surface="appearance-sheet"] [data-canvas-appearance-controls] input{width:100%;min-width:0;border:1px solid var(--line,#ddd);border-radius:9px;padding:6px;background:color-mix(in srgb,var(--panel,#fff) 70%,transparent);color:inherit;font:inherit}
+      [data-surface="appearance-sheet"] [data-canvas-appearance-controls] input[type="range"]{padding:0}
+      [data-surface="appearance-sheet"] [data-canvas-appearance-actions]{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+      [data-surface="appearance-sheet"] [data-canvas-appearance-actions] button{border:1px solid var(--line,#ddd);border-radius:999px;padding:7px 11px;background:transparent;color:inherit;cursor:pointer}
+      [data-surface="top-status"] button:focus-visible,[data-surface="tool-capsule"] button:focus-visible,[data-surface="tool-sheet"] button:focus-visible,[data-surface="navigation-sheet"] a:focus-visible{outline:2px solid var(--brand,#5eaaa0);outline-offset:2px}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-glass-on #lsb-shell-surfaces [data-surface]{background:var(--lsb-canvas-surface-bg)}
+      html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-glass-on #lsb-shell-surfaces [data-surface="site-status"]{background:transparent;border:0;border-radius:0;box-shadow:none;overflow:visible}
+      @media(max-width:699px){
+        html.lsb-skin-shell-on.lsb-canvas-mode main.wrap,html.lsb-skin-shell-on.lsb-canvas-mode .forum-main,html.lsb-skin-shell-on.lsb-canvas-mode .home-shell{padding-inline:14px!important}
+        [data-surface="top-status"]{max-width:calc(100vw - 16px);top:calc(6px + var(--lsb-canvas-safe-top));height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height)}
+        [data-surface="top-status"] [data-canvas-status-title]{max-width:42vw}
+        html.lsb-canvas-page-user #lsb-shell-surfaces [data-surface="top-status"]{width:calc(100vw - 16px);gap:4px;padding:5px 6px}
+        html.lsb-canvas-page-user #lsb-shell-surfaces [data-surface="top-status"] [data-canvas-status-title]{max-width:20vw}
+        #lsb-shell-surfaces [data-surface="site-status"]{display:none!important}
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile]{position:sticky!important;top:calc(6px + var(--lsb-canvas-safe-top) + var(--lsb-canvas-chrome-height))!important;z-index:25!important}
+        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list]{padding:8px!important}
+        [data-surface="tool-sheet"],[data-surface="navigation-sheet"],[data-surface="site-card"],[data-surface="appearance-sheet"],[data-surface="ai-card"],[data-surface="plugin-features-sheet"],[data-surface="plugin-settings-sheet"]{left:8px;right:8px;bottom:calc(58px + var(--lsb-canvas-safe-bottom));transform:none;width:auto;max-height:calc(100vh - 82px);border-radius:22px}
+        [data-surface="tool-capsule"]{bottom:calc(8px + var(--lsb-canvas-safe-bottom));max-width:calc(100vw - 16px)}
+        [data-surface="site-card"][data-surface-mode="rail"]{top:calc(6px + var(--lsb-canvas-safe-top) + var(--lsb-canvas-chrome-height));right:8px;bottom:calc(58px + var(--lsb-canvas-safe-bottom));left:8px;width:auto;max-width:none;max-height:calc(100vh - 82px);border-radius:22px}
+        [data-surface="appearance-sheet"] [data-canvas-appearance-controls]{grid-template-columns:1fr!important}
+        [data-surface="appearance-sheet"] [data-canvas-appearance-actions]{flex-direction:column!important;align-items:stretch!important}
+        [data-surface="appearance-sheet"] [data-canvas-appearance-actions] button{min-height:40px}
+      }
+      @media(prefers-reduced-transparency:reduce){
+        #lsb-shell-surfaces [data-surface]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:0 8px 24px rgb(0 0 0 / 12%)}
+        [data-canvas-site-status-host]::before,[data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none}
+        html.lsb-skin-shell-on.lsb-canvas-mode{--lsb-glass-fill:var(--lsb-shell-panel,var(--panel,#fff));--lsb-canvas-media-scrim:rgb(8 12 22 / 26%)}
+      }
+      @media(prefers-reduced-motion:reduce){
+        #lsb-shell-surfaces [data-surface],#lsb-shell-progress,html.lsb-skin-shell-on.lsb-canvas-mode body::before{transition:none!important;scroll-behavior:auto!important}
+        #lsb-shell-progress [data-lsb-shell-progress-bar]{transition:none!important}
+        [data-route-transition="in"]{animation:none!important}
+        [data-surface][data-canvas-surface-state="opening"],[data-surface][data-canvas-surface-state="closing"]{transform:none!important}
+      }
+      @media(prefers-reduced-motion:reduce){html.lsb-canvas-page-user [data-lsb-canvas-profile] > .sidebar-card.user-card{transition:none!important}}
+      html.lsb-canvas-reduced-transparency #lsb-shell-surfaces [data-surface]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:0 8px 24px rgb(0 0 0 / 12%)}
+      html.lsb-canvas-reduced-transparency [data-canvas-site-status-host]::before,html.lsb-canvas-reduced-transparency [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none}
+      html.lsb-canvas-reduced-motion #lsb-shell-surfaces [data-surface],html.lsb-canvas-reduced-motion #lsb-shell-progress{transition:none!important;scroll-behavior:auto!important}
+      html.lsb-canvas-reduced-motion #lsb-shell-progress [data-lsb-shell-progress-bar]{transition:none!important}
+      html.lsb-canvas-reduced-motion [data-route-transition="in"]{animation:none!important}
+      html.lsb-canvas-reduced-motion [data-surface][data-canvas-surface-state="opening"],html.lsb-canvas-reduced-motion [data-surface][data-canvas-surface-state="closing"]{transform:none!important}
+    `
+  }
+
+  // · B3 css: 全局正文排版/列表密度/代码块/楼层 ──
+  function skinCss(cfg = {}, { shellActive = false, uiMode = 'legacy' } = {}) {
+    const parts = []
+
+    if (shellActive) {
+      parts.push(uiMode === 'ios27' ? canvasCss() : shellCss())
+    }
+
+    if (cfg.typography) {
+      parts.push(`
+        html.lsb-skin-type-on .post-content{font-family:${FONT_SANS};line-height:1.75;word-break:break-word}
+        html.lsb-skin-type-on .post-content p{margin-block:.85em}
+        html.lsb-skin-type-on .post-title{line-height:1.45}
+      `)
+    }
+
+    if (cfg.density === '紧凑') {
+      parts.push(`
+        html.lsb-skin-density-compact ul.post-list li.post-item{padding-block:3px!important}
+        html.lsb-skin-density-compact li.post-item .post-avatar img{width:32px!important;height:32px!important}
+      `)
+    }
+
+    if (cfg.codeblock) {
+      parts.push(`
+        html.lsb-skin-code-on .post-content pre{
+          background:var(--bg,#f6f8fa)!important;border:1px solid var(--line,#ddd)!important;
+          border-radius:8px!important;padding:12px 14px!important;overflow-x:auto!important;
+          font-family:${FONT_MONO}!important;font-size:13px!important;line-height:1.55!important;
+        }
+        html.lsb-skin-code-on .post-content code{font-family:${FONT_MONO}}
+        html.lsb-skin-code-on .post-content :not(pre)>code{
+          background:var(--line-soft,#eceff2);border-radius:4px;padding:1px 5px;font-size:.92em;
+        }
+      `)
+    }
+
+    if (cfg.floors) {
+      parts.push(`
+        html.lsb-skin-floors-on li.post-entry{border-bottom:1px solid var(--line-soft,#eee)}
+      `)
+    }
+
+    if (cfg.measure) {
+      parts.push(`
+        @media(min-width:1280px){
+          html.lsb-skin-measure-on main.wrap{max-width:1120px!important;margin-inline:auto!important}
+          html.lsb-skin-measure-on .post-content>p{max-width:74ch}
+        }
+      `)
+    }
+
+    return parts.join('\n')
+  }
+  /** Owns one skin instance's media resources; reset is reusable, dispose is final. */
+  function createSkinMediaController({ window, document, media, style, getContext, toast }) {
+    const root = document.documentElement
+    const fontProperty = '--lsb-shell-font-family'
+    const revisions = new Map()
+    let disposed = false
+    let epoch = 0
+    let database = null
+    let background = null
+    let font = null
+
+    function abortError() {
+      const error = new Error('media-operation-cancelled')
+      error.name = 'AbortError'
+      return error
+    }
+
+    function assertCurrent(start) {
+      if (disposed || start !== epoch) throw abortError()
+    }
+
+    function closeDatabase(record) {
+      if (!record?.db) return
+      try { record.db.close?.() } catch { /* already closed */ }
+      record.db = null
+    }
+
+    function ensureDatabase() {
+      if (!media?.openMediaDb) return Promise.resolve(null)
+      if (!database) {
+        const record = { db: null, promise: null }
+        database = record
+        record.promise = Promise.resolve().then(() => media.openMediaDb(window.indexedDB, 'lsb_skin_media')).then((db) => {
+          record.db = db
+          if (disposed || database !== record) {
+            closeDatabase(record)
+            throw abortError()
+          }
+          return db
+        }).catch((error) => {
+          if (error?.name === 'AbortError') throw error
+          if (database === record) database = null
+          return null
+        })
+      }
+      return database.promise
+    }
+
+    async function loadLocal(kind, key) {
+      if (!key || !media?.readMedia) return null
+      const start = epoch
+      try {
+        const db = await ensureDatabase()
+        assertCurrent(start)
+        if (!db) return null
+        const file = await media.readMedia({ db, kind, key })
+        assertCurrent(start)
+        return file && (!media.validateMediaFile || media.validateMediaFile(file, { kind }).ok) ? file : null
+      } catch { return null }
+    }
+
+    async function saveFile(kind, file) {
+      const start = epoch
+      assertCurrent(start)
+      const check = media?.validateMediaFile?.(file, { kind })
+      if (!check?.ok) throw new Error(check?.reason || 'media-validation-unavailable')
+      try {
+        const db = await ensureDatabase()
+        assertCurrent(start)
+        if (!db || !media?.writeMedia) throw new Error('media-store-unavailable')
+        const key = `${window.location.origin}:${kind}`
+        await media.writeMedia({ db, kind, key, value: file })
+        assertCurrent(start)
+        const revisionKey = `${kind}:${key}`
+        revisions.set(revisionKey, (revisions.get(revisionKey) || 0) + 1)
+        return key
+      } catch (error) {
+        assertCurrent(start)
+        throw error
+      }
+    }
+
+    function releaseBackground(record) {
+      if (!record) return
+      const node = record.node
+      if (node) {
+        node.removeEventListener('error', record.onError)
+        if (record.mode === 'video') {
+          try { node.pause?.() } catch { /* unavailable media element */ }
+        }
+        node.removeAttribute('src')
+        if (record.mode === 'video') {
+          try { node.load?.() } catch { /* release the decoder when available */ }
+        }
+        node.remove()
+        record.node = null
+      }
+      if (record.url) {
+        try { window.URL.revokeObjectURL(record.url) } catch { /* ignore */ }
+        record.url = ''
+      }
+    }
+
+    function releaseFont(record) {
+      record?.face?.dispose?.()
+      if (record) record.face = null
+    }
+
+    function applyFont(record) {
+      const family = record?.face ? 'LSBShellUserFont' : record?.fallback
+      if (family) root.style.setProperty(fontProperty, family)
+      else root.style.removeProperty(fontProperty)
+    }
+
+    function syncBackground({ config, appearance, workspace, canvasMode }) {
+      const requested = String(appearance.background || '').toLowerCase()
+      const mode = requested === 'video' || (requested !== 'image' && config.backgroundVideoEnabled === true)
+        ? 'video' : requested === 'image' ? 'image' : 'static'
+      const enabled = !!config.shell && workspace instanceof window.Element
+      const field = mode === 'image' ? 'backgroundImage' : 'backgroundVideo'
+      const remote = String(appearance[`${field}Url`] || config[`${field}Url`] || '').trim()
+      const localKey = String(appearance[`${field}LocalKey`] || config[`${field}LocalKey`] || '').trim()
+      const validRemote = !!media?.isHttpsUrl?.(remote)
+      const reduced = appearance.motion === 'reduced' || !!window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+      const key = JSON.stringify([enabled, mode, canvasMode, reduced, validRemote ? remote : '', localKey, revisions.get(`${mode}:${localKey}`) || 0])
+      if (background?.key === key && background.workspace === workspace &&
+        (background.pending || background.node || !enabled || mode === 'static')) return background.promise
+      const previous = background
+      const record = { key, workspace, mode, node: null, url: '', onError: null, promise: null, pending: true }
+      background = record
+      releaseBackground(previous)
+      root.classList.remove('lsb-skin-video-on', 'lsb-skin-image-on')
+      record.promise = (async () => {
+        if (!enabled || mode === 'static') return
+        let source = ''
+        if (localKey) {
+          const file = await loadLocal(mode, localKey)
+          if (background !== record) return
+          if (file) {
+            try { source = record.url = window.URL.createObjectURL(file) } catch { /* use HTTPS fallback */ }
+          }
+        }
+        if (!source && validRemote) source = remote
+        if (background !== record || !source) return
+        const node = document.createElement(mode === 'image' ? 'img' : 'video')
+        record.node = node
+        node.setAttribute(`data-lsb-shell-${mode}`, '')
+        node.setAttribute(`data-lsb-shell-${mode}-layer`, canvasMode ? 'canvas' : 'windowed')
+        node.setAttribute('aria-hidden', 'true')
+        const current = () => background === record && record.node === node
+        if (mode === 'image') {
+          node.alt = ''
+          node.decoding = 'async'
+          node.loading = 'eager'
+          record.onError = () => {
+            if (!current() || node.dataset.lsbShellImageState === 'error') return
+            root.classList.remove('lsb-skin-image-on')
+            node.dataset.lsbShellImageState = 'error'
+            toast?.('静态背景加载失败，已使用原始背景', { type: 'error' })
+          }
+          node.addEventListener('error', record.onError)
+          workspace.prepend(node)
+          node.src = source
+          if (current() && node.dataset.lsbShellImageState !== 'error') {
+            root.classList.add('lsb-skin-image-on')
+            node.dataset.lsbShellImageState = 'loaded'
+          }
+          return
+        }
+
+        for (const attr of ['muted', 'autoplay', 'loop', 'playsinline']) node.setAttribute(attr, '')
+        node.defaultMuted = true
+        node.muted = true
+        node.loop = true
+        node.autoplay = true
+        node.playsInline = true
+        node.preload = 'auto'
+        record.onError = () => {
+          if (!current() || node.dataset.lsbShellVideoState === 'error') return
+          root.classList.remove('lsb-skin-video-on')
+          node.controls = false
+          node.style.pointerEvents = 'none'
+          node.dataset.lsbShellVideoState = 'error'
+          toast?.('视频背景加载失败，已使用静态背景', { type: 'error' })
+        }
+        node.addEventListener('error', record.onError)
+        workspace.prepend(node)
+        node.src = source
+        try { node.load?.() } catch { /* older media elements may not expose load */ }
+        const markPlayback = (state, message) => {
+          if (!current() || node.dataset.lsbShellVideoState === 'error' || node.error) return
+          root.classList.add('lsb-skin-video-on')
+          node.controls = false
+          node.style.pointerEvents = 'none'
+          node.dataset.lsbShellVideoState = state
+          if (message) toast?.(message, { type: 'info' })
+        }
+        if (reduced) {
+          markPlayback('manual', '视频已暂停以减少动态')
+          return
+        }
+        try {
+          await node.play()
+          markPlayback('playing')
+        } catch {
+          markPlayback('manual', '浏览器阻止自动播放，视频背景保持静止')
+        }
+      })().finally(() => { record.pending = false })
+      return record.promise
+    }
+
+    function syncFont({ config, appearance, workspace }) {
+      const enabled = !!config.shell && workspace instanceof window.Element
+      const remote = String(appearance.fontUrl || config.fontUrl || '').trim()
+      const localKey = String(appearance.fontLocalKey || config.fontLocalKey || '').trim()
+      const validRemote = !!media?.isHttpsUrl?.(remote)
+      const key = JSON.stringify([enabled, validRemote ? remote : '', localKey, revisions.get(`font:${localKey}`) || 0])
+      const fallback = enabled ? style?.sanitizeTokenValue?.('fontFamily', appearance.fontFamily || config.fontFamily) : ''
+      if (font?.key === key && (font.pending || font.face || !enabled || !validRemote && !localKey)) {
+        font.fallback = fallback
+        applyFont(font)
+        return font.promise
+      }
+      const previous = font
+      const record = { key, fallback, face: null, promise: null, pending: true }
+      font = record
+      releaseFont(previous)
+      applyFont(record)
+      record.promise = (async () => {
+        if (!enabled || !media?.loadFontFace || !validRemote && !localKey) return
+        const source = validRemote ? `url(${remote})` : await loadLocal('font', localKey)
+        if (font !== record || !source) return
+        try {
+          const face = await media.loadFontFace({ family: 'LSBShellUserFont', source, document, URLCtor: window.URL })
+          if (font !== record) {
+            face?.dispose?.()
+            return
+          }
+          record.face = face
+          applyFont(record)
+        } catch {
+          if (font !== record) return
+          applyFont(record)
+          toast?.('字体加载失败，已回退站点字体', { type: 'error' })
+        }
+      })().finally(() => { record.pending = false })
+      return record.promise
+    }
+
+    function sync() {
+      if (disposed) return Promise.resolve()
+      const { config = {}, appearance = {}, workspace, canvasMode = false } = getContext()
+      const context = { config, appearance, workspace, canvasMode }
+      return Promise.all([syncBackground(context), syncFont(context)])
+    }
+
+    function reset() {
+      epoch++
+      const oldBackground = background, oldFont = font, oldDatabase = database
+      background = null
+      font = null
+      database = null
+      releaseBackground(oldBackground)
+      releaseFont(oldFont)
+      closeDatabase(oldDatabase)
+      root.classList.remove('lsb-skin-video-on', 'lsb-skin-image-on')
+      root.style.removeProperty(fontProperty)
+    }
+
+    function dispose() {
+      if (disposed) return
+      disposed = true
+      reset()
+      revisions.clear()
+    }
+
+    return { sync, saveFile, reset, dispose }
+  }
+  const SKIN_PLUGIN_FEATURES = [
+    { plugin: 'reading-center', rpc: 'reading-center:open', label: '阅读中心' },
+    { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
+    { plugin: 'points-title-workbench', rpc: 'points-title-workbench:open', label: '积分-称号' },
+    { plugin: 'annual-report', panel: 'annual-report', label: '年度报告' },
+  ]
+
+  /** Both skins resolve live capabilities, including again at activation time. */
+  function createSkinPluginCatalog({ getInfo, ui, request }) {
+    function settings() {
+      return ui.settingsPlugins()
+    }
+
+    function features() {
+      const info = getInfo() || {}
+      const states = new Map((info.plugins || []).map((plugin) => [plugin.id, plugin.state]))
+      const panels = new Set(ui.panels().map((panel) => panel.id))
+      const handlers = new Set((info.handlers || []).map((handler) => handler.name))
+      const configured = new Set(settings().map((plugin) => plugin.id))
+      return SKIN_PLUGIN_FEATURES
+        .filter((item) => states.get(item.plugin) === 'active')
+        .filter((item) => item.panel ? panels.has(item.panel) : handlers.has(item.rpc))
+        .map((item) => ({ ...item, hasSettings: configured.has(item.plugin) }))
+    }
+
+    function tools() {
+      return features().map(({ plugin, panel, rpc, label }) => rpc ? { plugin, rpc, label } : { plugin, panel, label })
+    }
+
+    async function openFeature(pluginId) {
+      const entry = features().find((item) => item.plugin === pluginId)
+      if (!entry) {
+        ui.toast('这个插件功能当前不可用', { type: 'info' })
+        return false
+      }
+      try {
+        if (entry.panel) ui.openPanel(entry.panel)
+        else await request(entry.rpc)
+        return true
+      } catch {
+        ui.toast('插件功能打开失败', { type: 'error' })
+        return false
+      }
+    }
+
+    function openSettings(pluginId) {
+      if (!settings().some((item) => item.id === pluginId)) {
+        ui.toast('这个插件没有可用的设置表单', { type: 'info' })
+        return false
+      }
+      try {
+        ui.openPluginSettings(pluginId)
+        return true
+      } catch {
+        ui.toast('插件设置当前不可用', { type: 'error' })
+        return false
+      }
+    }
+
+    return { features, settings, tools, openFeature, openSettings }
+  }
+  const SKIN_SEARCH_FORMS = 'form.search-form, form.meilisearch-search-top-form, form[role="search"][aria-label="站内搜索"]'
+  const SKIN_TOP_SEARCH_FORMS = 'body > .top form.search-form, body > .top form.meilisearch-search-top-form, body > .top form[role="search"][aria-label="站内搜索"]'
+
+  /** Moves native nodes without cloning their fields or taking over submission. */
+  function createSkinSearchController({ document }) {
+    const { Element, HTMLElement } = document.defaultView
+    let node = null
+    let home = null
+    let panel = null
+
+    function host() {
+      return document.querySelector('#lsb-shell [data-canvas-search-host]') || document.querySelector('.lsb-shell-search-host')
+    }
+
+    function ownHosted(element, target) {
+      if (node !== element) node?.classList.remove('lsb-shell-search')
+      node = element
+      panel = target
+      node.classList.add('lsb-shell-search')
+    }
+
+    function reconcileReplacement() {
+      // The site may replace a placeholder before our mutation callback runs.
+      const replacement = node && !node.isConnected
+        ? panel?.querySelector(SKIN_SEARCH_FORMS) || panel?.querySelector('a.search-page-link') : null
+      if (replacement) ownHosted(replacement, panel)
+    }
+
+    function adopt(targetHost) {
+      if (!(targetHost instanceof Element)) return
+      const canvas = targetHost.matches('[data-canvas-search-host]')
+      const target = canvas ? targetHost.querySelector('[data-canvas-search-panel]') : targetHost
+      if (!(target instanceof Element)) return
+      reconcileReplacement()
+      if (node?.matches(SKIN_SEARCH_FORMS) && panel?.contains(node)) {
+        const moving = panel !== target
+        ownHosted(node, target)
+        if (moving) target.append(node)
+        if (canvas) targetHost.hidden = false
+        return
+      }
+      const hostedForm = target.querySelector(SKIN_SEARCH_FORMS)
+      if (hostedForm) {
+        ownHosted(hostedForm, target)
+        if (canvas) targetHost.hidden = false
+        return
+      }
+      const nativeForm = document.querySelector(SKIN_TOP_SEARCH_FORMS) || document.querySelector(SKIN_SEARCH_FORMS)
+      if (nativeForm && !target.contains(nativeForm)) {
+        const fallback = target.querySelector('a.search-page-link')
+        if (fallback) {
+          fallback.classList.remove('lsb-shell-search')
+          fallback.remove()
+        }
+        if (nativeForm !== node) home = { parent: nativeForm.parentNode, next: nativeForm.nextSibling }
+        ownHosted(nativeForm, target)
+        target.append(nativeForm)
+        if (canvas) targetHost.hidden = false
+        return
+      }
+      const hostedLink = target.querySelector('a.search-page-link')
+      if (hostedLink) {
+        ownHosted(hostedLink, target)
+        if (canvas) targetHost.hidden = false
+        return
+      }
+      const link = node?.matches('a.search-page-link') && panel?.contains(node)
+        ? node : document.querySelector('body > .top .search-page-link') || document.querySelector('a.search-page-link')
+      if (!(link instanceof Element) || targetHost.contains(link)) {
+        if (canvas) targetHost.hidden = true
+        return
+      }
+      if (link !== node) home = { parent: link.parentNode, next: link.nextSibling }
+      ownHosted(link, target)
+      target.append(link)
+      if (canvas) targetHost.hidden = false
+    }
+
+    function restore() {
+      reconcileReplacement()
+      if (node) {
+        node.classList.remove('lsb-shell-search')
+        if (!home?.parent?.isConnected) node.remove()
+        else if (home.next?.parentNode === home.parent) home.parent.insertBefore(node, home.next)
+        else home.parent.append(node)
+      }
+      node = null
+      home = null
+      panel = null
+    }
+
+    function setOpen(targetHost, open, restoreFocus = false) {
+      if (!(targetHost instanceof Element)) return false
+      const trigger = targetHost.querySelector('[data-canvas-search-trigger]')
+      const target = targetHost.querySelector('[data-canvas-search-panel]')
+      if (!(trigger instanceof HTMLElement) || !(target instanceof HTMLElement)) return false
+      const next = !!open && !!target.querySelector('form, .search-page-link')
+      targetHost.dataset.searchOpen = String(next)
+      target.hidden = !next
+      trigger.setAttribute('aria-expanded', String(next))
+      trigger.setAttribute('aria-label', next ? '关闭站点搜索' : '打开站点搜索')
+      if (next) target.querySelector('input[type="search"], input[name="q"]')?.focus?.()
+      else if (restoreFocus) trigger.focus?.()
+      return next
+    }
+
+    return { host, adopt, restore, setOpen }
+  }
+  /** 双界面的导航数据；每次读取当前路由、站点目录与 DOM，渲染和生命周期由调用方管理。 */
+  function createSkinNavigation({ document, getPage, getForums, getLocation, parseTopic, store, homeSorted }) {
+    function collectBoards() {
+      const forums = getForums() || []
+      const cached = store.get('boardCounts') || {}
+      const live = {}
+      for (const f of forums) {
+        if (Number.isFinite(f.topics)) live[f.id] = f.topics
+      }
+      const counts = { ...cached, ...live }
+      if (Object.keys(live).length) store.set('boardCounts', counts)
+      if (forums.length) {
+        return forums.map((f) => ({
+          href: `/forum/${f.id}`,
+          label: f.name,
+          count: counts[f.id],
+        }))
+      }
+      const seen = new Set()
+      const out = []
+      for (const a of document.querySelectorAll('.forum-nav a[href^="/forum/"]')) {
+        const href = a.getAttribute('href')
+        const label = (a.textContent || '').trim()
+        if (!href || seen.has(href)) continue
+        seen.add(href)
+        const id = Number((href.match(/\/forum\/(\d+)/) || [])[1])
+        out.push({ href, label, count: counts[id] })
+      }
+      return out
+    }
+
+    function pagePath() {
+      try {
+        return getLocation().pathname.replace(/\/+$/, '') || '/'
+      } catch {
+        return ''
+      }
+    }
+
+    function locationText() {
+      const p = getPage() || {}
+      const path = pagePath()
+      const type = p.type
+      if (type === 'collections' || path === '/topic_collections') {
+        let tab = type === 'collections' ? p.tab : null
+        if (tab == null) {
+          try {
+            tab = new URL(getLocation().href).searchParams.get('tab')
+          } catch {
+            tab = null
+          }
+        }
+        return tab === 'mine' || !tab ? '我的淘帖' : '淘帖中心'
+      }
+      if (type === 'collection' || /^\/topic_collection\/\d+$/.test(path)) {
+        const title = (document.querySelector('h1.post-content-title, h1')?.textContent || '').trim()
+        return title || '淘帖'
+      }
+      if (type === 'identity' || path === '/identity_center') return '认证中心'
+      if (type === 'promotions' || path === '/promotions') return '我的广告'
+      if (type === 'messages' || path === '/direct_messages') return '我的私信'
+      if (type === 'user_block' || path === '/user_block') return '屏蔽名单'
+      if (type === 'essence_review' || path === '/topic_essence_review_list') return '申精'
+      if (type === 'home' || path === '/' || path === '/index.php') {
+        if (path === '/' || path === '/index.php') {
+          if (p.sort === 'lucky') return '抽奖'
+          if (p.sort === 'card') return '发卡'
+          if (p.sort === 'red_packet') return '红包'
+          if (p.sort === 'comment') return '新评论'
+          return '新帖子'
+        }
+      }
+      if (type === 'forum') {
+        const f = (getForums() || []).find((x) => x.id === p.id)
+        return f?.name || '版块'
+      }
+      if (type === 'topic') {
+        try {
+          const title = parseTopic(document)?.title
+          if (title) return title
+        } catch {
+          /* 解析失败则读标题节点 */
+        }
+        return (document.querySelector('h1.post-content-title')?.textContent || '').trim() || '帖子'
+      }
+      if (type === 'user') return '用户'
+      if (type === 'featured') return '精华'
+      if (type === 'hot_discussions' || path === '/hot_discussions') return '热议'
+      if (type === 'footprint') return '足迹'
+      if (type === 'gacha') return '称号抽取'
+      if (type === 'gacha_market') return '称号交易'
+      if (type === 'gacha_profile') return '我的称号'
+      if (type === 'wallet') return '我的烧饼'
+      if (type === 'invite') return '邀请中心'
+      return 'LINUX SB'
+    }
+
+    function isActiveHref(href) {
+      const p = getPage() || {}
+      if (href === '/' || href === '') return p.type === 'home'
+      if (p.type === 'forum') return href === `/forum/${p.id}`
+      return false
+    }
+
+    function canvasPageType() {
+      const type = String(getPage()?.type || '')
+      if (['home', 'forum', 'topic', 'user', 'settings'].includes(type)) return type
+      const path = pagePath()
+      if (path === '/' || path === '/index.php') return 'home'
+      if (/^\/forum\/\d+/.test(path) || /^\/category\/\d+/.test(path)) return 'forum'
+      if (/^\/topic\/\d+/.test(path)) return 'topic'
+      if (/^\/user(?:\/|$)/.test(path)) return 'user'
+      if (/settings|preferences|config/i.test(path)) return 'settings'
+      return 'page'
+    }
+
+    function navigationEntries() {
+      const location = getLocation()
+      const currentHref = `${location.pathname}${location.search}${location.hash}`
+      const favorite = document.querySelector('a[href*="tab=favorites"], a[href*="favorites"]')
+      const search = document.querySelector('form.search-form')
+      const entries = [
+        { href: '/', label: '全部主题', group: '站点' },
+        { href: homeSorted('post'), label: '新帖子', group: '站点' },
+        ...(currentHref !== '/' ? [{ href: currentHref, label: '当前页面', group: '最近访问' }] : []),
+        ...(favorite?.getAttribute('href') ? [{ href: favorite.getAttribute('href'), label: '我的收藏', group: '收藏' }] : []),
+        ...(search?.getAttribute('action') ? [{ href: search.getAttribute('action'), label: '站内搜索', group: '搜索' }] : [{ href: '/search', label: '站内搜索', group: '搜索' }]),
+        ...collectBoards().slice(0, 80).map((item) => ({ href: item.href, label: item.label, group: '版块' })),
+      ]
+      const out = []
+      const seen = new Set()
+      for (const item of entries) {
+        if (!item?.href || !item.label || seen.has(item.href)) continue
+        seen.add(item.href)
+        out.push(item)
+      }
+      return out
+    }
+
+    return { collectBoards, pagePath, locationText, isActiveHref, canvasPageType, navigationEntries }
+  }
+  // Owns the live outlet, temporarily detached sidebars, and the window scroll bridge.
+  function createSkinContentController({ window, document, isChallengeDocument, findLeftRails, createScrollBridge }) {
+    let outlet = null
+    let home = null
+    let scroller = null
+    let bridge = null
+    const sidebarHomes = new Map()
+
+    function findOutlet(scope = document) {
+      if (isChallengeDocument(scope)) return null
+      const candidates = [
+        scope.querySelector?.('[data-slot~="page.before_render"]'),
+        scope.querySelector?.('main.wrap'),
+        scope.querySelector?.('main'),
+      ]
+      return candidates.find((node) => node && node.id !== 'lsb-shell' && !node.querySelector?.('#lsb-shell')) || null
+    }
+
+    function detachSidebars(root) {
+      const sidebars = [...root.querySelectorAll('aside.sidebar')].filter((node) =>
+        node.id !== 'mobile-menu-drawer' && !node.classList.contains('mobile-menu-drawer'))
+      const rails = findLeftRails(root)
+      for (const node of [...sidebars, ...rails]) {
+        if (!sidebarHomes.has(node)) {
+          sidebarHomes.set(node, {
+            parent: node.parentNode,
+            next: node.nextSibling,
+            addedHidden: rails.includes(node) && !node.classList.contains('lsb-native-left-hidden'),
+          })
+        }
+        if (rails.includes(node)) node.classList.add('lsb-native-left-hidden')
+        if (node.parentNode !== document.body) document.body.append(node)
+      }
+    }
+
+    function restoreSidebars() {
+      // Reverse order restores adjacent siblings even when their anchors were also moved.
+      for (const [node, origin] of [...sidebarHomes].reverse()) {
+        const parent = origin.parent
+        if (parent && node.parentNode !== parent) {
+          try {
+            parent.insertBefore(node, origin.next?.parentNode === parent ? origin.next : null)
+          } catch {
+            try { parent.append(node) } catch { /* stale route node */ }
+          }
+        }
+        if (origin.addedHidden) node.classList.remove('lsb-native-left-hidden')
+      }
+      sidebarHomes.clear()
+    }
+
+    function syncScrollBridge(root = null) {
+      const next = root instanceof window.Element ? root : null
+      if (bridge?.root === next) return
+      bridge?.dispose?.()
+      bridge = null
+      if (!next || typeof createScrollBridge !== 'function') return
+      try {
+        bridge = createScrollBridge({ windowRef: window, root: next })
+      } catch { /* bridge unavailable: leave native window scrolling intact */ }
+    }
+
+    function release() {
+      restoreSidebars()
+      // An outlet removed by the site belongs to the old route; do not resurrect it.
+      if (outlet?.isConnected && home) {
+        const parent = home.parent?.isConnected ? home.parent : document.body
+        try {
+          parent.insertBefore(outlet, home.next?.parentNode === parent ? home.next : null)
+        } catch {
+          document.body.append(outlet)
+        }
+      }
+      outlet = null
+      home = null
+      scroller = null
+      syncScrollBridge()
+    }
+
+    function mount(next, host) {
+      if (!(next instanceof window.Element) || !(host instanceof window.Element)) return
+      if (outlet && outlet !== next) release()
+      if (!home) home = { parent: next.parentNode, next: next.nextSibling }
+      outlet = next
+      detachSidebars(next)
+      if (next.parentNode !== host) host.append(next)
+      scroller = host
+      syncScrollBridge(host)
+    }
+
+    return {
+      findOutlet, mount, restoreSidebars, syncScrollBridge, release,
+      get scroller() { return scroller },
+      get bridge() { return bridge },
+    }
+  }
+  // History state and temporary scroll-anchoring ownership for shell navigation.
+  function createSkinHistoryController({ window, document, getScrollRoot, readScroll, scrollTo }) {
+    const history = window.history
+    let index = 0
+    let rollbackIndex = null
+    let bound = false
+    let previousRestoration
+    let ownsRestoration = false
+    let restoreCleanup = null
+
+    function readIndex() {
+      const value = Number(history.state?.lsbShellSpaIndex)
+      return Number.isSafeInteger(value) && value >= 0 ? value : null
+    }
+
+    function entryState(url, nextIndex, x, y) {
+      const prior = history.state && typeof history.state === 'object' ? history.state : {}
       return {
-        width: Math.max(1, Number(window.innerWidth || document.documentElement?.clientWidth || 1)),
-        height: Math.max(1, Number(window.innerHeight || document.documentElement?.clientHeight || 1)),
+        ...prior,
+        lsbShellSpa: true,
+        lsbShellSpaIndex: nextIndex,
+        lsbShellSpaUrl: url,
+        lsbScrollX: Number(x) || 0,
+        lsbScrollY: Number(y) || 0,
       }
     }
 
-    function readCanvasState() {
-      let stored = null
-      try { stored = api.store.get(CANVAS_STATE_KEY, null) } catch { stored = null }
-      if (!stored || typeof stored !== 'object' || Number(stored.version) !== CANVAS_STATE_VERSION) {
-        canvasState = migrateLegacySkinState(cfg)
-        canvasStateMigrated = true
-        try { api.store.set(CANVAS_STATE_KEY, canvasState) } catch { /* storage may be unavailable */ }
-      } else {
-        const base = defaultCanvasState()
-        canvasState = canvasMerge(base, stored)
-        canvasState.version = CANVAS_STATE_VERSION
-        canvasState.sites = stored.sites && typeof stored.sites === 'object' ? canvasCopy(stored.sites) : {}
+    function rememberScroll() {
+      const nextIndex = readIndex() ?? index
+      const { x, y } = readScroll()
+      try {
+        history.replaceState(entryState(window.location.href, nextIndex, x, y), '', window.location.href)
+        index = nextIndex
+      } catch { /* history unavailable must not block content navigation */ }
+    }
+
+    function bind() {
+      if (bound) return
+      bound = true
+      try {
+        previousRestoration = history.scrollRestoration
+        history.scrollRestoration = 'manual'
+        ownsRestoration = true
+      } catch { /* unsupported history property */ }
+      index = readIndex() ?? 0
+      rememberScroll()
+    }
+
+    function apply(target, mode) {
+      if (mode === 'none') return
+      const currentIndex = readIndex() ?? index
+      const nextIndex = mode === 'replace' ? currentIndex : currentIndex + 1
+      try {
+        const state = entryState(target.href, nextIndex, 0, 0)
+        if (mode === 'replace') history.replaceState(state, '', target.href)
+        else history.pushState(state, '', target.href)
+        index = nextIndex
+      } catch { /* content can still render when the address bar cannot be updated */ }
+    }
+
+    function acceptPop(canLeave) {
+      const targetIndex = readIndex()
+      if (rollbackIndex !== null) {
+        const expected = rollbackIndex
+        rollbackIndex = null
+        if (targetIndex === expected) {
+          index = expected
+          return false
+        }
       }
-      canvasSiteKey = siteKeyFromLocation(location)
-      canvasWidthClass = widthClass(canvasViewport().width)
-      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
-      return canvasEffective
+      if (!canLeave()) {
+        rollbackIndex = index
+        try {
+          history.go(targetIndex === null ? 1 : index - targetIndex)
+        } catch { rollbackIndex = null }
+        return false
+      }
+      if (targetIndex !== null) index = targetIndex
+      return true
     }
 
-    function saveCanvasState() {
-      if (!canvasState) return
-      try { api.store.set(CANVAS_STATE_KEY, canvasCopy(canvasState)) } catch { /* storage failure is non-fatal */ }
+    function cancelRestore() {
+      restoreCleanup?.()
     }
 
-    function canvasDebugSnapshot() {
-      const host = document.getElementById('lsb-shell-surfaces')
-      return {
-        enabled: canvasState?.enabled !== false && cfg.shell !== false,
-        version: CANVAS_STATE_VERSION,
-        siteKey: canvasSiteKey,
-        widthClass: canvasWidthClass,
-        preset: canvasEffective?.preset || 'balanced-glass',
-        legacyLayoutSnapshot: canvasCopy(canvasState?.legacyLayoutSnapshot || null),
-        surfaces: [...(host?.querySelectorAll?.('[data-surface]') || [])]
-          .filter((node) => !node.hidden && !['top-status', 'tool-capsule'].includes(node.getAttribute('data-surface')))
-          .map((node) => String(node.getAttribute('data-surface') || ''))
-          .filter(Boolean),
-        user: {
-          enabled: canvasPageType() === 'user',
-          selfProfile: {
-            mounted: !!document.querySelector('[data-canvas-profile-host] .lsb-canvas-self-user-card'),
-            expanded: document.querySelector('[data-canvas-profile-host]')?.dataset.expanded === 'true',
-            locked: document.querySelector('[data-canvas-profile-host]')?.dataset.locked === 'true',
-          },
-          profile: {
-            scrollMode: document.querySelector('[data-lsb-canvas-profile]')?.dataset.scrollMode || 'full',
-            expanded: document.querySelector('[data-lsb-canvas-profile]')?.dataset.expanded === 'true',
-            mounted: !!document.querySelector('[data-lsb-canvas-profile] .sidebar-card.user-card'),
-          },
-          listMounted: !!document.querySelector('[data-lsb-canvas-list]'),
-          topLinks: [...(host?.querySelectorAll?.('[data-canvas-status-links] a, [data-canvas-pinned-links] a') || [])].map((node) => String(node.textContent || '').trim()).filter(Boolean),
-          gap: 12,
-        },
+    function protectScrollAnchor() {
+      const root = getScrollRoot() || document.scrollingElement || document.documentElement
+      if (!root?.style) return
+      const style = root.style
+      const prior = style.getPropertyValue('overflow-anchor')
+      const priority = style.getPropertyPriority('overflow-anchor')
+      style.setProperty('overflow-anchor', 'none', 'important')
+      const events = ['wheel', 'touchstart', 'pointerdown', 'keydown', 'pagehide']
+      const scrollKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'])
+      let active = true
+      let timer = 0
+      const cleanup = () => {
+        if (!active) return
+        active = false
+        window.clearTimeout(timer)
+        for (const event of events) window.removeEventListener(event, onInput, true)
+        if (style.getPropertyValue('overflow-anchor') === 'none' && style.getPropertyPriority('overflow-anchor') === 'important') {
+          if (prior) style.setProperty('overflow-anchor', prior, priority)
+          else style.removeProperty('overflow-anchor')
+        }
+        if (restoreCleanup === cleanup) restoreCleanup = null
+      }
+      function onInput(event) {
+        if (event.type !== 'keydown' || scrollKeys.has(event.key)) cleanup()
+      }
+      restoreCleanup = cleanup
+      for (const event of events) window.addEventListener(event, onInput, { capture: true, passive: true })
+      // Covers the native toolbar's following frames and the 180ms content entrance.
+      // No repeated scroll writes: user intent and subsequent layout keep their ownership.
+      timer = window.setTimeout(cleanup, 250)
+    }
+
+    function restoreScroll(mode) {
+      cancelRestore()
+      const savedAxis = (key) => {
+        const value = Number(history.state?.[key])
+        return Number.isFinite(value) && value >= 0 ? value : 0
+      }
+      if (mode === 'none') protectScrollAnchor()
+      try {
+        scrollTo(mode === 'none' ? savedAxis('lsbScrollX') : 0, mode === 'none' ? savedAxis('lsbScrollY') : 0)
+      } catch {
+        cancelRestore()
       }
     }
 
-    readCanvasState()
-    const shellLayoutApi = api.ui.shellLayout || null
-    const shellStyleApi = api.ui.shellStyle || null
-    const hasWindowApi = typeof api.ui.shellWindowController === 'function'
-    let contentHome = null
-    let contentOutlet = null
-    let contentScroller = null
-    let scrollBridge = null
-    const nativeSidebarHomes = new Map()
-    let shellWindowLayout = null
-    let shellWindowRegistry = []
-    let shellLayoutKey = ''
-    let shellLayoutSaveTimer = 0
-    const shellTokenProps = new Set()
-    let mediaDbPromise = null
-    let mediaGeneration = 0
-    let backgroundVideo = null
-    let backgroundVideoObjectUrl = ''
-    let backgroundImage = null
-    let backgroundImageObjectUrl = ''
-    let loadedFontFace = null
-    let loadedFontObjectUrl = ''
-    let backgroundSpecKey = ''
-    let fontSpecKey = ''
-    let spaRouteChromeSerial = 0
-    let mountedUiMode = null
-    let pendingUiModeScroll = null
-    let cloudflareChallengeObserver = null
-    let uiModeResizeBound = false
-    let uiModeWideSnapshot = null
-    let canvasShell = null
-    let canvasSurfaceHost = null
-    let canvasActiveSheet = ''
-    let canvasFocusReturn = null
-    let canvasSearchOutsideHandler = null
-    let canvasZIndex = 0
-    let canvasSelectionBound = false
-    let canvasSelectionHandler = null
-    let canvasSelectionPost = null
-    let canvasSelectionText = ''
-    let canvasSelectionDismissTimer = 0
-    let canvasScrollBound = false
-    let canvasScrollLast = 0
-    let canvasScrollRaf = 0
-    let canvasScrollHandler = null
-    let canvasResizeHandler = null
-    let canvasDragState = null
-    let canvasDragRaf = 0
+    function cancel() {
+      rollbackIndex = null
+      cancelRestore()
+    }
+
+    function dispose() {
+      cancel()
+      if (ownsRestoration) {
+        try {
+          if (history.scrollRestoration === 'manual') {
+            if (previousRestoration === undefined) delete history.scrollRestoration
+            else history.scrollRestoration = previousRestoration
+          }
+        } catch { /* read-only history property */ }
+      }
+      ownsRestoration = false
+      bound = false
+    }
+
+    return { bind, rememberScroll, apply, acceptPop, restoreScroll, cancelRestore, cancel, dispose }
+  }
+  /** Owns native user cards and reversible canvas profile decoration. */
+  function createSkinProfileController({ window, document, getPage, getMe, getSidebars, getSelfHost, getViewport }) {
+    const { Element, HTMLElement, URL } = window
     let canvasProfileExpanded = false
     let canvasProfileScrollMode = 'full'
     let canvasSelfProfileHome = null
@@ -7038,1610 +8827,1087 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     let canvasSelfProfileLocked = false
     let canvasListSurface = null
     let canvasListHome = null
-    let canvasStatusObserver = null
-    let canvasScrollTarget = null
-    const canvasStatusLinkHomes = new Map()
-    let windowInteractionBound = false
-    let windowInteractionState = null
-    let windowInteractionRaf = 0
-    let responsiveBound = false
-    let responsiveHandler = null
-    let narrowActiveWindow = 'content'
-    const LAYOUT_MIGRATION_KEY = 'layoutMigrationVersion'
-    const LAYOUT_MIGRATION_VERSION = 1
-    const LAYOUT_SAVE_DEBOUNCE = 150
-    const offWindowController = hasWindowApi
-      ? api.ui.shellWindowController((action, value) => {
-        if (action === 'focus') return focusShellWindow(value)
-        if (action === 'arrange') return arrangeShellWindows()
-        if (action === 'reset') return resetShellWindow(value)
-        if (action === 'layout') return shellWindowLayout ? structuredCloneSafe(shellWindowLayout) : null
-        return null
-      })
-      : () => {}
-    const offScrollRoot = typeof api.ui.shellScrollRootController === 'function'
-      ? api.ui.shellScrollRootController(() => contentScroller)
-      : () => {}
-    const offAsideController = typeof api.ui.shellAsideController === 'function'
-      ? api.ui.shellAsideController((id) => {
-        const aside = document.querySelector('#lsb-shell-aside')
-        return asideSetActive(id, aside, true)
-      })
-      : () => {}
-    let searchHome = null
     let userCardHome = null
     let canvasProfileSlot = null
     let canvasProfileOutlet = null
+    const decorations = new Map()
+    const bindings = new Map()
+
+    function rememberHome(node, cls) {
+      return { node, parent: node.parentNode, next: node.nextSibling, hadClass: node.classList.contains(cls) }
+    }
+
+    function decorate(node, name, value) {
+      if (!node) return
+      let attributes = decorations.get(node)
+      if (!attributes) decorations.set(node, attributes = new Map())
+      if (!attributes.has(name)) attributes.set(name, { before: node.getAttribute(name), applied: value })
+      const owned = attributes.get(name)
+      if (node.getAttribute(name) !== owned.applied) owned.before = node.getAttribute(name)
+      owned.applied = value
+      node.setAttribute(name, value)
+    }
+
+    function restoreDecorations() {
+      for (const [node, attributes] of decorations) {
+        for (const [name, { before, applied }] of attributes) {
+          if (node.getAttribute(name) !== applied) continue
+          if (before === null) node.removeAttribute(name)
+          else node.setAttribute(name, before)
+        }
+      }
+      decorations.clear()
+    }
+
+    function restoreNode(el, home, cls) {
+      if (!el) return
+      if (!home?.hadClass) el.classList.remove(cls)
+      if (!el.parentNode) return
+      if (!home?.parent?.isConnected) {
+        el.remove()
+        return
+      }
+      if (home.next?.parentNode === home.parent) {
+        home.parent.insertBefore(el, home.next)
+      } else {
+        home.parent.append(el)
+      }
+    }
+
+    function findNativeUserCard() {
+      const hosted = document.querySelector('#lsb-shell [data-lsb-shell-me] .sidebar-card.user-card')
+      if (hosted) return hosted
+      for (const side of getSidebars()) {
+        const card = side.querySelector('.sidebar-card.user-card')
+        if (card) return card
+      }
+      return document.querySelector('aside.sidebar .sidebar-card.user-card')
+    }
+
+    function isSelfUserCard(card) {
+      if (!(card instanceof Element)) return false
+      const uid = getMe()?.uid
+      if (uid == null) return true
+      const href = card.querySelector('a.user-name')?.getAttribute('href') || ''
+      try {
+        const url = new URL(href, document.location.href)
+        return url.origin === document.location.origin && url.pathname.replace(/\/+$/, '') === `/user/${uid}`
+      } catch { return false }
+    }
+
+    function findIncomingSelfCard(host) {
+      for (const card of document.querySelectorAll('.sidebar-card.user-card')) {
+        if (host?.contains(card)) continue
+        if (!isSelfUserCard(card)) continue
+        return card
+      }
+      return null
+    }
+
+    function userCardKey(card) {
+      if (!(card instanceof Element)) return ''
+      return [...card.querySelectorAll('a[href]')]
+        .map((a) => a.getAttribute('href') || '')
+        .join('\n')
+    }
+
+    function adoptUserCard(host) {
+      if (!(host instanceof Element)) return
+      const userPageProfile = getPage()?.type === 'user' && host.hasAttribute('data-lsb-canvas-profile')
+      const incoming = userPageProfile ? null : findIncomingSelfCard(host)
+      const hosted = host.querySelector('.sidebar-card.user-card')
+      if (incoming && incoming !== hosted) {
+        if (hosted && userCardKey(hosted) === userCardKey(incoming)) return
+        if (hosted) restoreUserCard()
+        if (userCardHome?.node !== incoming) userCardHome = rememberHome(incoming, 'lsb-shell-user-card')
+        incoming.classList.add('lsb-shell-user-card')
+        host.append(incoming)
+        return
+      }
+      if (hosted) return
+      let card = findNativeUserCard()
+      if (userPageProfile) {
+        card = getSidebars()
+          .flatMap((side) => [...side.querySelectorAll('.sidebar-card.user-card')])
+          .find((candidate) => !host.contains(candidate) && !isSelfUserCard(candidate)) || card
+      }
+      if (!(card instanceof Element) || host.contains(card) || (!userPageProfile && !isSelfUserCard(card))) return
+      if (userCardHome?.node !== card) userCardHome = rememberHome(card, 'lsb-shell-user-card')
+      card.classList.add('lsb-shell-user-card')
+      host.append(card)
+    }
+
+    function restoreUserCard() {
+      const card = userCardHome?.node
+      restoreNode(card, userCardHome, 'lsb-shell-user-card')
+      userCardHome = null
+    }
+
+    function canvasProfileSetExpanded(host, expanded, locked = canvasSelfProfileLocked) {
+      if (!(host instanceof Element)) return
+      const next = !!expanded
+      host.dataset.expanded = String(next)
+      host.dataset.locked = String(!!locked)
+      const button = host.querySelector('[data-canvas-profile-expand]')
+      if (button instanceof HTMLElement) {
+        button.setAttribute('aria-expanded', String(next))
+        button.textContent = next ? '⌃' : '⌄'
+        button.setAttribute('title', next ? (locked ? '收起个人资料卡' : '个人资料卡已展开') : '展开个人资料卡')
+      }
+    }
+
+    function canvasBindSelfProfile(host) {
+      if (!(host instanceof Element) || bindings.has(host)) return
+      host.dataset.canvasProfileBound = '1'
+      const listeners = []
+      const on = (node, event, listener) => {
+        if (!node) return
+        node.addEventListener(event, listener)
+        listeners.push(() => node.removeEventListener(event, listener))
+      }
+      bindings.set(host, () => {
+        listeners.forEach((off) => off())
+        host.removeAttribute('data-canvas-profile-bound')
+      })
+      on(host, 'mouseenter', () => {
+        if (getViewport().width < 1100 || canvasSelfProfileLocked) return
+        canvasProfileSetExpanded(host, true, false)
+      })
+      on(host, 'mouseleave', () => {
+        if (canvasSelfProfileLocked) return
+        canvasProfileSetExpanded(host, false, false)
+      })
+      on(host, 'focusout', (event) => {
+        if (canvasSelfProfileLocked || host.contains(event.relatedTarget)) return
+        canvasProfileSetExpanded(host, false, false)
+      })
+      const button = host.querySelector('[data-canvas-profile-expand]')
+      on(button, 'click', (event) => {
+        event.preventDefault()
+        event.stopPropagation()
+        const next = !canvasSelfProfileLocked
+        canvasSelfProfileLocked = next
+        canvasProfileSetExpanded(host, next, canvasSelfProfileLocked)
+      })
+    }
+
+    function canvasPrepareSelfProfileCard(card) {
+      if (!(card instanceof Element)) return
+      card.classList.add('lsb-canvas-self-user-card')
+      decorate(card, 'id', 'lsb-canvas-self-profile-card')
+      const host = card.closest('[data-canvas-profile-host]')
+      decorate(host?.querySelector('[data-canvas-profile-expand]'), 'aria-controls', card.id)
+      const bell = [...card.querySelectorAll('a[href]')].find((a) => {
+        const href = a.getAttribute('href') || ''
+        return /[?&]tab=notifications(?:&|$)/.test(href)
+      })
+      if (bell) {
+        decorate(bell, 'data-canvas-profile-bell', '')
+        decorate(bell, 'aria-label', '我的通知')
+        decorate(bell, 'title', '我的通知')
+      }
+    }
+
+    function canvasMountSelfProfile() {
+      const host = getSelfHost()
+      if (!(host instanceof Element)) return null
+      if (canvasSelfProfileHost && canvasSelfProfileHost !== host) {
+        bindings.get(canvasSelfProfileHost)?.()
+        bindings.delete(canvasSelfProfileHost)
+        canvasSelfProfileHost.hidden = true
+      }
+      canvasSelfProfileHost = host
+      canvasBindSelfProfile(host)
+      let card = host.querySelector('.sidebar-card.user-card')
+      if (card instanceof Element) {
+        if (canvasSelfProfileHome?.node !== card) {
+          restoreNode(canvasSelfProfileHome?.node, canvasSelfProfileHome, 'lsb-canvas-self-user-card')
+          restoreDecorations()
+          canvasSelfProfileHome = rememberHome(card, 'lsb-canvas-self-user-card')
+        }
+        canvasPrepareSelfProfileCard(card)
+        host.hidden = false
+        canvasSelfProfileLocked = false
+        canvasProfileSetExpanded(host, false, false)
+        return host
+      }
+      if (!(card instanceof Element)) {
+        card = canvasSelfProfileHome?.node?.parentNode ? canvasSelfProfileHome.node : null
+      }
+      if (!(card instanceof Element)) {
+        card = findIncomingSelfCard(host) || findNativeUserCard()
+      }
+      if (!(card instanceof Element) || host.contains(card) || !isSelfUserCard(card)) {
+        host.hidden = true
+        canvasSelfProfileLocked = false
+        canvasProfileSetExpanded(host, false, false)
+        return host
+      }
+      if (canvasSelfProfileHome?.node !== card) {
+        restoreNode(canvasSelfProfileHome?.node, canvasSelfProfileHome, 'lsb-canvas-self-user-card')
+        restoreDecorations()
+        canvasSelfProfileHome = rememberHome(card, 'lsb-canvas-self-user-card')
+      }
+      host.append(card)
+      canvasPrepareSelfProfileCard(card)
+      host.hidden = false
+      canvasSelfProfileLocked = false
+      canvasProfileSetExpanded(host, false, false)
+      return host
+    }
+
+    function canvasRestoreSelfProfile() {
+      const card = canvasSelfProfileHome?.node
+      restoreNode(card, canvasSelfProfileHome, 'lsb-canvas-self-user-card')
+      restoreDecorations()
+      for (const off of bindings.values()) off()
+      bindings.clear()
+      canvasSelfProfileHome = null
+      canvasSelfProfileLocked = false
+      if (canvasSelfProfileHost) {
+        canvasSelfProfileHost.hidden = true
+        canvasSelfProfileHost.removeAttribute('data-expanded')
+        canvasSelfProfileHost.removeAttribute('data-locked')
+      }
+      canvasSelfProfileHost = null
+    }
+
+    function canvasProfileSlotFor(outlet) {
+      if (!(outlet instanceof Element)) return null
+      let slot = [...outlet.children].find((node) => node.getAttribute?.('data-canvas-profile-slot') === 'true')
+      if (!(slot instanceof Element)) {
+        slot = document.createElement('div')
+        slot.setAttribute('data-canvas-profile-slot', 'true')
+        slot.setAttribute('aria-label', '个人信息')
+        outlet.insertBefore(slot, outlet.firstChild)
+      } else if (slot !== outlet.firstElementChild) {
+        outlet.insertBefore(slot, outlet.firstChild)
+      }
+      return slot
+    }
+
+    function canvasRestoreProfile() {
+      canvasRestoreSelfProfile()
+      restoreUserCard()
+      if (canvasListSurface && canvasListHome) {
+        if (canvasListHome.mark === null) canvasListSurface.removeAttribute('data-lsb-canvas-list')
+        else canvasListSurface.setAttribute('data-lsb-canvas-list', canvasListHome.mark)
+      }
+      canvasListSurface = null
+      canvasListHome = null
+      canvasProfileExpanded = false
+      canvasProfileScrollMode = 'full'
+      canvasProfileSlot?.remove()
+      canvasProfileSlot = null
+      canvasProfileOutlet = null
+    }
+
+    function canvasUserListSurface(outlet) {
+      if (!(outlet instanceof Element) || getPage()?.type !== 'user') return null
+      const direct = [...outlet.children].find((node) => node.matches?.('.home-shell, .forum-layout, .forum-main, .main-panel'))
+      const list = direct || outlet.querySelector('.home-shell, .forum-layout, .forum-main, .main-panel')
+      if (!(list instanceof Element)) return null
+      if (canvasListSurface && canvasListSurface !== list) {
+        if (canvasListHome?.mark === null) canvasListSurface.removeAttribute('data-lsb-canvas-list')
+        else if (canvasListHome) canvasListSurface.setAttribute('data-lsb-canvas-list', canvasListHome.mark)
+        canvasListHome = null
+      }
+      if (!canvasListHome) canvasListHome = { mark: list.getAttribute('data-lsb-canvas-list') }
+      list.setAttribute('data-lsb-canvas-list', '')
+      canvasListSurface = list
+      return list
+    }
+
+    function canvasApplyUserSurfaceState(outlet, slot) {
+      if (!(slot instanceof Element) || getPage()?.type !== 'user') return
+      canvasProfileExpanded = false
+      canvasProfileScrollMode = 'full'
+      slot.setAttribute('data-lsb-canvas-profile', '')
+      slot.dataset.scrollMode = canvasProfileScrollMode
+      slot.dataset.expanded = String(canvasProfileExpanded)
+      canvasUserListSurface(outlet)
+    }
+
+    function canvasMountProfile(outlet) {
+      if (!(outlet instanceof Element)) return null
+      if (canvasProfileOutlet && canvasProfileOutlet !== outlet) canvasRestoreProfile()
+      canvasMountSelfProfile()
+      canvasProfileOutlet = outlet
+      if (getPage()?.type !== 'user') return canvasSelfProfileHost
+      const slot = canvasProfileSlotFor(outlet)
+      if (!(slot instanceof Element)) return null
+      canvasProfileSlot = slot
+      slot.setAttribute('data-lsb-canvas-profile', '')
+      adoptUserCard(slot)
+      if (!slot.querySelector('.sidebar-card.user-card')) {
+        slot.hidden = true
+      } else {
+        slot.hidden = false
+        canvasApplyUserSurfaceState(outlet, slot)
+      }
+      return slot
+    }
+
+    function canvasUpdateProfileScroll(y, previous) {
+      const host = document.querySelector('[data-lsb-canvas-profile]')
+      if (!(host instanceof Element) || getPage()?.type !== 'user') return
+      // 资料卡已经收窄到原生选项的内容宽度，完整链接始终可见，不再因滚动折叠。
+      canvasProfileExpanded = false
+      canvasProfileScrollMode = 'full'
+      host.dataset.scrollMode = canvasProfileScrollMode
+      host.dataset.expanded = String(canvasProfileExpanded)
+    }
+
+    return { adoptUserCard, restoreUserCard, isSelfUserCard, mount: canvasMountProfile, restore: canvasRestoreProfile, updateScroll: canvasUpdateProfileScroll }
+  }
+  /** Owns canvas site cards, their native origins and persistent route placeholders. */
+  function createSkinSiteCardsController({ document, getSidebars }) {
+    const { Element, HTMLElement } = document.defaultView
     const canvasSiteSidebarHomes = new Map()
     const canvasPersistentSiteCards = new Map()
-    let canvasSiteSidebarHost = null
-    let canvasSiteStatusHost = null
-    let canvasSiteStatusLocked = false
-    let canvasSidebarObserver = null
-    const extrasHomes = new Map()
+
+    function restoreNode(el, home, cls) {
+      if (!el) return
+      if (!home?.hadClass) el.classList.remove(cls)
+      if (!el.parentNode) {
+        home?.placeholder?.remove()
+        return
+      }
+      if (!home?.parent?.isConnected) {
+        home?.placeholder?.remove()
+        el.remove()
+        return
+      }
+      if (home.placeholder?.parentNode === home.parent) {
+        home.parent.replaceChild(el, home.placeholder)
+      } else if (home.next?.parentNode === home.parent) {
+        home.parent.insertBefore(el, home.next)
+      } else {
+        home.parent.append(el)
+      }
+    }
+
+    function canvasPersistentSiteCardKind(card) {
+      if (!(card instanceof Element)) return ''
+      if (card.matches('.sidebar-promotions-card')) return 'promotions'
+      if (card.matches('.daily-hot-topics-card')) return 'daily-hot-topics'
+      return ''
+    }
+
+    function canvasEnsurePersistentSiteCard(card) {
+      const kind = canvasPersistentSiteCardKind(card)
+      if (!kind) return null
+      let record = canvasPersistentSiteCards.get(kind)
+      if (!record) {
+        const parent = card.parentNode
+        const placeholder = document.createComment(`lsb-canvas-${kind}-origin`)
+        parent?.insertBefore(placeholder, card)
+        record = { node: card, placeholder, originalParent: parent, originalNext: card.nextSibling }
+        canvasPersistentSiteCards.set(kind, record)
+      }
+      return record
+    }
+
+    function canvasAdoptRebuiltPersistentSiteCard(kind, card) {
+      const record = canvasPersistentSiteCards.get(kind)
+      const parent = card?.parentNode
+      if (!record || record.node?.isConnected || !parent) return false
+      const placeholder = document.createComment(`lsb-canvas-${kind}-origin`)
+      const originalNext = card.nextSibling
+      parent.insertBefore(placeholder, card)
+      canvasSiteSidebarHomes.delete(record.node)
+      record.node = card
+      record.placeholder = placeholder
+      record.originalParent = parent
+      record.originalNext = originalNext
+      return true
+    }
+
+    function canvasRestorePersistentSiteCard(kind, record, { release = true } = {}) {
+      if (!record?.node) return
+      const { node, placeholder, originalParent, originalNext } = record
+      const placeholderParent = placeholder?.parentNode
+      const connectedParent = placeholderParent?.isConnected
+        ? placeholderParent
+        : (originalParent?.isConnected ? originalParent : getSidebars().find((side) => side.isConnected))
+      if (connectedParent && placeholderParent === connectedParent) {
+        connectedParent.replaceChild(node, placeholder)
+      } else if (connectedParent) {
+        const before = originalNext?.parentNode === connectedParent ? originalNext : null
+        connectedParent.insertBefore(node, before)
+      } else if (originalParent?.isConnected) {
+        const before = originalNext?.parentNode === originalParent ? originalNext : null
+        originalParent.insertBefore(node, before)
+      } else if (!node.parentNode?.isConnected) {
+        node.remove()
+      }
+      node.classList.remove('lsb-canvas-site-card')
+      if (release) canvasPersistentSiteCards.delete(kind)
+      canvasSiteSidebarHomes.delete(node)
+    }
+
+    function canvasStagePersistentSiteCardOrigins(remoteOutlet) {
+      if (!(remoteOutlet instanceof Element)) return
+      for (const [kind] of canvasPersistentSiteCards) {
+        const remotes = [...remoteOutlet.querySelectorAll('.sidebar-promotions-card, .daily-hot-topics-card')]
+          .filter((card) => canvasPersistentSiteCardKind(card) === kind)
+        for (const remote of remotes) {
+          const marker = remote.ownerDocument.createElement('span')
+          marker.hidden = true
+          marker.dataset.lsbCanvasSiteOrigin = kind
+          marker.setAttribute('aria-hidden', 'true')
+          remote.replaceWith(marker)
+        }
+      }
+    }
+
+    function canvasRebindPersistentSiteCardOrigins(routeOutlet) {
+      if (!routeOutlet?.querySelector) return
+      for (const [kind, record] of canvasPersistentSiteCards) {
+        const marker = routeOutlet.querySelector(`[data-lsb-canvas-site-origin="${kind}"]`)
+        if (!marker) continue
+        record.placeholder = marker
+        record.originalParent = marker.parentNode
+        record.originalNext = marker.nextSibling
+      }
+    }
+
+    function canvasRestoreSiteSidebar({ releasePersistent = false, restorePersistent = false } = {}) {
+      const persistentByNode = new Map(
+        [...canvasPersistentSiteCards].map(([kind, record]) => [record.node, { kind, record }]),
+      )
+      for (const [card, home] of [...canvasSiteSidebarHomes]) {
+        const persistent = persistentByNode.get(card)
+        if (persistent && !releasePersistent) continue
+        if (persistent) canvasRestorePersistentSiteCard(persistent.kind, persistent.record, { release: releasePersistent })
+        else restoreNode(card, home, 'lsb-canvas-site-card')
+        canvasSiteSidebarHomes.delete(card)
+      }
+      if (restorePersistent && !releasePersistent) {
+        for (const [kind, record] of canvasPersistentSiteCards) {
+          canvasRestorePersistentSiteCard(kind, record, { release: false })
+        }
+      }
+      if (releasePersistent) {
+        for (const [kind, record] of [...canvasPersistentSiteCards]) {
+          canvasRestorePersistentSiteCard(kind, record, { release: true })
+        }
+      }
+      if (releasePersistent) canvasPersistentSiteCards.clear()
+    }
+
+    function canvasPromotionNeedsNativeInitialization(card) {
+      if (!(card instanceof Element) || !card.matches('.sidebar-promotions-card')) return false
+      const links = [...card.querySelectorAll('[data-sidebar-promotions-ad-link="1"]')]
+      const textLinks = links.filter((link) =>
+        link.matches('.sidebar-promotions-slot-text, [data-sidebar-promotions-lottery-slot="1"]')
+        || (!link.matches('.sidebar-promotions-slot-image') && !link.querySelector('img')),
+      )
+      if (!textLinks.length) return false
+      return textLinks.some((link) => {
+        const style = link.getAttribute('style') || ''
+        return !/--sidebar-promotion-text\s*:/.test(style)
+          || !/--sidebar-promotion-background\s*:/.test(style)
+      })
+    }
+
+    function canvasNativeSiteCards() {
+      const cards = [...canvasSiteSidebarHomes]
+        .filter(([card, home]) => card.parentNode && home.parent?.isConnected)
+        .map(([card]) => card)
+      const emittedPersistentKinds = new Set()
+      for (const side of getSidebars()) {
+        for (const card of [...side.children].filter((node) => node.matches?.('.sidebar-card'))) {
+          if (card.classList.contains('user-card')) continue
+          if (card.classList.contains('mobile-menu-drawer')) continue
+          const kind = canvasPersistentSiteCardKind(card)
+          if (kind) {
+            const existing = canvasPersistentSiteCards.get(kind)
+            if (existing && existing.node !== card) {
+              if (existing.node?.isConnected) {
+                if (canvasPromotionNeedsNativeInitialization(card)) card.remove()
+                else cards.push(card)
+                continue
+              }
+              if (canvasPromotionNeedsNativeInitialization(card)) {
+                card.remove()
+                continue
+              }
+              canvasAdoptRebuiltPersistentSiteCard(kind, card)
+            }
+            const record = canvasEnsurePersistentSiteCard(card)
+            if (!record) continue
+            if (!emittedPersistentKinds.has(kind)) {
+              cards.push(record.node)
+              emittedPersistentKinds.add(kind)
+            }
+            continue
+          }
+          cards.push(card)
+        }
+      }
+      for (const [kind, record] of canvasPersistentSiteCards) {
+        if (record.node.isConnected && !emittedPersistentKinds.has(kind)) cards.push(record.node)
+      }
+      return [...new Set(cards)]
+    }
+
+    function syncPersistent(host) {
+      const cards = []
+      const emitted = new Set()
+      for (const side of getSidebars()) {
+        for (const card of [...side.children].filter((node) => node.matches?.('.sidebar-card'))) {
+          const kind = canvasPersistentSiteCardKind(card)
+          if (!kind) continue
+          const existing = canvasPersistentSiteCards.get(kind)
+          if (existing && existing.node !== card) {
+            if (existing.node?.isConnected) {
+              if (canvasPromotionNeedsNativeInitialization(card)) card.remove()
+              continue
+            }
+            if (canvasPromotionNeedsNativeInitialization(card)) {
+              card.remove()
+              continue
+            }
+            canvasAdoptRebuiltPersistentSiteCard(kind, card)
+          }
+          const record = canvasEnsurePersistentSiteCard(card)
+          if (record && !emitted.has(kind)) {
+            cards.push(record.node)
+            emitted.add(kind)
+          }
+        }
+      }
+      for (const [kind, record] of canvasPersistentSiteCards) {
+        if (record.node.isConnected && !emitted.has(kind)) cards.push(record.node)
+      }
+      for (const card of cards) {
+        if (host.contains(card)) continue
+        card.classList.add('lsb-canvas-site-card')
+        host.append(card)
+      }
+      const empty = host.querySelector('[data-canvas-site-empty-state]')
+      if (empty instanceof HTMLElement) empty.hidden = cards.length > 0
+    }
+
+    function syncAll(host) {
+      const cards = canvasNativeSiteCards()
+      const current = new Set(cards)
+      const persistentNodes = new Set(
+        [...canvasPersistentSiteCards.values()].map((record) => record.node),
+      )
+      for (const [card, home] of [...canvasSiteSidebarHomes]) {
+        if (!card.parentNode || !home.parent?.isConnected) {
+          restoreNode(card, home, 'lsb-canvas-site-card')
+          canvasSiteSidebarHomes.delete(card)
+        }
+      }
+      for (const card of [...host.children].filter((node) => node.matches?.('.sidebar-card'))) {
+        if (persistentNodes.has(card) || current.has(card) || canvasSiteSidebarHomes.has(card)) continue
+        const home = canvasSiteSidebarHomes.get(card)
+        if (home) {
+          restoreNode(card, home, 'lsb-canvas-site-card')
+          canvasSiteSidebarHomes.delete(card)
+        } else {
+          card.remove()
+        }
+      }
+      for (const card of cards) {
+        if (host.contains(card)) continue
+        if (!persistentNodes.has(card) && !canvasSiteSidebarHomes.has(card)) {
+          const parent = card.parentNode
+          const placeholder = document.createComment('lsb-canvas-site-card-origin')
+          parent?.insertBefore(placeholder, card)
+          canvasSiteSidebarHomes.set(card, { parent, next: card.nextSibling, placeholder, hadClass: card.classList.contains('lsb-canvas-site-card') })
+        }
+        card.classList.add('lsb-canvas-site-card')
+        host.append(card)
+      }
+      const empty = host.querySelector('[data-canvas-site-empty-state]')
+      if (empty instanceof HTMLElement) {
+        const mounted = host.querySelectorAll(':scope > .sidebar-card').length
+        empty.hidden = cards.length > 0 || mounted > 0
+      }
+    }
+
+    function sync(host, { persistentOnly = false } = {}) {
+      if (!(host instanceof Element)) return
+      if (persistentOnly) syncPersistent(host)
+      else syncAll(host)
+    }
+    return { sync, restore: canvasRestoreSiteSidebar, stageOrigins: canvasStagePersistentSiteCardOrigins, rebindOrigins: canvasRebindPersistentSiteCardOrigins }
+  }
+  // Shared online roster and avatar lifecycle for both shell modes.
+  function createSkinOnlineController({ window, document, request, isEnabled, isChallengeDocument }) {
+    const { Element, MutationObserver, DOMParser } = window
+    const REFRESH_MS = 30000
+    let running = false
+    let avatarObserver = null
+    let avatarTimer = 0
+    let refreshTimer = 0
+    let inflight = null
+    let visibilityPending = null
+    let refreshAfterInflight = false
+    let generation = 0
+    let revision = 0
+    let lastSyncAt = null
+
+    function enabled() {
+      return !!isEnabled() && !isChallengeDocument(document)
+    }
+
+    function onlineUserIdFromHref(href) {
+      const value = String(href || '')
+      const pretty = value.match(/\/user\/(\d+)(?:[/?#]|$)/)
+      if (pretty) return pretty[1]
+      if (!/[?&]a=user(?:&|$)/.test(value)) return ''
+      return value.match(/[?&]id=(\d+)(?:&|$)/)?.[1] || ''
+    }
+
+    function onlineUsersBoot(root = document) {
+      return root?.querySelector?.('[data-online-users-ids]') || null
+    }
+
+    function syncDots() {
+      if (!enabled()) return false
+      const boot = onlineUsersBoot()
+      if (!(boot instanceof Element)) return false
+      const ids = new Set(String(boot.dataset.onlineUsersIds || '').split(',').map((id) => id.trim()).filter(Boolean))
+      const label = boot.dataset.onlineUsersLabel || '在线'
+      for (const img of document.querySelectorAll('img.avatar-img')) {
+        const host = img.parentElement
+        if (!(host instanceof Element)) continue
+        const dot = host.querySelector(':scope > .online-users-dot')
+        const marked = host.closest('[data-online-user-id]')
+        const link = img.closest('a[href]')
+        const uid = String(marked?.getAttribute('data-online-user-id') || (link ? onlineUserIdFromHref(link.getAttribute('href')) : '')).trim()
+        if (uid && ids.has(uid)) {
+          host.classList.add('online-users-host')
+          if (dot) dot.title = label
+          else {
+            const next = document.createElement('span')
+            next.className = 'online-users-dot'
+            next.title = label
+            host.append(next)
+          }
+        } else {
+          dot?.remove()
+          host.classList.remove('online-users-host')
+        }
+      }
+      return true
+    }
+
+    function syncBoot(sourceDoc) {
+      if (!enabled() || isChallengeDocument(sourceDoc)) return false
+      const source = onlineUsersBoot(sourceDoc)
+      if (!(source instanceof Element)) return false
+      let target = onlineUsersBoot()
+      if (!(target instanceof Element)) {
+        if (!document.body) return false
+        target = document.createElement('span')
+        target.className = 'online-users-boot'
+        target.hidden = true
+        document.body.append(target)
+      }
+      target.dataset.onlineUsersIds = source.dataset.onlineUsersIds || ''
+      target.dataset.onlineUsersLabel = source.dataset.onlineUsersLabel || '在线'
+      revision += 1
+      lastSyncAt = window.Date.now()
+      return syncDots()
+    }
+
+    function stop() {
+      running = false
+      generation += 1
+      if (refreshTimer) window.clearTimeout(refreshTimer)
+      if (avatarTimer) window.clearTimeout(avatarTimer)
+      refreshTimer = 0
+      avatarTimer = 0
+      visibilityPending = null
+      refreshAfterInflight = false
+      avatarObserver?.disconnect()
+      avatarObserver = null
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      // Retain the unfinished request for deduplication across stop/start.
+      // Its generation prevents committing into the next lifecycle.
+    }
+
+    function cooldownRemaining() {
+      if (lastSyncAt === null) return 0
+      const elapsed = Math.max(0, window.Date.now() - lastSyncAt)
+      return Math.max(0, REFRESH_MS - elapsed)
+    }
+
+    function scheduleRefresh(delay = REFRESH_MS, force = false, bypassCooldown = false) {
+      if (!running) return
+      if (!enabled()) {
+        stop()
+        return
+      }
+      if (refreshTimer) {
+        if (!force) return
+        window.clearTimeout(refreshTimer)
+        refreshTimer = 0
+      }
+      if (inflight) {
+        if (bypassCooldown) refreshAfterInflight = true
+        return
+      }
+      const notBefore = bypassCooldown ? 0 : cooldownRemaining()
+      const wait = Math.max(0, Number(delay) || 0, notBefore)
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = 0
+        void refresh(bypassCooldown)
+      }, wait)
+    }
+
+    function refresh(bypassCooldown = false) {
+      if (!running) return
+      if (!enabled()) {
+        stop()
+        return
+      }
+      if (document.visibilityState === 'hidden') {
+        visibilityPending = { bypassCooldown: bypassCooldown || !!visibilityPending?.bypassCooldown }
+        return
+      }
+      visibilityPending = null
+      if (inflight) return inflight
+      // A route may have supplied a fresh roster after this timer was queued.
+      if (!bypassCooldown && cooldownRemaining() > 0) {
+        scheduleRefresh(0, true)
+        return
+      }
+      const requestGeneration = generation
+      const requestRevision = revision
+      // Defer the request so synchronous adapter failures also settle after
+      // the shared task reference has been assigned.
+      const task = Promise.resolve().then(async () => {
+        if (requestGeneration !== generation || !running || !enabled()) return
+        const url = new window.URL('/', window.location.href)
+        const res = await request(`${url.pathname}${url.search}`, {
+          queue: false,
+          timeout: 15000,
+          retry: 0,
+          headers: { 'cache-control': 'no-cache' },
+        })
+        if (requestGeneration !== generation || requestRevision !== revision || !running || !enabled() || !res.ok) return
+        syncBoot(new DOMParser().parseFromString(res.text || '', 'text/html'))
+      }).catch(() => {
+        /* 在线清单刷新失败时保留上一份清单，下一周期继续尝试。 */
+      }).finally(() => {
+        if (inflight === task) inflight = null
+        const rerun = refreshAfterInflight
+        refreshAfterInflight = false
+        // Scheduling belongs to the current lifecycle, even when the settled
+        // response was invalidated by an earlier stop or route commit.
+        if (running) scheduleRefresh(rerun ? 0 : REFRESH_MS, rerun, rerun)
+      })
+      inflight = task
+      return task
+    }
+
+    function onVisibilityChange() {
+      if (!running || document.visibilityState !== 'visible' || !visibilityPending) return
+      const { bypassCooldown } = visibilityPending
+      visibilityPending = null
+      void refresh(bypassCooldown)
+    }
+
+    function scheduleDots() {
+      if (!running) return
+      if (!enabled()) {
+        stop()
+        return
+      }
+      if (avatarTimer) return
+      avatarTimer = window.setTimeout(() => {
+        avatarTimer = 0
+        if (running) syncDots()
+      }, 50)
+    }
+
+    function start() {
+      if (!enabled()) {
+        stop()
+        return
+      }
+      running = true
+      syncDots()
+      document.addEventListener('visibilitychange', onVisibilityChange)
+      if (!avatarObserver && document.body instanceof Element) {
+        avatarObserver = new MutationObserver((records) => {
+          const hasAvatar = records.some((record) => [...record.addedNodes].some((node) => (
+            node instanceof Element && (node.matches('img.avatar-img') || !!node.querySelector('img.avatar-img'))
+          )))
+          if (hasAvatar) scheduleDots()
+        })
+        avatarObserver.observe(document.body, { childList: true, subtree: true })
+      }
+      scheduleRefresh()
+    }
+
+    return { syncDots, syncBoot, start, scheduleRefresh, stop }
+  }
+  /** Owns legacy sidebar cards, cached fallbacks and late-card observation. */
+  function createSkinAsideCardsController({ window, document, store, getSidebars, getPage, isSelfUserCard, isEnabled, syncOnlineDots }) {
+    const { Element, Node } = document.defaultView
     const asideHomes = new Map()
     const asidePersistentCards = new Map()
+    let onlineObs = null
+    let observedSidebars = []
+
+    function restoreNode(el, home, cls) {
+      if (!el) return
+      el.classList.remove(cls)
+      if (!home?.parent?.isConnected) {
+        el.remove()
+        return
+      }
+      if (home.next?.parentNode === home.parent) {
+        home.parent.insertBefore(el, home.next)
+      } else {
+        home.parent.append(el)
+      }
+    }
+
+    function nativeCards() {
+      return getSidebars().flatMap((side) => [...side.querySelectorAll('.sidebar-card')])
+    }
+
+    function asidePersistentCardKind(card) {
+      if (!(card instanceof Element)) return ''
+      if (card.matches('.sidebar-promotions-card')) return 'promotions'
+      if (card.matches('.daily-hot-topics-card')) return 'daily-hot-topics'
+      return ''
+    }
+
+    function ensureAsidePersistentCard(card) {
+      const kind = asidePersistentCardKind(card)
+      if (!kind) return null
+      const existing = asidePersistentCards.get(kind)
+      if (existing?.node?.isConnected) return existing
+      const parent = card.parentNode
+      const record = { node: card, originalParent: parent, originalNext: card.nextSibling }
+      asidePersistentCards.set(kind, record)
+      return record
+    }
+
+    function removeRebuiltAsidePersistentCards() {
+      for (const [kind, record] of asidePersistentCards) {
+        for (const card of nativeCards()) {
+          if (card !== record.node && asidePersistentCardKind(card) === kind) card.remove()
+        }
+      }
+    }
+
+    function restoreAsidePersistentCards() {
+      for (const [kind, record] of [...asidePersistentCards]) {
+        const node = record?.node
+        if (!(node instanceof Element)) {
+          asidePersistentCards.delete(kind)
+          continue
+        }
+        const parent = record.originalParent?.isConnected
+          ? record.originalParent
+          : getSidebars().find((side) => side.isConnected)
+        if (!(parent instanceof Element)) continue
+        const before = record.originalNext?.parentNode === parent ? record.originalNext : null
+        parent.insertBefore(node, before)
+        node.classList.remove('lsb-shell-aside-card')
+        asidePersistentCards.delete(kind)
+      }
+    }
+
+    function pickAsideCards() {
+      const persistent = [...asidePersistentCards.values()]
+        .map((record) => record.node)
+        .filter((node) => node?.isConnected)
+      const hosted = [...document.querySelectorAll('#lsb-shell-aside .sidebar-card')]
+      const all = [...persistent, ...hosted, ...nativeCards()]
+      const seen = new Set()
+      const uniq = all.filter((el) => {
+        if (el.hasAttribute('data-lsb-aside-keep')) return false
+        if (seen.has(el)) return false
+        seen.add(el)
+        return true
+      })
+      const text = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim()
+      const onUser = getPage()?.type === 'user'
+      const profile = onUser
+        ? uniq.find(
+            (c) =>
+              c.classList.contains('user-card')
+              && !c.classList.contains('lsb-shell-user-card')
+              && !isSelfUserCard(c),
+          )
+        : null
+      const bio = onUser ? uniq.find((c) => c.classList.contains('bio-card')) : null
+      const promo = uniq.find((c) => c.classList.contains('sidebar-promotions-card'))
+      const announce = uniq.find(
+        (c) => c.classList.contains('forum-enhancements-left-announcements') || text(c).startsWith('站务公告'),
+      )
+      const quick = uniq.find((c) => text(c).startsWith('快捷功能'))
+      const hot = uniq.find((c) => c.classList.contains('daily-hot-topics-card'))
+      const stats = uniq.find((c) => c.classList.contains('stats-card'))
+      const online = uniq.find((c) => c.classList.contains('online-users-card'))
+      return [profile, bio, promo, announce, quick, hot, stats, online].filter(Boolean)
+    }
+
+    function adoptAsideCards(host) {
+      if (!(host instanceof Element)) return
+      for (const card of pickAsideCards()) {
+        const kind = asidePersistentCardKind(card)
+        if (kind) {
+          const record = ensureAsidePersistentCard(card)
+          if (record?.node !== card) {
+            card.remove()
+            continue
+          }
+          if (host.contains(card)) continue
+        } else if (host.contains(card) || card.classList.contains('lsb-shell-user-card')) {
+          continue
+        } else {
+          asideHomes.set(card, { parent: card.parentNode, next: card.nextSibling })
+        }
+        card.classList.add('lsb-shell-aside-card')
+        host.append(card)
+      }
+      removeRebuiltAsidePersistentCards()
+      hydrateAsideKeep(host)
+      snapshotAsideKeep(host)
+      syncOnlineDots()
+    }
+
+    function cardLabel(el) {
+      return (el.textContent || '').replace(/\s+/g, ' ').trim()
+    }
+
+    function snapshotAsideKeep(host) {
+      if (!(host instanceof Element)) return
+      const keep = { ...(store.get('asideKeep') || {}) }
+      const live = [...host.querySelectorAll('.sidebar-card')].filter(
+        (el) => !el.hasAttribute('data-lsb-aside-keep'),
+      )
+      const quick = live.find((c) => cardLabel(c).startsWith('快捷功能'))
+      const stats = live.find((c) => c.classList.contains('stats-card'))
+      const online = live.find((c) => c.classList.contains('online-users-card'))
+      let changed = false
+      if (quick) {
+        const node = quick.cloneNode(true)
+        node.querySelectorAll('[data-themes-mode-toggle], .dark-mode-control').forEach((n) => n.remove())
+        keep.quick = node.outerHTML
+        changed = true
+      }
+      if (stats) {
+        keep.stats = stats.outerHTML
+        changed = true
+      }
+      if (online) {
+        keep.online = online.outerHTML
+        changed = true
+      }
+      if (changed) store.set('asideKeep', keep)
+    }
+
+    function injectKeptCard(host, html, slot, before) {
+      if (!html || host.querySelector(`[data-lsb-aside-keep="${slot}"]`)) return
+      const box = document.createElement('div')
+      box.innerHTML = html
+      const el = box.firstElementChild
+      if (!(el instanceof Element)) return
+      el.setAttribute('data-lsb-aside-keep', slot)
+      el.classList.add('lsb-shell-aside-card')
+      if (before instanceof Node && before.parentNode === host) host.insertBefore(el, before)
+      else host.append(el)
+    }
+
+    function hydrateAsideKeep(host) {
+      if (!(host instanceof Element)) return
+      const keep = store.get('asideKeep') || {}
+      const live = [...host.querySelectorAll('.sidebar-card')].filter(
+        (el) => !el.hasAttribute('data-lsb-aside-keep'),
+      )
+      const hasQuick = live.some((c) => cardLabel(c).startsWith('快捷功能'))
+      const hasStats = live.some((c) => c.classList.contains('stats-card'))
+      const hasOnline = live.some((c) => c.classList.contains('online-users-card'))
+      if (hasQuick) host.querySelector('[data-lsb-aside-keep="quick"]')?.remove()
+      else injectKeptCard(host, keep.quick, 'quick', host.querySelector('.daily-hot-topics-card'))
+      if (hasStats) host.querySelector('[data-lsb-aside-keep="stats"]')?.remove()
+      else {
+        const hot = host.querySelector('.daily-hot-topics-card')
+        injectKeptCard(host, keep.stats, 'stats', hot?.nextSibling)
+      }
+      if (hasOnline) host.querySelector('[data-lsb-aside-keep="online"]')?.remove()
+      else injectKeptCard(host, keep.online, 'online', null)
+    }
+
+    function restoreAsideCards() {
+      stopOnlineWatch()
+      for (const [card, home] of asideHomes) restoreNode(card, home, 'lsb-shell-aside-card')
+      asideHomes.clear()
+    }
+
+    function pruneDetachedAsideCards() {
+      for (const [card, home] of [...asideHomes]) {
+        if (home?.parent?.isConnected) continue
+        restoreNode(card, home, 'lsb-shell-aside-card')
+        asideHomes.delete(card)
+      }
+    }
+
+    function watchOnlineCard() {
+      const liveOnline = '#lsb-shell-aside [data-lsb-shell-site] .online-users-card:not([data-lsb-aside-keep])'
+      if (!isEnabled() || document.querySelector(liveOnline)) {
+        stopOnlineWatch()
+        return
+      }
+      const sides = getSidebars().filter((side) => side.isConnected)
+      if (onlineObs && sides.length === observedSidebars.length && sides.every((side, i) => side === observedSidebars[i])) return
+      stopOnlineWatch()
+      if (!sides.length) return
+      onlineObs = new window.MutationObserver(() => {
+        const host = document.querySelector('#lsb-shell-aside [data-lsb-shell-site]')
+        if (!host || !isEnabled()) return
+        adoptAsideCards(host)
+        if (document.querySelector(liveOnline)) stopOnlineWatch()
+      })
+      observedSidebars = sides
+      for (const side of sides) onlineObs.observe(side, { childList: true, subtree: true })
+    }
+
+    function stopOnlineWatch() {
+      onlineObs?.disconnect()
+      onlineObs = null
+      observedSidebars = []
+    }
+
+    return { adopt: adoptAsideCards, restore: restoreAsideCards, restorePersistent: restoreAsidePersistentCards,
+      pruneDetached: pruneDetachedAsideCards, watch: watchOnlineCard, stop: stopOnlineWatch }
+  }
+  /** Owns legacy sidebar tabs, selection preference and view lifecycles. */
+  function createSkinAsideViewsController({ window, document, store, getContext, getViews, isEnabled, onSelect }) {
+    const { Element } = document.defaultView
     const asideViews = new Map()
-    const externalWindowViews = new Map()
     const ASIDE_ACTIVE_KEY = 'aside-active'
-    const storedAsideId = api.store.get(ASIDE_ACTIVE_KEY, 'site')
+    const storedAsideId = store.get(ASIDE_ACTIVE_KEY, 'site')
     let asidePreferredId = storedAsideId === 'site' || /^[a-z][a-z0-9-]{0,63}$/.test(String(storedAsideId || ''))
       ? String(storedAsideId || 'site')
       : 'site'
     let asideActiveId = 'site'
     let asideResizeBound = false
-    let themeToggleHome = null
-    let colorSchemeHome = null
-    let colorSchemeModalHome = null
-    let onlineObs = null
-    let onlineAvatarObs = null
-    let onlineAvatarTimer = 0
-    let onlineUserRefreshTimer = 0
-    let onlineUserRefreshInflight = null
-    let onlineUserRefreshPending = false
-    let onlineUserRefreshAfterInflight = false
-    let onlineUserRefreshVisibilityBound = false
-    let onlineUserRefreshGeneration = 0
-    let onlineUserLastSyncAt = 0
-    let extrasObs = null
-    let timelineRaf = 0
-    let refreshTimer = 0
-    let windowListening = false
-    let spaSerial = 0
-    let spaFilledSerial = 0
-    let nativeThreadObserver = null
-    let nativeThreadList = null
-    let nativeThreadApplyTimer = 0
-    let nativeThreadLifecycleBound = false
-    const nativeReplyParentByForm = new WeakMap()
-    let nativeCaptchaObserver = null
-    let nativeCaptchaApplyTimer = 0
-    let nativeCaptchaEpoch = 0
-    const nativeCaptchaSolvers = new WeakMap()
-    let spaAbortController = null
-    let toolsCache = null
-    let spaProgressTimer = 0
-    let spaIgnorePop = false
-    let spaHistoryIndex = 0
-    let spaHistoryRollbackIndex = null
-    let spaBound = false
-    let homeInf = null
-    const homeInfRecords = new WeakMap()
-    let spaViewKey = ''
-    const VIEW_CACHE_MAX = 5
-    const HOME_STASH_REFRESH_MS = 30000
-    const ONLINE_USER_REFRESH_MS = 30000
-    const viewCache = new Map()
-    let homeStashTimer = 0
-    let homeStashInflight = null
-    let homeStashGen = 0
-    let homeStashPending = false
-
-    const BUILTIN_WINDOWS = Object.freeze([
-      { id: 'nav', label: '导航', order: 10, min: { width: 200, height: 160 }, defaultRect: { width: 240, height: 640 } },
-      { id: 'content', label: '正文', order: 20, min: { width: 320, height: 240 }, defaultRect: { width: 720, height: 640 } },
-      { id: 'site', label: '站点', order: 30, min: { width: 240, height: 160 }, defaultRect: { width: 280, height: 640 } },
-    ])
-
-    /* ── 共存检测：色彩主题已由其它脚本负责，本模块只做排版层，天然无冲突。
-       若未来加入色彩子项，须在此让位。 ── */
-    const themesPresent = !!document.querySelector('style[data-themes-plugin]')
-
-    const FONT_SANS =
-      "system-ui,-apple-system,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans SC',sans-serif"
-    const FONT_MONO =
-      "ui-monospace,SFMono-Regular,'Cascadia Code',Consolas,'JetBrains Mono','Noto Sans Mono CJK SC',monospace"
-
-    // ── B: 工具与样式（esc/shellCss/canvasCss/css/applyShellTokens） ──
-    function esc(s) {
-      return String(s ?? '').replace(/[&<>"']/g, (c) =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
-      )
-    }
-
-    function structuredCloneSafe(value) {
-      try {
-        if (typeof structuredClone === 'function') return structuredClone(value)
-      } catch {
-        /* fall through to JSON for the small layout record */
-      }
-      try {
-        return JSON.parse(JSON.stringify(value))
-      } catch {
-        return value
-      }
-    }
-
-    // · B1 shellCss: 旧三段式壳（固定顶栏/左轨/右栏变量与栅格） ──
-    function shellCss() {
-      return `
-        html.lsb-skin-shell-on{
-          --lsb-shell-header:48px;
-          --lsb-shell-rail:240px;
-          --lsb-shell-gutter:12px;
-          --lsb-shell-panel-pad:24px;
-          --lsb-shell-main-inset:calc(var(--lsb-shell-gutter) + var(--lsb-shell-panel-pad));
-          --lsb-shell-aside:280px;
-          --lsb-shell-timeline:72px;
-          --lsb-radius:12px;
-          --lsb-radius-sm:8px;
-          --lsb-radius-lg:16px;
-          background:var(--bg,#f4f5f7);
-          color:var(--text,#222);
-        }
-        html.lsb-skin-shell-topic{--lsb-shell-main-inset:var(--lsb-shell-gutter)}
-        html.lsb-skin-shell-user{--lsb-shell-main-inset:calc(var(--lsb-shell-gutter) + 12px)}
-        html[data-themes-color-mode="dark"],html[data-dark-mode-theme="dark"]{color-scheme:dark}
-        html[data-themes-color-mode="light"],html[data-dark-mode-theme="light"]{color-scheme:light}
-        #lsb-shell{
-          display:none;position:fixed;inset:0;z-index:7999;pointer-events:none;
-        }
-        #lsb-shell > *{pointer-events:auto}
-        #lsb-shell-header{
-          position:fixed;top:0;left:0;right:0;height:var(--lsb-shell-header);z-index:8002;
-          display:grid;align-items:center;
-          grid-template-columns:var(--lsb-shell-rail) minmax(160px,360px) minmax(0,1fr) auto auto;
-          column-gap:0;padding:0 16px 0 0;
-          background:color-mix(in srgb,var(--panel,#fff) 78%,transparent);
-          backdrop-filter:blur(16px) saturate(140%);
-          -webkit-backdrop-filter:blur(16px) saturate(140%);
-          box-shadow:0 1px 0 color-mix(in srgb,var(--line,#ddd) 55%,transparent);
-          font-family:${FONT_SANS};
-        }
-        #lsb-shell-rail{
-          position:fixed;top:0;left:0;bottom:0;width:var(--lsb-shell-rail);z-index:8001;
-          display:flex;flex-direction:column;
-          background:var(--bg,#f4f5f7);color:var(--text,#222);
-          border-right:1px solid var(--line-soft,#e8e8e8);
-          font-family:${FONT_SANS};
-        }
-        .lsb-shell-rail-scroll{flex:1;min-height:0;overflow:hidden;padding:56px 12px 12px;display:flex;flex-direction:column}
-        .lsb-shell-rail-scroll [data-lsb-shell-section="home"]{flex:0 0 auto}
-        .lsb-shell-rail-scroll [data-lsb-shell-section="boards"]{flex:1 1 auto;min-height:0;overflow:auto}
-        .lsb-shell-rail-scroll [data-lsb-shell-section="tools"]{flex:0 0 auto}
-        .lsb-shell-me{margin:0 0 14px}
-        .lsb-shell-me .sidebar-card.user-card{
-          margin:0;padding:10px 10px;border:0;box-shadow:none;
-          border-radius:var(--lsb-radius);
-          background:color-mix(in srgb,var(--panel,#fff) 72%,transparent);
-        }
-        .lsb-shell-me .user-header-info{gap:8px}
-        .lsb-shell-me .user-avatar-big img,.lsb-shell-me .avatar-img{
-          width:40px!important;height:40px!important;
-        }
-        .lsb-shell-me .user-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .lsb-shell-me .user-rank{font-size:11px;color:var(--text-muted,#888)}
-        .lsb-shell-rail-foot{padding:10px 12px 14px;border-top:1px solid var(--line-soft,#e8e8e8)}
-        .lsb-shell-brand{
-          display:flex;align-items:center;gap:8px;margin:0;width:100%;height:100%;
-          padding:0 14px;font-weight:700;font-size:14px;letter-spacing:-.02em;
-          color:var(--text,#222);text-decoration:none;
-          min-width:0;white-space:nowrap;overflow:hidden;
-        }
-        .lsb-shell-logo{
-          flex:0 0 22px;width:22px;height:22px;border-radius:6px;display:block;
-        }
-        .lsb-shell-search-host{
-          min-width:0;max-width:360px;width:100%;box-sizing:border-box;
-          padding-left:var(--lsb-shell-main-inset);
-        }
-        .lsb-shell-search-host .search-form,.lsb-shell-search-host .lsb-shell-search{
-          display:flex;align-items:center;gap:8px;margin:0;padding:3px 6px 3px 10px;
-          width:100%;max-width:none;justify-self:stretch;
-          grid-column:auto;grid-row:auto;
-          border-radius:var(--lsb-radius);overflow:hidden;
-          background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
-        }
-        .lsb-shell-search-host .search-page-link{
-          display:flex;align-items:center;margin:0;padding:0;width:100%;max-width:none;height:30px;
-          grid-area:auto;grid-column:auto;grid-row:auto;justify-self:stretch;
-          border:1px solid var(--line,#ddd);border-radius:var(--lsb-radius);
-          background:color-mix(in srgb,var(--bg,#f4f5f7) 88%,transparent);
-          color:var(--text-subtle,#888);text-decoration:none;overflow:hidden;
-        }
-        .lsb-shell-search-host .search-page-fake-input{
-          flex:1;min-width:0;padding:0 10px;font-size:13px;
-          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-        }
-        .lsb-shell-search-host .search-page-fake-icon{
-          display:inline-flex;align-items:center;justify-content:center;
-          flex:0 0 30px;width:30px;height:100%;
-        }
-        .lsb-shell-search-host select{
-          border:0;border-radius:var(--lsb-radius-sm);background:transparent;
-          color:var(--text,#222);font-size:12px;height:26px;
-        }
-        .lsb-shell-search-host input[type=search],.lsb-shell-search-host input[name=q]{
-          flex:1;min-width:0;height:26px;border:0;border-radius:var(--lsb-radius-sm);
-          background:transparent;color:var(--text,#222);padding:0 8px;font-size:13px;
-        }
-        .lsb-shell-search-host button{
-          border:0;border-radius:var(--lsb-radius-sm);height:26px;padding:0 10px;
-          background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-size:12px;cursor:pointer;
-        }
-        .lsb-shell-extras{
-          display:flex;align-items:center;gap:14px;min-width:0;overflow:hidden;
-          margin-left:16px;
-        }
-        .lsb-shell-extras a{
-          flex:0 0 auto;color:var(--text,#222);text-decoration:none;font-size:13px;font-weight:500;
-          white-space:nowrap;
-        }
-        .lsb-shell-where{
-          margin-left:16px;font-size:13px;font-weight:600;letter-spacing:-.01em;
-          color:var(--text,#222);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:22vw;
-        }
-        .lsb-shell-theme{margin-left:8px;display:flex;align-items:center;gap:8px;overflow:visible;position:relative}
-        .lsb-shell-theme [data-themes-mode-toggle]{
-          border:0;background:transparent;color:var(--text,#222);cursor:pointer;
-          width:32px;height:32px;padding:4px;border-radius:var(--lsb-radius-sm);
-        }
-        .lsb-shell-theme [data-themes-mode-toggle] svg{display:block;width:18px;height:18px}
-        .lsb-shell-theme .dark-mode-control{position:relative;flex:0 0 auto;grid-area:auto;justify-self:auto}
-        .lsb-shell-theme .dark-mode-menu{z-index:8003}
-        html.lsb-skin-shell-on #color-scheme-modal{z-index:8020!important}
-        html.lsb-skin-shell-on .lsb-shell-theme-modal{z-index:8020!important}
-        .lsb-shell-theme .color-scheme-top-link{
-          display:inline-flex;width:30px;height:30px;align-items:center;justify-content:center;
-          grid-area:auto;justify-self:auto;flex:0 0 30px;
-          color:var(--text-muted,#888);text-decoration:none;
-        }
-        .lsb-shell-theme .color-scheme-top-link svg{width:17px;height:17px;display:block}
-        #lsb-shell-aside{
-          display:none;flex-direction:column;position:fixed;top:var(--lsb-shell-header);right:0;bottom:0;
-          width:var(--lsb-shell-aside);z-index:7999;overflow:hidden;padding:0;
-          background:var(--bg,#f4f5f7);color:var(--text,#222);
-          border-left:1px solid var(--line-soft,#e8e8e8);
-          font-family:${FONT_SANS};
-        }
-        #lsb-shell-aside-tabs{
-          display:flex;align-items:center;gap:4px;min-height:40px;padding:6px 10px;
-          border-bottom:1px solid var(--line-soft,#e8e8e8);background:color-mix(in srgb,var(--panel,#fff) 72%,transparent);
-        }
-        #lsb-shell-aside-tabs[hidden]{display:none!important}
-        #lsb-shell-aside-tabs [data-lsb-shell-aside-tab]{
-          flex:1 1 0;min-width:0;height:28px;padding:0 8px;border:0;border-radius:var(--lsb-radius-sm);
-          background:transparent;color:var(--text-muted,#888);font:inherit;font-size:12px;cursor:pointer;
-        }
-        #lsb-shell-aside-tabs [data-lsb-shell-aside-tab][aria-selected="true"]{
-          background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600;
-        }
-        .lsb-shell-aside-panes{flex:1 1 auto;height:auto;min-height:0}
-        [data-lsb-shell-aside-pane]{height:100%;min-height:0;box-sizing:border-box;overflow:auto;padding:12px 10px 16px}
-        [data-lsb-shell-aside-pane][hidden]{display:none!important}
-        #lsb-shell-aside .sidebar-card{
-          margin:0 0 10px;padding:10px 10px 8px;border-radius:var(--lsb-radius);
-          background:color-mix(in srgb,var(--panel,#fff) 78%,transparent);
-        }
-        .lsb-shell-nav-section{margin:0 0 16px}
-        .lsb-shell-nav-section h2{
-          margin:0 8px 6px;font-size:11px;font-weight:600;color:var(--text-muted,#888);
-          letter-spacing:.04em;
-        }
-        .lsb-shell-nav .lsb-shell-link{
-          display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;border-radius:var(--lsb-radius-sm);
-          color:var(--text,#222);text-decoration:none;font-size:13px;font-weight:500;
-          width:100%;border:0;background:transparent;cursor:pointer;text-align:left;font-family:inherit;box-sizing:border-box;
-        }
-        .lsb-shell-nav .lsb-shell-link-label{
-          min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-        }
-        .lsb-shell-nav .lsb-shell-count{
-          flex:0 0 auto;font-size:11px;font-weight:500;color:var(--text-muted,#888);
-          font-variant-numeric:tabular-nums;
-        }
-        .lsb-shell-nav a.is-active{
-          background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font-weight:600;
-        }
-        .lsb-shell-settings{
-          width:100%;height:32px;border:0;border-radius:var(--lsb-radius-sm);cursor:pointer;
-          background:transparent;color:var(--text,#222);font-size:13px;font-weight:600;
-        }
-        .lsb-shell-settings:active,.lsb-shell-nav .lsb-shell-link:active{transform:scale(.98)}
-        #lsb-shell-timeline{
-          position:fixed;top:calc(var(--lsb-shell-header) + 20px);right:14px;bottom:28px;
-          width:var(--lsb-shell-timeline);z-index:7998;
-          display:flex;flex-direction:column;align-items:center;gap:8px;
-          font-family:${FONT_SANS};font-size:11px;font-weight:600;color:var(--text-muted,#888);
-        }
-        #lsb-shell-timeline[hidden]{display:none!important}
-        html.lsb-skin-shell-on .image-lightbox-image{max-width:100%;max-height:100%}
-        .lsb-shell-edge{
-          border:0;background:transparent;color:var(--text,#222);cursor:pointer;
-          font:inherit;font-weight:600;padding:4px;
-        }
-        .lsb-shell-edge:active{transform:scale(.97)}
-        .lsb-shell-now{text-align:center;line-height:1.25}
-        .lsb-shell-now strong{display:block;color:var(--text,#222);font-size:12px}
-        .lsb-shell-track{
-          flex:1;width:3px;padding:0;border:0;border-radius:99px;cursor:pointer;
-          background:var(--line-soft,#e6e6e6);position:relative;min-height:64px;
-        }
-        .lsb-shell-thumb{
-          position:absolute;left:50%;top:var(--lsb-timeline-progress,0%);
-          width:8px;height:8px;margin:-4px 0 0 -4px;border-radius:50%;
-          background:var(--brand,#5eaaa0);
-        }
-        html.lsb-skin-shell-on li.post-item{padding-block:8px!important;border-radius:var(--lsb-radius)}
-        html.lsb-skin-shell-on li.post-item .post-title{
-          font-weight:600;font-size:14px;letter-spacing:-.01em;line-height:1.3;
-        }
-        html.lsb-skin-shell-on li.post-item .post-meta{
-          font-size:12px;font-weight:400;color:var(--text-muted,#888);
-        }
-        html.lsb-skin-shell-on li.post-item .post-avatar img{
-          width:32px!important;height:32px!important;border-radius:50%;
-        }
-        html.lsb-skin-shell-on li.post-item:not(.post-entry) .meta-icon{display:none}
-        html.lsb-skin-shell-on main.wrap{
-          max-width:none!important;margin-left:0!important;margin-right:0!important;width:auto!important;
-          padding-left:var(--lsb-shell-gutter)!important;
-        }
-        html.lsb-skin-shell-on .forum-layout.forum-layout-has-sidebar{gap:12px!important}
-        html.lsb-skin-shell-on main.wrap,
-        html.lsb-skin-shell-on .forum-main,
-        html.lsb-skin-shell-on .home-shell{
-          border-radius:var(--lsb-radius-lg);
-        }
-        html.lsb-skin-shell-on ul.post-list{
-          border-radius:var(--lsb-radius-lg);
-        }
-        /* legacy 首页宽屏把纵向滚动交给中间面板，页面根和右栏保持固定。首页由 JS 明确标记，不能用 .home-shell 判断：首页和帖子页共用这个容器。 */
-        @media(min-width:900px){
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode){
-            box-sizing:border-box!important;height:100vh!important;max-height:100vh!important;overflow:hidden!important;
-          }
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body{
-            box-sizing:border-box!important;display:flex!important;flex-direction:column!important;
-            height:calc(100vh - var(--lsb-shell-header))!important;
-            max-height:calc(100vh - var(--lsb-shell-header))!important;
-            min-height:0!important;margin:0!important;overflow:hidden!important;
-          }
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap{
-            box-sizing:border-box!important;display:flex!important;flex:1 1 auto!important;flex-direction:column!important;
-            width:auto!important;max-width:none!important;margin-left:0!important;margin-right:0!important;padding-right:0!important;
-            height:100%!important;max-height:100%!important;
-            min-width:0!important;min-height:0!important;overflow:hidden!important;
-          }
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell,
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell > .forum-layout.forum-layout-has-sidebar,
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell > .forum-layout.forum-layout-has-sidebar > .forum-main{
-            box-sizing:border-box!important;display:flex!important;flex:1 1 auto!important;flex-direction:column!important;
-            width:100%!important;max-width:none!important;min-width:0!important;min-height:0!important;
-          }
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell{
-            padding-right:0!important;
-          }
-          html.lsb-skin-shell-on.lsb-skin-shell-home:not(.lsb-canvas-mode) body > main.wrap .home-shell > .forum-layout.forum-layout-has-sidebar > .forum-main > .main-panel{
-            box-sizing:border-box!important;display:flex!important;flex:1 1 auto!important;flex-direction:column!important;
-            width:100%!important;max-width:none!important;min-width:0!important;min-height:0!important;
-            overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior:contain;scrollbar-gutter:stable;
-          }
-        }
-        html.lsb-skin-shell-on .post-content img,
-        html.lsb-skin-shell-on .post-content video{
-          border-radius:var(--lsb-radius-sm);
-        }
-        html.lsb-skin-shell-on .pagination a,
-        html.lsb-skin-shell-on .pagination span,
-        html.lsb-skin-shell-on .tab-link,
-        html.lsb-skin-shell-on .sort-tabs a{
-          border-radius:var(--lsb-radius-sm)!important;
-        }
-        html.lsb-skin-shell-on .pagination-bar.sb-infinite-scroll-pagination-hidden{
-          display:none!important;
-        }
-        html.lsb-skin-shell-on form.ajax-reply-form,
-        html.lsb-skin-shell-on .reply-box,
-        html.lsb-skin-shell-on textarea{
-          border-radius:var(--lsb-radius)!important;
-        }
-        @media(min-width:900px){
-          html.lsb-skin-shell-on #lsb-shell{display:block}
-          html.lsb-skin-shell-on{padding-top:var(--lsb-shell-header);padding-left:var(--lsb-shell-rail)}
-          html.lsb-skin-shell-topic{padding-right:var(--lsb-shell-timeline)}
-          html.lsb-skin-shell-on .lsb-native-header-hidden,
-          html.lsb-skin-shell-on .forum-more-region{display:none!important}
-          html.lsb-skin-shell-on .lsb-native-sidebar-hidden,
-          html.lsb-skin-shell-on .lsb-native-left-hidden{display:none!important}
-          html.lsb-skin-shell-on .forum-layout.forum-layout-has-sidebar{
-            display:block!important;grid-template-columns:1fr!important;
-          }
-          html.lsb-skin-shell-on .lsb-launcher{display:none!important}
-          html.lsb-skin-shell-user{padding-right:var(--lsb-shell-aside)}
-          html.lsb-skin-shell-user #lsb-shell-aside{display:block}
-          html.lsb-skin-shell-on .image-lightbox-overlay{
-            top:var(--lsb-shell-header);left:var(--lsb-shell-rail);right:0;bottom:0;
-          }
-          html.lsb-skin-shell-topic .image-lightbox-overlay{right:var(--lsb-shell-timeline)}
-          html.lsb-skin-shell-user .image-lightbox-overlay{right:var(--lsb-shell-aside)}
-        }
-        @media(min-width:1100px){
-          html.lsb-skin-shell-on{padding-right:var(--lsb-shell-aside)}
-          html.lsb-skin-shell-topic{padding-right:var(--lsb-shell-aside)}
-          html.lsb-skin-shell-on #lsb-shell-aside{display:flex}
-          html.lsb-skin-shell-on #lsb-shell-timeline{display:none!important}
-          html.lsb-skin-shell-on .image-lightbox-overlay{right:var(--lsb-shell-aside)}
-        }
-        @media(hover:hover) and (pointer:fine){
-          .lsb-shell-nav .lsb-shell-link:hover{background:color-mix(in srgb,var(--bg,#fff) 40%,transparent)}
-          .lsb-shell-extras a:hover{color:var(--brand,#5eaaa0)}
-          .lsb-shell-settings:hover{background:var(--brand-soft,#e8f4f2)}
-        }
-        @media(prefers-reduced-transparency:reduce){
-          #lsb-shell-header{background:var(--panel,#fff);backdrop-filter:none;-webkit-backdrop-filter:none}
-        }
-        @media(prefers-reduced-motion:reduce){
-          html.lsb-skin-shell-on #lsb-shell *{scroll-behavior:auto!important;transform:none!important}
-          #lsb-shell-progress,
-          #lsb-shell-progress [data-lsb-shell-progress-bar]{transition:none!important}
-        }
-        #lsb-shell-progress{
-          --lsb-shell-progress:0;
-          position:fixed;top:0;left:0;right:0;z-index:8002;height:3px;
-          pointer-events:none;opacity:0;background:transparent;
-          transition:opacity 120ms cubic-bezier(.23,1,.32,1);
-        }
-        #lsb-shell-progress[data-phase="loading"],
-        #lsb-shell-progress[data-phase="done"]{opacity:1}
-        #lsb-shell-progress [data-lsb-shell-progress-bar]{
-          display:block;width:100%;height:100%;
-          transform:scaleX(var(--lsb-shell-progress));transform-origin:left center;
-          background:var(--brand,#5eaaa0);
-          transition:transform 200ms cubic-bezier(.23,1,.32,1);
-        }
-        [data-lsb-route-content-enter]{animation:lsb-route-content-in 180ms ease both}
-        @keyframes lsb-route-content-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
-        #lsb-route-announcer{
-          position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
-          clip-path:inset(50%);white-space:nowrap;border:0;
-        }
-        @media(prefers-reduced-motion:reduce){[data-lsb-route-content-enter]{animation:none!important;transform:none!important}}
-        html.lsb-canvas-reduced-motion [data-lsb-route-content-enter]{animation:none!important;transform:none!important}
-        /* H2 窗口工作区：默认令牌仍继承站点主题，几何由 skin 的 layout controller 写入。 */
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-workspace{
-          position:fixed;top:var(--lsb-shell-header);left:0;right:0;bottom:0;
-          overflow:hidden;pointer-events:none;
-        }
-        /* 窗口模式覆盖 700–899px 的媒体查询空档；窗口已挂载就必须可见。 */
-        html.lsb-skin-shell-windowed #lsb-shell[data-lsb-shell-mode="windowed"]{display:block}
-        html.lsb-skin-shell-windowed .lsb-native-header-hidden,
-        html.lsb-skin-shell-windowed .lsb-native-sidebar-hidden,
-        html.lsb-skin-shell-windowed .lsb-native-left-hidden,
-        html.lsb-skin-shell-windowed .forum-more-region{display:none!important}
-        #lsb-shell-workspace > [data-lsb-shell-video]{
-          position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
-          z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
-        }
-        html.lsb-skin-video-on #lsb-shell-workspace > [data-lsb-shell-video]{opacity:1}
-        #lsb-shell-workspace > [data-lsb-shell-image]{
-          position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
-          z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
-        }
-        html.lsb-skin-image-on #lsb-shell-workspace > [data-lsb-shell-image]{opacity:1}
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window{
-          position:absolute;display:flex;flex-direction:column;min-width:0;min-height:0;
-          box-sizing:border-box;overflow:hidden;pointer-events:auto;
-          border:1px solid var(--line-soft,#e8e8e8);border-radius:var(--lsb-radius-lg);
-          background:var(--panel,#fff);color:var(--text,#222);
-          box-shadow:0 12px 30px color-mix(in srgb,var(--text,#222) 12%,transparent);
-          z-index:1;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-interacting="drag"]{
-          will-change:transform;contain:layout paint;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-interacting="resize"]{
-          will-change:left,top,width,height;contain:layout paint;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[hidden]{display:none!important}
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-external="true"][data-lsb-shell-open="false"]{display:none!important}
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-bar{
-          display:flex;align-items:center;gap:6px;min-height:32px;flex:0 0 32px;
-          padding:0 8px;border-bottom:1px solid var(--line-soft,#e8e8e8);
-          background:color-mix(in srgb,var(--panel,#fff) 82%,transparent);
-          color:var(--text,#222);user-select:none;touch-action:none;position:relative;z-index:5;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-title{
-          min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-          font:600 12px/1 ${FONT_SANS};
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-drag{
-          flex:1;min-width:16px;height:100%;cursor:grab;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-drag:active{cursor:grabbing}
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-action{
-          flex:0 0 28px;width:28px;height:28px;padding:0;border:0;border-radius:6px;
-          background:transparent;color:var(--text-muted,#888);cursor:pointer;font:inherit;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-action:hover,
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-action:focus-visible{
-          background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);outline:none;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window:focus-visible{
-          outline:2px solid var(--brand,#5eaaa0);outline-offset:2px;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-body{
-          flex:1 1 auto;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail > .lsb-shell-window-body,
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-aside > .lsb-shell-window-body{
-          display:flex;flex-direction:column;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail,
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-aside,
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-window-content{
-          top:0;right:auto;bottom:auto;left:auto;width:auto;height:auto;
-          position:absolute;z-index:auto;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail{padding:0;border-right:0}
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-rail .lsb-shell-rail-scroll{padding-top:12px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-aside{display:flex;padding:0;border-left:0}
-        #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-window-content main.wrap{
-          width:auto!important;max-width:none!important;margin:0!important;padding:12px!important;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-content-body{
-          flex:1 1 auto;min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge]{
-          position:absolute;z-index:4;touch-action:none;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"],
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{
-          top:12px;bottom:12px;width:10px;cursor:ew-resize;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"]{right:-5px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{left:-5px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"],
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{
-          left:12px;right:12px;height:10px;cursor:ns-resize;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"]{bottom:-5px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{top:-5px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"],
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{
-          width:10px;top:12px;bottom:12px;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="e"]{right:-5px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="w"]{left:-5px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"],
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{
-          height:10px;left:12px;right:12px;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="s"]{bottom:-5px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="n"]{top:32px}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="ne"],
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="nw"],
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="se"],
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="sw"]{
-          width:14px;height:14px;
-        }
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="ne"]{right:-5px;top:32px;cursor:nesw-resize}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="nw"]{left:-5px;top:32px;cursor:nwse-resize}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="se"]{right:-5px;bottom:-5px;cursor:nwse-resize}
-        #lsb-shell[data-lsb-shell-mode="windowed"] [data-lsb-shell-resize-edge="sw"]{left:-5px;bottom:-5px;cursor:nesw-resize}
-        #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher{display:none}
-        @media(max-width:699px){
-          html.lsb-skin-shell-on{padding:0!important;overflow:hidden}
-          html.lsb-skin-shell-on body{overflow:hidden}
-          html.lsb-skin-shell-on #lsb-shell{display:block}
-          html.lsb-skin-shell-on .lsb-native-header-hidden,
-          html.lsb-skin-shell-on .forum-more-region{display:none!important}
-          html.lsb-skin-shell-on .lsb-native-sidebar-hidden,
-          html.lsb-skin-shell-on .lsb-native-left-hidden{display:none!important}
-          #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-workspace{top:var(--lsb-shell-header)}
-          #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher{
-            display:flex;position:fixed;top:var(--lsb-shell-header);left:0;right:0;height:36px;
-            z-index:8010;gap:4px;padding:4px;background:var(--panel,#fff);overflow:auto;
-          }
-          #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher [role="tab"]{
-            flex:1 0 auto;border:0;border-radius:6px;background:transparent;color:var(--text-muted,#888);
-            padding:0 10px;font:600 12px ${FONT_SANS};
-          }
-          #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-switcher [aria-selected="true"]{
-            background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);
-          }
-          #lsb-shell[data-lsb-shell-mode="windowed"] #lsb-shell-workspace{top:calc(var(--lsb-shell-header) + 44px)}
-          #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window:not([data-lsb-shell-active="true"]){display:none}
-        }
-        @media(prefers-reduced-motion:reduce){
-          #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window,
-          #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window *{transition:none!important;scroll-behavior:auto!important}
-        }
-        html.lsb-skin-shell-on{
-          font-size:var(--lsb-shell-font-size,14px);
-        }
-        html.lsb-skin-shell-on #lsb-shell{
-          font-family:var(--lsb-shell-font-family,${FONT_SANS});
-        }
-        html.lsb-skin-shell-on #lsb-shell-window-content,
-        html.lsb-skin-shell-on #lsb-shell-rail,
-        html.lsb-skin-shell-on #lsb-shell-aside{
-          color:var(--lsb-shell-text,var(--text,#222));
-        }
-        html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window{
-          background:var(--lsb-shell-panel,var(--panel,#fff));
-        }
-        html.lsb-skin-shell-on .lsb-shell-brand,
-        html.lsb-skin-shell-on .lsb-shell-window-action{color:var(--lsb-shell-accent,var(--brand,#5eaaa0))}
-        html.lsb-skin-glass-on #lsb-shell-header,
-        html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window,
-        html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-bar{
-          background:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) var(--lsb-shell-glass-opacity,.72),transparent);
-          backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
-          -webkit-backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
-        }
-        html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"],
-        html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"] .lsb-shell-window-bar{
-          background:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) var(--lsb-shell-glass-opacity,.72),transparent);
-          backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
-          -webkit-backdrop-filter:blur(var(--lsb-shell-glass-blur,18px));
-        }
-        @media(prefers-reduced-transparency:reduce){
-          html.lsb-skin-glass-on #lsb-shell-header,
-          html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window,
-          html.lsb-skin-glass-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window-bar{
-            background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;
-          }
-          html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"],
-          html.lsb-skin-shell-on #lsb-shell[data-lsb-shell-mode="windowed"] .lsb-shell-window[data-lsb-shell-glass="true"] .lsb-shell-window-bar{
-            background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;
-          }
-        }
-      `
-    }
-
-    // · B2 canvasCss: iOS27 单画布（状态/浮层/响应式） ──
-    function canvasCss() {
-      return `
-        html.lsb-skin-shell-on.lsb-canvas-mode{
-          --lsb-canvas-safe-top:env(safe-area-inset-top,0px);
-          --lsb-canvas-chrome-height:56px;
-          --lsb-canvas-safe-bottom:env(safe-area-inset-bottom,0px);
-          --lsb-canvas-surface-bg:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) calc(var(--lsb-shell-glass-opacity,.72) * 100%),transparent);
-          --lsb-glass-fill:var(--lsb-canvas-surface-bg);
-          --lsb-glass-border:color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 18%,transparent);
-          --lsb-glass-highlight:inset 0 1px 0 rgb(255 255 255 / 42%);
-          --lsb-glass-shadow:0 14px 38px color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 18%,transparent);
-          --lsb-glass-blur:var(--lsb-shell-glass-blur,18px);
-          --lsb-glass-saturation:140%;
-          --lsb-canvas-content-bg:color-mix(in srgb,var(--lsb-shell-panel,var(--panel,#fff)) 94%,var(--bg,#f4f5f7));
-          --lsb-canvas-media-scrim:rgb(8 12 22 / 18%);
-          --lsb-canvas-radius:var(--lsb-shell-radius,16px);
-          min-height:100%;padding:0!important;background:var(--bg,#f4f5f7);color:var(--lsb-shell-text,var(--text,#222));
-          font-size:var(--lsb-shell-font-size,14px);
-        }
-        /* 让资料表面相对页面滚动而非被 body 的隐式滚动容器截断，sticky 才能跟随顶部状态条。 */
-        html.lsb-skin-shell-on.lsb-canvas-mode body{min-height:100%;overflow-x:clip!important;overflow-y:visible!important;padding:0!important;isolation:isolate}
-        html.lsb-skin-shell-on.lsb-canvas-mode #color-scheme-modal{z-index:8020!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-shell-theme-modal{z-index:8020!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;background:var(--lsb-canvas-media-scrim);opacity:0;transition:opacity 180ms ease}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-video-on body::before,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-image-on body::before{opacity:1}
-        #lsb-shell-progress{
-          --lsb-shell-progress:0;
-          position:fixed;top:0;left:0;right:0;z-index:8002;height:3px;
-          pointer-events:none;opacity:0;background:transparent;
-          transition:opacity 120ms cubic-bezier(.23,1,.32,1)
-        }
-        #lsb-shell-progress[data-phase="loading"],#lsb-shell-progress[data-phase="done"]{opacity:1}
-        #lsb-shell-progress [data-lsb-shell-progress-bar]{display:block;width:100%;height:100%;transform:scaleX(var(--lsb-shell-progress));transform-origin:left center;background:var(--brand,#5eaaa0);transition:transform 200ms cubic-bezier(.23,1,.32,1)}
-        [data-lsb-route-content-enter]{animation:lsb-route-content-in 180ms ease both}
-        @keyframes lsb-route-content-in{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
-        #lsb-route-announcer{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}
-        @media(prefers-reduced-motion:reduce){[data-lsb-route-content-enter]{animation:none!important;transform:none!important}}
-        html.lsb-canvas-reduced-motion [data-lsb-route-content-enter]{animation:none!important;transform:none!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root{position:relative;z-index:1;background:var(--lsb-canvas-content-bg);color:var(--lsb-shell-text,var(--text,#222))}
-        html.lsb-skin-shell-on.lsb-canvas-mode main.wrap,
-        html.lsb-skin-shell-on.lsb-canvas-mode .forum-main,
-        html.lsb-skin-shell-on.lsb-canvas-mode .home-shell{
-          box-sizing:border-box;display:block!important;width:auto!important;max-width:1120px!important;
-          margin:0 auto!important;padding:calc(64px + var(--lsb-canvas-safe-top)) 24px calc(116px + var(--lsb-canvas-safe-bottom))!important;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root{padding-top:0!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root .home-shell,html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root .forum-main{padding-top:0!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-canvas-content-root .main-panel{padding-top:0!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode:not(.lsb-canvas-page-home) .lsb-canvas-content-root{margin-top:calc(64px + var(--lsb-canvas-safe-top))!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode main.wrap,
-        html.lsb-skin-shell-on.lsb-canvas-mode .forum-main,
-        html.lsb-skin-shell-on.lsb-canvas-mode .home-shell,
-        html.lsb-skin-shell-on.lsb-canvas-mode .main-panel{
-          font-family:var(--lsb-shell-font-family,${FONT_SANS})!important;
-          font-size:var(--lsb-shell-font-size,14px);
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode [data-canvas-profile-slot]{
-          display:block;position:relative;margin:0 0 16px;padding:0;max-width:100%;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode [data-canvas-profile-slot] > .sidebar-card.user-card{
-          display:block!important;width:100%;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
-          border-radius:var(--lsb-canvas-radius);background:var(--lsb-canvas-surface-bg);backdrop-filter:blur(var(--lsb-shell-glass-blur,18px)) saturate(140%);
-          box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 10%,transparent);
-        }
-        [data-canvas-profile-slot] .user-header-info{gap:10px}
-        [data-canvas-profile-slot] .user-avatar-big img,[data-canvas-profile-slot] .avatar-img{width:42px!important;height:42px!important}
-        [data-canvas-profile-slot] .user-links{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
-        [data-canvas-profile-slot] .user-links a{display:inline-flex;align-items:center;gap:4px;padding:5px 8px;border-radius:999px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);color:inherit;text-decoration:none;font-size:12px}
-        [data-canvas-profile-slot] .btn-post{display:inline-flex;margin-top:10px}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user main.wrap{max-width:1120px!important;display:flex!important;flex-direction:column!important;gap:0!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile],
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list]{box-sizing:border-box;width:min(980px,100%)!important;max-width:980px!important;margin-left:auto!important;margin-right:auto!important;min-width:0}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile]{
-          position:sticky;top:calc(10px + var(--lsb-canvas-safe-top) + var(--lsb-canvas-chrome-height) + 6px);z-index:25;margin:0 auto!important;overflow:visible;
-          width:fit-content!important;max-width:min(100%,760px)!important;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile] > .sidebar-card.user-card{
-          display:block!important;width:fit-content!important;max-width:100%;margin:0;padding:12px 14px;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
-          border-radius:var(--lsb-canvas-radius);background:var(--lsb-canvas-surface-bg);backdrop-filter:blur(var(--lsb-shell-glass-blur,18px)) saturate(140%);
-          box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 10%,transparent);transition:none;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list]{margin:12px auto 0!important;padding:12px!important;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
-          border-radius:var(--lsb-canvas-radius);background:var(--lsb-canvas-surface-bg);backdrop-filter:blur(var(--lsb-shell-glass-blur,18px)) saturate(140%);
-          box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 8%,transparent)}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] > .home-shell,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] > .forum-layout,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] > .forum-main,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] .forum-layout.forum-layout-has-sidebar,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] .forum-main,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list] .main-panel{
-          display:block!important;width:100%!important;max-width:none!important;margin:0!important;padding:0!important;background:transparent!important;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode .forum-layout.forum-layout-has-sidebar{display:block!important;grid-template-columns:1fr!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .home-shell,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .forum-main{
-          padding:0!important;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot]{
-          width:fit-content!important;max-width:min(100%,760px)!important;margin:0 auto 12px!important;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] > .sidebar-card.user-card{
-          width:fit-content!important;max-width:100%;max-height:none!important;overflow:visible!important;
-          padding:12px 14px;border-radius:var(--lsb-canvas-radius);
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .user-links{display:flex!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .btn-post{display:inline-flex!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .user-avatar-big img,
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home [data-canvas-profile-slot] .avatar-img{width:36px!important;height:36px!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .home-shell{
-          background:transparent!important;border:0!important;box-shadow:none!important;border-radius:0!important;overflow:visible;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .main-panel{
-          background:var(--lsb-canvas-surface-bg)!important;border:1px solid color-mix(in srgb,var(--line,#ddd) 72%,transparent);
-          border-radius:var(--lsb-canvas-radius)!important;box-shadow:0 8px 24px color-mix(in srgb,var(--text,#222) 8%,transparent);
-          overflow:hidden;
-        }
-        @media(min-width:700px){
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .lsb-canvas-content-root{
-            display:flex!important;flex-direction:column!important;min-height:0!important;height:100vh!important;max-height:100vh!important;
-            overflow:hidden!important;overscroll-behavior:none;
-          }
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .lsb-canvas-content-root > .home-shell{
-            display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
-          }
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .home-shell > .forum-layout.forum-layout-has-sidebar{
-            display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
-          }
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .forum-layout.forum-layout-has-sidebar > .forum-main{
-            display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
-          }
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .forum-main > .main-panel{
-            display:flex!important;flex:1 1 auto;flex-direction:column;min-width:0;min-height:0;
-            overflow-y:auto!important;overflow-x:hidden!important;overscroll-behavior:contain;scrollbar-gutter:stable;
-          }
-        }
-        @media(max-width:699px){
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .lsb-canvas-content-root{
-            height:auto!important;max-height:none!important;overflow:visible!important;
-          }
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .main-panel{
-            height:auto!important;max-height:none!important;overflow:visible!important;
-          }
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-home .topic-toolbar{
-          min-height:44px;margin:0!important;padding:8px 12px!important;align-items:center;
-        }
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-native-header-hidden,
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-native-sidebar-hidden,
-        html.lsb-skin-shell-on.lsb-canvas-mode .lsb-native-left-hidden,
-        html.lsb-skin-shell-on.lsb-canvas-mode .forum-more-region{display:none!important}
-        html.lsb-canvas-route-pending body > .top,
-        html.lsb-canvas-route-pending body > header,
-        html.lsb-canvas-route-pending body > .site-header,
-        html.lsb-canvas-route-pending body > [data-site-header],
-        html.lsb-canvas-route-pending .forum-more-region,
-        html.lsb-canvas-route-pending aside.sidebar:not(#mobile-menu-drawer):not(.mobile-menu-drawer),
-        html.lsb-canvas-route-pending .forum-enhancements-left-fixed,
-        html.lsb-canvas-route-pending #mobile-menu,
-        html.lsb-canvas-route-pending .mobile-menu-backdrop,
-        html.lsb-canvas-route-pending .lsb-launcher{display:none!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode aside.sidebar:not(#mobile-menu-drawer):not(.mobile-menu-drawer),
-        html.lsb-skin-shell-on.lsb-canvas-mode .forum-enhancements-left-fixed{display:none!important}
-        html.lsb-skin-shell-on.lsb-canvas-mode li.post-item:not(.post-entry) .meta-icon{display:none}
-        html.lsb-skin-shell-on.lsb-canvas-mode li.post-item{padding-block:8px!important;border-radius:var(--lsb-canvas-radius)}
-        html.lsb-skin-shell-on.lsb-canvas-mode li.post-entry{border-radius:var(--lsb-canvas-radius)}
-        #lsb-shell[data-lsb-canvas-shell]{display:block;position:fixed;inset:0;z-index:7999;pointer-events:none;font-family:var(--lsb-shell-font-family,${FONT_SANS});color:var(--lsb-shell-text,var(--text,#222))}
-        #lsb-shell[data-lsb-canvas-shell] *{box-sizing:border-box}
-        #lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-video],#lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-image]{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease}
-        html.lsb-skin-video-on #lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-video]{opacity:1}
-        html.lsb-skin-image-on #lsb-shell[data-lsb-canvas-shell] > [data-lsb-shell-image]{opacity:1}
-        html.lsb-skin-shell-on.lsb-canvas-mode body > [data-lsb-shell-video][data-lsb-shell-video-layer="canvas"]{
-          position:fixed;inset:0;width:100%;height:100%;box-sizing:border-box;object-fit:cover;
-          z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
-        }
-        html.lsb-skin-video-on.lsb-canvas-mode body > [data-lsb-shell-video][data-lsb-shell-video-layer="canvas"]{opacity:1}
-        html.lsb-skin-shell-on.lsb-canvas-mode body > [data-lsb-shell-image][data-lsb-shell-image-layer="canvas"]{
-          position:fixed;inset:0;width:100%;height:100%;box-sizing:border-box;object-fit:cover;
-          z-index:0;pointer-events:none;opacity:0;transition:opacity 180ms ease;
-        }
-        html.lsb-skin-image-on.lsb-canvas-mode body > [data-lsb-shell-image][data-lsb-shell-image-layer="canvas"]{opacity:1}
-        html.lsb-skin-shell-on .lsb-launcher{display:none!important}
-        #lsb-shell-surfaces{position:absolute;inset:0;pointer-events:none;--lsb-canvas-chrome-height:56px}
-        #lsb-shell-surfaces > [data-surface]{pointer-events:auto}
-        #lsb-shell-surfaces [data-surface]{font:inherit;color:inherit}
-        [data-canvas-profile-host]{
-          position:fixed;top:calc(10px + var(--lsb-canvas-safe-top));left:max(12px,calc((100% - 1120px) / 2 + 24px));z-index:8004;
-          display:flex;align-items:center;min-width:0;pointer-events:auto;color:inherit;
-        }
-        [data-canvas-profile-host][hidden]{display:none!important}
-        [data-canvas-profile-host] > .sidebar-card.user-card{
-          position:relative;display:block!important;box-sizing:border-box;width:190px;min-width:0;height:var(--lsb-canvas-chrome-height);max-height:var(--lsb-canvas-chrome-height);margin:0;padding:0 72px 0 10px;
-          overflow:visible!important;border:1px solid var(--lsb-glass-border);border-radius:999px;background:var(--lsb-glass-fill);
-          backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
-          box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);transition:box-shadow 160ms ease;
-        }
-        [data-canvas-profile-host]:not([data-expanded="true"]) > .sidebar-card.user-card{overflow:hidden!important;}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-wrap{width:100%;height:100%;padding:0!important;margin:0!important;box-sizing:border-box}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-header{display:flex!important;align-items:center;min-height:100%;height:100%;margin:0!important;padding:0!important}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-header-info{display:flex!important;align-items:center;gap:6px;min-width:0;width:100%;height:100%;padding:0!important}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-avatar-big{display:flex!important;align-items:center;justify-content:center;flex:0 0 36px;width:36px!important;height:36px!important;min-width:36px}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-avatar-big img,[data-canvas-profile-host]:not([data-expanded="true"]) .avatar-img{display:block;width:36px!important;height:36px!important;min-width:36px;object-fit:cover}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-header-info > div{min-width:0;flex:0 1 auto;width:60px}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-name{display:block;max-width:60px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:650;line-height:16px}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-rank,
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-group,
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-title{display:none!important}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-links{position:absolute;top:50%;right:42px;display:flex!important;align-items:center;gap:4px;margin:0!important;transform:translateY(-50%)}
-        [data-canvas-profile-host] .user-links a[data-canvas-profile-bell]{position:relative;display:inline-flex!important;align-items:center;justify-content:center;width:27px;height:27px;padding:0;border-radius:999px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);font-size:0;line-height:1;color:inherit}
-        [data-canvas-profile-host] .user-links a[data-canvas-profile-bell] .meta-icon{width:16px;height:16px;margin:0}
-        [data-canvas-profile-host] .user-links a[data-canvas-profile-bell]:hover,[data-canvas-profile-host] .user-links a[data-canvas-profile-bell]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-canvas-profile-host] .user-links a[data-canvas-profile-bell] .notify-badge{position:absolute;top:-2px;right:-2px;min-width:9px;height:9px;padding:0;border:2px solid var(--lsb-shell-panel,var(--panel,#fff));border-radius:50%;font-size:0;line-height:0;background:var(--danger,#e07a7a)}
-        [data-canvas-profile-host]:not([data-expanded="true"]) .user-links a:not([data-canvas-profile-bell]),
-        [data-canvas-profile-host]:not([data-expanded="true"]) .btn-post{display:none!important}
-        [data-canvas-profile-host][data-expanded="true"]{align-items:flex-start}
-        [data-canvas-profile-host][data-expanded="true"] > .sidebar-card.user-card{position:absolute;top:calc(100% + 8px);left:0;width:min(340px,calc(100vw - 24px));height:auto;max-height:none;padding:12px 14px;border-radius:var(--lsb-canvas-radius);box-shadow:var(--lsb-glass-highlight),0 18px 44px color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 22%,transparent)}
-        [data-canvas-profile-host][data-expanded="true"] .user-links{position:static;display:flex!important;gap:6px;flex-wrap:wrap;margin-top:10px!important}
-        [data-canvas-profile-host][data-expanded="true"] .user-links a:not([data-canvas-profile-bell]){display:inline-flex!important}
-        [data-canvas-profile-host][data-expanded="true"] .user-links a[data-canvas-profile-bell]{display:inline-flex!important;align-items:center;justify-content:center;width:auto!important;min-width:0;height:auto!important;min-height:27px;padding:5px 8px!important;gap:4px;font-size:12px!important;line-height:1.2;white-space:nowrap}
-        [data-canvas-profile-host][data-expanded="true"] .user-links a[data-canvas-profile-bell] .meta-icon{flex:0 0 auto;width:14px;height:14px;margin:0}
-        [data-canvas-profile-expand]{position:absolute;top:50%;right:4px;z-index:2;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:16px;line-height:1;transform:translateY(-50%)}
-        [data-canvas-profile-expand]:hover,[data-canvas-profile-expand]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-canvas-profile-host][data-expanded="true"] [data-canvas-profile-expand]{background:var(--brand-soft,#e8f4f2)}
-        @media(max-width:1099px){
-          [data-canvas-profile-host]{top:calc(6px + var(--lsb-canvas-safe-top));left:8px;max-width:190px}
-          [data-canvas-profile-host] > .sidebar-card.user-card{width:190px}
-          #lsb-shell-surfaces [data-surface="top-status"]{left:210px;right:8px;transform:none;max-width:none}
-          #lsb-shell-surfaces [data-surface="top-status"][data-compact="true"]{transform:translateY(-34px)}
-          #lsb-shell-surfaces [data-surface="site-status"]{display:none!important}
-        }
-        @media(max-width:699px){
-          [data-canvas-profile-host]{max-width:184px}
-          [data-canvas-profile-host] > .sidebar-card.user-card{width:184px}
-          [data-canvas-profile-host]:not([data-expanded="true"]) .user-header-info > div,
-          [data-canvas-profile-host]:not([data-expanded="true"]) .user-name,
-          [data-canvas-profile-host]:not([data-expanded="true"]) .user-rank{width:54px;max-width:54px}
-          #lsb-shell-surfaces [data-surface="top-status"]{left:204px;max-width:calc(100vw - 16px);height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height)}
-        }
-        @media(min-width:1100px){
-          #lsb-shell-surfaces [data-surface="top-status"]{width:min(620px,calc(100vw - 24px));max-width:min(620px,calc(100vw - 24px))}
-          #lsb-shell-surfaces [data-surface="site-status"]{position:fixed;top:calc(10px + var(--lsb-canvas-safe-top));right:max(12px,calc((100vw - 1120px) / 2 + 12px));z-index:8000;display:flex;align-items:center;justify-content:flex-end;width:auto;height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height);padding:0;border:0;border-radius:0;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none;overflow:visible}
-          #lsb-shell-surfaces [data-surface="site-status"][hidden]{display:none!important}
-        }
-        [data-canvas-backdrop]{position:fixed;inset:0;z-index:8009;background:rgb(5 8 18 / 52%);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);pointer-events:auto}
-        [data-canvas-backdrop][hidden]{display:none!important}
-        [data-surface="top-status"]{
-          position:fixed;top:calc(10px + var(--lsb-canvas-safe-top));left:50%;transform:translateX(-50%);z-index:8000;
-          display:flex;align-items:center;gap:8px;height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height);max-width:min(840px,calc(100vw - 24px));padding:7px 10px;
-          border:1px solid var(--lsb-glass-border);border-radius:999px;
-          background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
-          box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);transition:opacity 160ms ease,transform 160ms ease;
-        }
-        [data-surface="top-status"][data-compact="true"]{opacity:.78;transform:translate(-50%,-34px)}
-        [data-surface="top-status"] button,[data-surface="tool-capsule"] button,[data-surface="tool-sheet"] button{font:inherit}
-        [data-surface="top-status"] [data-canvas-status-title]{flex:0 0 auto;min-width:0;max-width:46vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:650}
-        [data-route-transition="in"]{animation:lsb-route-title-in 180ms ease both}
-        @keyframes lsb-route-title-in{from{opacity:.45;transform:translateY(2px)}to{opacity:1;transform:none}}
-        [data-canvas-status-links]{display:flex;align-items:center;gap:5px;flex:1 1 auto;min-width:0;overflow-x:auto;overscroll-behavior-inline:contain;scrollbar-width:none}
-        [data-canvas-status-links]::-webkit-scrollbar{display:none}
-        [data-canvas-pinned-links]{display:flex;align-items:center;gap:5px;flex:0 0 auto;min-width:0}
-        [data-canvas-status-links] a,[data-canvas-pinned-links] a,[data-canvas-pinned-links] [data-canvas-navigation-trigger]{display:inline-flex;align-items:center;flex:0 0 auto;min-height:30px;padding:0 8px;border:0;border-radius:999px;
-          color:inherit;text-decoration:none;font:inherit;font-size:12px;font-weight:550;white-space:nowrap;background:color-mix(in srgb,var(--panel,#fff) 48%,transparent);cursor:pointer}
-        [data-canvas-status-links] a:hover,[data-canvas-status-links] a:focus-visible,[data-canvas-pinned-links] a:hover,[data-canvas-pinned-links] a:focus-visible,[data-canvas-pinned-links] [data-canvas-navigation-trigger]:hover,[data-canvas-pinned-links] [data-canvas-navigation-trigger]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-canvas-search-host]{position:relative;display:flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;min-width:34px;max-width:34px;height:34px;margin-left:2px;overflow:visible}
-        [data-canvas-search-host][hidden]{display:none!important}
-        [data-canvas-search-trigger]{display:inline-flex;align-items:center;justify-content:center;flex:0 0 34px;width:34px;height:34px;padding:0;border:1px solid var(--lsb-glass-border);border-radius:50%;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);box-shadow:var(--lsb-glass-highlight);color:inherit;cursor:pointer}
-        [data-canvas-search-trigger]:hover,[data-canvas-search-trigger]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-canvas-search-trigger] svg{display:block;width:17px;height:17px;stroke:currentColor;stroke-width:1.8;fill:none;stroke-linecap:round;stroke-linejoin:round}
-        [data-canvas-search-panel]{position:absolute;top:calc(100% + 8px);right:0;z-index:8020;box-sizing:border-box;width:min(320px,calc(100vw - 24px));max-width:calc(100vw - 24px);padding:8px;border:1px solid var(--lsb-glass-border);border-radius:20px;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow)}
-        [data-canvas-search-panel][hidden]{display:none!important}
-        [data-canvas-search-panel] .lsb-shell-search{display:flex!important;align-items:center;gap:4px;box-sizing:border-box;width:100%;min-width:0;max-width:none;height:34px;margin:0;padding:3px 5px 3px 9px;border:1px solid var(--lsb-glass-border);border-radius:999px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);box-shadow:var(--lsb-glass-highlight);overflow:hidden}
-        [data-canvas-search-panel] .lsb-shell-search input[type="search"],[data-canvas-search-panel] .lsb-shell-search input[name="q"]{box-sizing:border-box;flex:1 1 auto;width:100%;min-width:0;height:26px;margin:0;padding:0 5px;border:0;border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:12px}
-        [data-canvas-search-panel] .lsb-shell-search select{flex:0 1 auto;max-width:68px;min-width:0;height:26px;border:0;border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:11px}
-        [data-canvas-search-panel] .lsb-shell-search button{flex:0 0 auto;min-width:28px;height:26px;padding:0 7px;border:0;border-radius:999px;background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0);font:inherit;font-size:11px;cursor:pointer}
-        [data-canvas-search-panel] .lsb-shell-search.search-page-link{display:flex!important;align-items:center;justify-content:space-between;min-width:40px;padding:0 9px;color:inherit;text-decoration:none;font-size:12px}
-        [data-canvas-site-status-host]{position:relative;isolation:isolate;display:flex;align-items:center;gap:2px;width:auto;height:100%;min-height:var(--lsb-canvas-chrome-height);padding:0 8px 0 14px;border:0;border-radius:999px;background:transparent;box-shadow:none;overflow:visible;z-index:1;cursor:pointer;color:inherit}
-        [data-canvas-site-status-host]::before{content:'';position:absolute;inset:0;z-index:0;border:1px solid var(--lsb-glass-border);border-radius:inherit;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);pointer-events:none}
-        [data-canvas-site-status-host][hidden]{display:none!important}
-        [data-canvas-site-status-body]{display:flex;align-items:center;gap:6px;width:100%;height:100%;min-width:0;overflow:hidden;border:0;border-radius:999px;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:none}
-        [data-canvas-site-status-body] > .sidebar-card{display:block!important;flex:0 0 auto!important;width:100%;height:var(--lsb-canvas-chrome-height)!important;max-height:var(--lsb-canvas-chrome-height)!important;overflow:hidden!important;margin:0;padding:0 34px 0 10px;border:0;border-radius:999px;background:transparent;box-shadow:none}
-        [data-canvas-site-status-body] > .sidebar-card .quick-wrap{height:100%;padding:0!important;margin:0!important;display:flex;align-items:center;min-width:0}
-        [data-canvas-site-status-body] > .sidebar-card .quick-title,[data-canvas-site-status-body] > .sidebar-card .daily-hot-topics-head{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:650}
-        [data-canvas-site-status-body] > .sidebar-card .quick-links,[data-canvas-site-status-body] > .sidebar-card .daily-hot-topics-list{display:none!important}
-        [data-canvas-site-status-body] [data-canvas-site-empty-state]{display:block!important;margin:0;padding:0 10px;color:var(--text-muted,#888);font-size:11px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        [data-canvas-site-status-body] [data-canvas-site-empty-state][hidden]{display:none!important}
-        [data-canvas-site-status-host]:not([data-expanded="true"]) [data-canvas-site-status-body]{display:none!important}
-        [data-canvas-site-status-label]{position:relative;z-index:1;display:inline-flex;align-items:center;border:0;padding:0;background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:550;line-height:1;white-space:nowrap;cursor:pointer}
-        [data-canvas-site-status-expand]{position:relative;z-index:1;top:auto;right:auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:14px;line-height:1;transform:none}
-        [data-canvas-site-status-expand]:hover,[data-canvas-site-status-expand]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-canvas-site-status-host][data-expanded="true"]{align-items:center}
-        [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body]{position:absolute;top:calc(100% + 8px);right:0;z-index:2;display:flex;flex-direction:column;align-items:stretch;gap:0;width:min(340px,calc(100vw - 24px));height:auto;max-height:calc(100vh - 90px);overflow:auto;padding:8px 14px;border:1px solid var(--lsb-glass-border);border-radius:34px;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow)}
-        [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] > .sidebar-card{height:auto!important;max-height:none!important;overflow:visible!important;margin:0!important;padding:10px 2px!important;border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important}
-        [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] > .sidebar-card + .sidebar-card{margin-top:0!important;border-top:1px solid color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 12%,transparent)!important}
-        [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] .quick-links,[data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body] .daily-hot-topics-list{display:block!important}
-        [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-expand]{background:var(--brand-soft,#e8f4f2)}
-        html.lsb-canvas-page-user #lsb-shell-surfaces [data-surface="top-status"] [data-canvas-status-title]{max-width:24vw}
-        [data-canvas-action]{border:0;background:transparent;color:inherit;cursor:pointer;border-radius:999px;min-width:30px;min-height:30px;padding:0 8px}
-        [data-canvas-action]:hover,[data-canvas-action]:focus-visible{background:color-mix(in srgb,var(--brand-soft,#e8f4f2) 80%,transparent);outline:none}
-        [data-surface="tool-capsule"]{
-          position:fixed;left:50%;bottom:calc(14px + var(--lsb-canvas-safe-bottom));transform:translateX(-50%);z-index:8001;
-          display:flex;align-items:center;gap:4px;padding:6px;border:1px solid var(--lsb-glass-border);
-          border-radius:999px;background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
-          box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow)
-        }
-        [data-surface="tool-capsule"] button{min-width:38px;height:34px;border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer}
-        [data-surface="tool-capsule"] button:hover,[data-surface="tool-capsule"] button:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-surface="tool-sheet"], [data-surface="navigation-sheet"], [data-surface="site-card"], [data-surface="appearance-sheet"], [data-surface="ai-card"], [data-surface="plugin-features-sheet"], [data-surface="plugin-settings-sheet"]{
-          position:fixed;left:50%;bottom:calc(70px + var(--lsb-canvas-safe-bottom));transform:translateX(-50%);z-index:8010;
-          width:min(520px,calc(100vw - 24px));max-height:min(70vh,640px);overflow:auto;padding:18px;
-          border:1px solid var(--lsb-glass-border);border-radius:var(--lsb-canvas-radius);
-          background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
-          box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);opacity:1;transition:opacity 180ms ease,transform 180ms ease
-        }
-        [data-surface="tool-sheet"][hidden],[data-surface="navigation-sheet"][hidden],[data-surface="site-card"][hidden],[data-surface="appearance-sheet"][hidden],[data-surface="ai-card"][hidden],[data-surface="plugin-features-sheet"][hidden],[data-surface="plugin-settings-sheet"][hidden],[data-surface="context-pill"][hidden]{display:none!important}
-        [data-surface="context-pill"]{
-          position:fixed;display:flex;align-items:center;gap:3px;padding:4px;
-          border:1px solid var(--lsb-glass-border);border-radius:999px;
-          background:var(--lsb-glass-fill);backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));-webkit-backdrop-filter:blur(var(--lsb-glass-blur)) saturate(var(--lsb-glass-saturation));
-          box-shadow:var(--lsb-glass-highlight),var(--lsb-glass-shadow);white-space:nowrap
-        }
-        [data-surface="context-pill"] button{min-height:30px;padding:0 10px;border:0;border-radius:999px;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer}
-        [data-surface="context-pill"] button:hover,[data-surface="context-pill"] button:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-surface="ai-card"][data-surface-mode="floating"]{left:auto;right:24px;bottom:88px;transform:none;width:420px;max-width:calc(100vw - 32px);height:560px;max-height:calc(100vh - 120px);resize:both;overflow:auto}
-        [data-surface="site-card"][data-surface-mode="floating"],[data-surface="evidence-card"][data-surface-mode="floating"]{transform:none;right:auto;bottom:auto;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);height:auto}
-        [data-surface="site-card"][data-surface-mode="rail"]{
-          position:fixed;top:calc(72px + var(--lsb-canvas-safe-top));right:max(12px,calc((100vw - 1120px) / 2));bottom:calc(70px + var(--lsb-canvas-safe-bottom));left:auto;transform:none;
-          width:min(320px,calc(30vw - 24px));max-width:calc(100vw - 32px);max-height:none;height:auto;overflow:auto;padding:16px;
-          border-radius:20px;z-index:8005;
-        }
-        [data-surface="site-card"][data-surface-mode="rail"] [data-canvas-sheet-head]{cursor:default}
-        [data-surface="site-card"][data-surface-mode="rail"] [data-canvas-resize-handle]{display:none!important}
-        [data-surface="ai-card"]{display:flex;flex-direction:column;gap:10px}
-        [data-surface="ai-card"] [data-canvas-ai-host]{min-height:0;flex:1;overflow:auto}
-        [data-surface="ai-card"][data-surface-mode="sheet"]{bottom:calc(70px + var(--lsb-canvas-safe-bottom));width:min(520px,calc(100vw - 24px));max-height:min(70vh,640px)}
-        [data-surface="ai-card"][data-surface-mode="fullscreen"]{left:8px;right:8px;bottom:calc(58px + var(--lsb-canvas-safe-bottom));transform:none;width:auto;max-height:calc(100vh - 82px);border-radius:22px}
-        [data-surface="ai-card"][data-ai-workbench-mounted]{padding:0!important;gap:0}
-        [data-surface="ai-card"][data-ai-workbench-mounted] > [data-canvas-sheet-head]{display:none!important}
-        [data-surface][data-surface-mode="floating"] [data-canvas-sheet-head]{cursor:grab;user-select:none}
-        [data-surface][data-surface-mode="floating"][data-canvas-dragging="true"]{will-change:transform;cursor:grabbing}
-        [data-surface][data-surface-mode="floating"] [data-canvas-resize-handle]{position:absolute;right:3px;bottom:3px;width:16px;height:16px;cursor:nwse-resize;touch-action:none}
-        [data-surface] [data-canvas-sheet-head]{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:-2px 0 12px;padding-top:8px}
-        [data-canvas-sheet-grabber]{position:absolute;top:0;left:50%;width:34px;height:4px;transform:translateX(-50%);border-radius:999px;background:color-mix(in srgb,var(--lsb-shell-text,var(--text,#222)) 26%,transparent)}
-        [data-surface][data-canvas-surface-state="opening"]{opacity:0;transform:translateX(-50%) translateY(8px) scale(.985)}
-        [data-surface][data-canvas-surface-state="closing"]{opacity:0;pointer-events:none}
-        [data-surface][data-surface-mode="floating"][data-canvas-surface-state="opening"]{transform:translateY(8px) scale(.985)}
-        [data-surface="site-card"][data-surface-mode="rail"][data-canvas-surface-state="opening"]{transform:translateY(0) scale(1)}
-        [data-surface][data-surface-mode="fullscreen"][data-canvas-surface-state="opening"]{transform:translateY(12px) scale(.99)}
-        [data-surface] [data-canvas-sheet-head] h2{margin:0;font-size:16px;line-height:1.3}
-        [data-surface] [data-canvas-close]{border:0;border-radius:999px;background:transparent;color:inherit;cursor:pointer;width:32px;height:32px;font-size:18px}
-        [data-surface] [data-canvas-close]:hover,[data-surface] [data-canvas-close]:focus-visible{background:var(--brand-soft,#e8f4f2);outline:none}
-        [data-surface="tool-sheet"] [data-tool-grid]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:14px}
-        [data-surface="tool-sheet"] [data-tool-action]{min-height:46px;padding:10px;border:1px solid var(--line-soft,#e8e8e8);border-radius:12px;background:color-mix(in srgb,var(--panel,#fff) 48%,transparent);color:inherit;text-align:left;cursor:pointer}
-        [data-surface="tool-sheet"] [data-tool-action]:hover,[data-surface="tool-sheet"] [data-tool-action]:focus-visible{border-color:var(--brand,#5eaaa0);outline:none}
-        [data-surface="tool-sheet"] [data-canvas-query]{display:flex;gap:8px;align-items:flex-end}
-        [data-surface="tool-sheet"] textarea{flex:1;min-height:70px;resize:vertical;border:1px solid var(--line,#ddd);border-radius:12px;padding:9px;background:color-mix(in srgb,var(--panel,#fff) 64%,transparent);color:inherit;font:inherit}
-        [data-surface="tool-sheet"] [data-canvas-send]{min-height:38px;border:0;border-radius:999px;padding:0 16px;background:var(--brand,#5eaaa0);color:#fff;cursor:pointer}
-        [data-surface="plugin-features-sheet"] [data-plugin-feature-list],[data-surface="plugin-settings-sheet"] [data-plugin-settings-list]{display:grid;gap:7px;margin:8px 0 14px}
-        [data-surface="plugin-features-sheet"] [data-plugin-feature-list] .lsb-empty,[data-surface="plugin-settings-sheet"] [data-plugin-settings-list] .lsb-empty{margin:0;padding:10px;border-radius:10px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent)}
-        .lsb-plugin-entry{display:flex;align-items:center;gap:6px;min-width:0;padding:4px;border:1px solid var(--line-soft,#e8e8e8);border-radius:12px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent)}
-        .lsb-plugin-entry-main,.lsb-plugin-entry-settings,.lsb-plugin-settings-entry,[data-plugin-settings-directory],[data-plugin-settings-back]{min-height:38px;border:0;border-radius:9px;background:transparent;color:inherit;font:inherit;cursor:pointer}
-        .lsb-plugin-entry-main{flex:1;min-width:0;padding:7px 10px;text-align:left}
-        .lsb-plugin-entry-settings{flex:0 0 38px;padding:0;font-size:17px}
-        .lsb-plugin-settings-entry{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:8px 10px;border:1px solid var(--line-soft,#e8e8e8);text-align:left}
-        .lsb-plugin-settings-entry small{color:var(--text-muted,#888);font-size:11px}
-        [data-plugin-settings-directory]{padding:7px 12px;border:1px solid var(--line,#ddd);background:color-mix(in srgb,var(--panel,#fff) 48%,transparent)}
-        [data-plugin-settings-back]{margin:-4px 0 8px;padding:4px 9px;color:var(--text-muted,#888)}
-        .lsb-plugin-entry button:hover,.lsb-plugin-settings-entry:hover,[data-plugin-settings-directory]:hover,[data-plugin-settings-back]:hover{background:var(--brand-soft,#e8f4f2);color:var(--brand,#5eaaa0)}
-        [data-surface="plugin-features-sheet"] h3,[data-surface="plugin-settings-sheet"] h3{margin:10px 0 6px;font-size:13px}
-        [data-surface="site-card"] [data-canvas-site-sidebar]{display:flex;flex-direction:column;gap:10px;margin-top:14px;max-height:none!important;overflow:visible!important;padding-right:2px}
-        [data-surface="site-card"] [data-canvas-site-sidebar]:empty::before{content:'当前页面没有可用的站点侧栏信息';display:block;padding:12px;border-radius:12px;color:var(--text-muted,#888);background:color-mix(in srgb,var(--panel,#fff) 38%,transparent);font-size:12px}
-        [data-surface="site-card"] [data-canvas-site-empty-state]{display:block;margin:14px 0 0;padding:12px;border-radius:12px;color:var(--text-muted,#888);background:color-mix(in srgb,var(--panel,#fff) 38%,transparent);font-size:12px}
-        [data-surface="site-card"] [data-canvas-site-empty-state][hidden]{display:none!important}
-        [data-surface="site-card"] [data-canvas-site-sidebar] > .sidebar-card{display:block!important;flex:0 0 auto!important;width:100%;height:auto!important;max-height:none!important;overflow:visible!important;margin:0;padding:12px;border:1px solid color-mix(in srgb,var(--line,#ddd) 62%,transparent);border-radius:14px;background:color-mix(in srgb,var(--panel,#fff) 42%,transparent);box-shadow:none}
-        [data-surface="site-card"] [data-canvas-site-sidebar] .quick-links{max-height:none!important;overflow:visible!important}
-        [data-surface="site-card"]{height:auto;max-height:calc(100vh - 32px)}
-        [data-surface="site-card"][data-surface-mode="sheet"],[data-surface="site-card"][data-surface-mode="fullscreen"]{height:auto;max-height:calc(100vh - 82px)}
-        [data-surface="appearance-sheet"] [data-canvas-appearance-controls]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:14px}
-        [data-surface="appearance-sheet"] [data-canvas-background-modes]{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:14px}
-        [data-surface="appearance-sheet"] [data-canvas-background-modes] strong{font-size:12px;color:var(--text-muted,#888);font-weight:600;margin-right:2px}
-        [data-surface="appearance-sheet"] [data-canvas-background-modes] button{min-height:32px;padding:5px 10px;border:1px solid var(--line,#ddd);border-radius:999px;background:transparent;color:inherit;cursor:pointer;font:inherit;font-size:12px}
-        [data-surface="appearance-sheet"] [data-canvas-background-modes] button[aria-pressed="true"]{border-color:var(--lsb-shell-accent,var(--brand,#5eaaa0));background:var(--brand-soft,#e8f4f2);color:var(--lsb-shell-accent,var(--brand,#5eaaa0));font-weight:600}
-        [data-surface="appearance-sheet"] [data-canvas-appearance-controls] label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--text-muted,#888)}
-        [data-surface="appearance-sheet"] [data-canvas-appearance-controls] input{width:100%;min-width:0;border:1px solid var(--line,#ddd);border-radius:9px;padding:6px;background:color-mix(in srgb,var(--panel,#fff) 70%,transparent);color:inherit;font:inherit}
-        [data-surface="appearance-sheet"] [data-canvas-appearance-controls] input[type="range"]{padding:0}
-        [data-surface="appearance-sheet"] [data-canvas-appearance-actions]{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
-        [data-surface="appearance-sheet"] [data-canvas-appearance-actions] button{border:1px solid var(--line,#ddd);border-radius:999px;padding:7px 11px;background:transparent;color:inherit;cursor:pointer}
-        [data-surface="top-status"] button:focus-visible,[data-surface="tool-capsule"] button:focus-visible,[data-surface="tool-sheet"] button:focus-visible,[data-surface="navigation-sheet"] a:focus-visible{outline:2px solid var(--brand,#5eaaa0);outline-offset:2px}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-glass-on #lsb-shell-surfaces [data-surface]{background:var(--lsb-canvas-surface-bg)}
-        html.lsb-skin-shell-on.lsb-canvas-mode.lsb-skin-glass-on #lsb-shell-surfaces [data-surface="site-status"]{background:transparent;border:0;border-radius:0;box-shadow:none;overflow:visible}
-        @media(max-width:699px){
-          html.lsb-skin-shell-on.lsb-canvas-mode main.wrap,html.lsb-skin-shell-on.lsb-canvas-mode .forum-main,html.lsb-skin-shell-on.lsb-canvas-mode .home-shell{padding-inline:14px!important}
-          [data-surface="top-status"]{max-width:calc(100vw - 16px);top:calc(6px + var(--lsb-canvas-safe-top));height:var(--lsb-canvas-chrome-height);min-height:var(--lsb-canvas-chrome-height)}
-          [data-surface="top-status"] [data-canvas-status-title]{max-width:42vw}
-          html.lsb-canvas-page-user #lsb-shell-surfaces [data-surface="top-status"]{width:calc(100vw - 16px);gap:4px;padding:5px 6px}
-          html.lsb-canvas-page-user #lsb-shell-surfaces [data-surface="top-status"] [data-canvas-status-title]{max-width:20vw}
-          #lsb-shell-surfaces [data-surface="site-status"]{display:none!important}
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-profile]{position:sticky!important;top:calc(6px + var(--lsb-canvas-safe-top) + var(--lsb-canvas-chrome-height))!important;z-index:25!important}
-          html.lsb-skin-shell-on.lsb-canvas-mode.lsb-canvas-page-user [data-lsb-canvas-list]{padding:8px!important}
-          [data-surface="tool-sheet"],[data-surface="navigation-sheet"],[data-surface="site-card"],[data-surface="appearance-sheet"],[data-surface="ai-card"],[data-surface="plugin-features-sheet"],[data-surface="plugin-settings-sheet"]{left:8px;right:8px;bottom:calc(58px + var(--lsb-canvas-safe-bottom));transform:none;width:auto;max-height:calc(100vh - 82px);border-radius:22px}
-          [data-surface="tool-capsule"]{bottom:calc(8px + var(--lsb-canvas-safe-bottom));max-width:calc(100vw - 16px)}
-          [data-surface="site-card"][data-surface-mode="rail"]{top:calc(6px + var(--lsb-canvas-safe-top) + var(--lsb-canvas-chrome-height));right:8px;bottom:calc(58px + var(--lsb-canvas-safe-bottom));left:8px;width:auto;max-width:none;max-height:calc(100vh - 82px);border-radius:22px}
-          [data-surface="appearance-sheet"] [data-canvas-appearance-controls]{grid-template-columns:1fr!important}
-          [data-surface="appearance-sheet"] [data-canvas-appearance-actions]{flex-direction:column!important;align-items:stretch!important}
-          [data-surface="appearance-sheet"] [data-canvas-appearance-actions] button{min-height:40px}
-        }
-        @media(prefers-reduced-transparency:reduce){
-          #lsb-shell-surfaces [data-surface]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:0 8px 24px rgb(0 0 0 / 12%)}
-          [data-canvas-site-status-host]::before,[data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none}
-          html.lsb-skin-shell-on.lsb-canvas-mode{--lsb-glass-fill:var(--lsb-shell-panel,var(--panel,#fff));--lsb-canvas-media-scrim:rgb(8 12 22 / 26%)}
-        }
-        @media(prefers-reduced-motion:reduce){
-          #lsb-shell-surfaces [data-surface],#lsb-shell-progress,html.lsb-skin-shell-on.lsb-canvas-mode body::before{transition:none!important;scroll-behavior:auto!important}
-          #lsb-shell-progress [data-lsb-shell-progress-bar]{transition:none!important}
-          [data-route-transition="in"]{animation:none!important}
-          [data-surface][data-canvas-surface-state="opening"],[data-surface][data-canvas-surface-state="closing"]{transform:none!important}
-        }
-        @media(prefers-reduced-motion:reduce){html.lsb-canvas-page-user [data-lsb-canvas-profile] > .sidebar-card.user-card{transition:none!important}}
-        html.lsb-canvas-reduced-transparency #lsb-shell-surfaces [data-surface]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:0 8px 24px rgb(0 0 0 / 12%)}
-        html.lsb-canvas-reduced-transparency [data-canvas-site-status-host]::before,html.lsb-canvas-reduced-transparency [data-canvas-site-status-host][data-expanded="true"] [data-canvas-site-status-body]{background:var(--lsb-shell-panel,var(--panel,#fff));backdrop-filter:none;-webkit-backdrop-filter:none}
-        html.lsb-canvas-reduced-motion #lsb-shell-surfaces [data-surface],html.lsb-canvas-reduced-motion #lsb-shell-progress{transition:none!important;scroll-behavior:auto!important}
-        html.lsb-canvas-reduced-motion #lsb-shell-progress [data-lsb-shell-progress-bar]{transition:none!important}
-        html.lsb-canvas-reduced-motion [data-route-transition="in"]{animation:none!important}
-        html.lsb-canvas-reduced-motion [data-surface][data-canvas-surface-state="opening"],html.lsb-canvas-reduced-motion [data-surface][data-canvas-surface-state="closing"]{transform:none!important}
-      `
-    }
-
-    // · B3 css: 全局正文排版/列表密度/代码块/楼层 ──
-    function css() {
-      const parts = []
-
-      if (shellUiActive()) {
-        parts.push(effectiveUiMode() === 'ios27' ? canvasCss() : shellCss())
-      }
-
-      if (cfg.typography) {
-        parts.push(`
-          html.lsb-skin-type-on .post-content{font-family:${FONT_SANS};line-height:1.75;word-break:break-word}
-          html.lsb-skin-type-on .post-content p{margin-block:.85em}
-          html.lsb-skin-type-on .post-title{line-height:1.45}
-        `)
-      }
-
-      if (cfg.density === '紧凑') {
-        parts.push(`
-          html.lsb-skin-density-compact ul.post-list li.post-item{padding-block:3px!important}
-          html.lsb-skin-density-compact li.post-item .post-avatar img{width:32px!important;height:32px!important}
-        `)
-      }
-
-      if (cfg.codeblock) {
-        parts.push(`
-          html.lsb-skin-code-on .post-content pre{
-            background:var(--bg,#f6f8fa)!important;border:1px solid var(--line,#ddd)!important;
-            border-radius:8px!important;padding:12px 14px!important;overflow-x:auto!important;
-            font-family:${FONT_MONO}!important;font-size:13px!important;line-height:1.55!important;
-          }
-          html.lsb-skin-code-on .post-content code{font-family:${FONT_MONO}}
-          html.lsb-skin-code-on .post-content :not(pre)>code{
-            background:var(--line-soft,#eceff2);border-radius:4px;padding:1px 5px;font-size:.92em;
-          }
-        `)
-      }
-
-      if (cfg.floors) {
-        parts.push(`
-          html.lsb-skin-floors-on li.post-entry{border-bottom:1px solid var(--line-soft,#eee)}
-        `)
-      }
-
-      if (cfg.measure) {
-        parts.push(`
-          @media(min-width:1280px){
-            html.lsb-skin-measure-on main.wrap{max-width:1120px!important;margin-inline:auto!important}
-            html.lsb-skin-measure-on .post-content>p{max-width:74ch}
-          }
-        `)
-      }
-
-      return parts.join('\n')
-    }
-
-    /** 状态类挂 <html> 上：CSS 特异性干净，测试也容易断言 */
-    // · B4 applyShellTokens: 玻璃/字号/字体令牌注入 ──
-    function applyShellTokens() {
-      const root = document.documentElement
-      const appearance = canvasEffective?.appearance || {}
-      const canvasOn = !!cfg.shell && effectiveUiMode() === 'ios27'
-      const shellOn = shellUiActive()
-      root.classList.toggle('lsb-canvas-reduced-motion', canvasOn && appearance.motion === 'reduced')
-      root.classList.toggle('lsb-canvas-reduced-transparency', canvasOn && appearance.transparency === 'reduced')
-      if (!shellStyleApi) return
-      if (!shellOn) {
-        for (const prop of shellTokenProps) root.style.removeProperty(prop)
-        shellTokenProps.clear()
-        root.classList.remove('lsb-skin-glass-on', 'lsb-canvas-reduced-motion', 'lsb-canvas-reduced-transparency')
-        return
-      }
-      const globalTokens = {
-        baseFontSize: appearance.fontSize ?? cfg.baseFontSize,
-        fontFamily: appearance.fontFamily || cfg.fontFamily,
-        textColor: appearance.textColor,
-        panelColor: appearance.panelColor,
-        accentColor: appearance.accentColor,
-        glassOpacity: appearance.opacity ?? (cfg.glass ? (cfg.glassOpacity ?? 0.72) : 0.72),
-        glassBlur: appearance.blur ?? (cfg.glass ? (cfg.glassBlur ?? 18) : 18),
-        density: cfg.density,
-      }
-      const tokens = shellStyleApi.mergeShellTokens(globalTokens, {})
-      const cssText = shellStyleApi.tokenCss(tokens)
-      const nextProps = new Set()
-      for (const declaration of cssText.split(';')) {
-        const index = declaration.indexOf(':')
-        if (index <= 0) continue
-        const prop = declaration.slice(0, index).trim()
-        const value = declaration.slice(index + 1).trim()
-        if (!prop.startsWith('--lsb-shell-') || !value) continue
-        root.style.setProperty(prop, value)
-        nextProps.add(prop)
-      }
-      for (const prop of shellTokenProps) if (!nextProps.has(prop)) root.style.removeProperty(prop)
-      shellTokenProps.clear()
-      for (const prop of nextProps) shellTokenProps.add(prop)
-      const radius = canvasFinite(appearance.radius, 16)
-      root.style.setProperty('--lsb-shell-radius', `${Math.max(8, Math.min(32, radius))}px`)
-      shellTokenProps.add('--lsb-shell-radius')
-      root.classList.toggle('lsb-skin-glass-on', shellOn)
-    }
-
-    // ── C: 媒体与背景（mediaOriginKey/ensureMediaDb/syncBackgroundMedia） ──
-    // · C1 mediaOriginKey/ensureMediaDb: IndexedDB 媒体键与库 ──
-    function mediaOriginKey(kind) {
-      return `${location.origin}:${kind}`
-    }
-
-    function ensureMediaDb() {
-      if (!api.ui.shellMedia?.openMediaDb) return Promise.resolve(null)
-      if (!mediaDbPromise) {
-        mediaDbPromise = Promise.resolve(api.ui.shellMedia.openMediaDb(window.indexedDB, 'lsb_skin_media')).catch(() => null)
-      }
-      return mediaDbPromise
-    }
-
-    function releaseBackgroundVideo() {
-      if (backgroundVideo) {
-        backgroundVideo.pause?.()
-        backgroundVideo.remove()
-        backgroundVideo = null
-      }
-      if (backgroundVideoObjectUrl) {
-        try { URL.revokeObjectURL(backgroundVideoObjectUrl) } catch { /* ignore */ }
-        backgroundVideoObjectUrl = ''
-      }
-    }
-
-    function releaseBackgroundImage() {
-      backgroundImage?.remove?.()
-      backgroundImage = null
-      if (backgroundImageObjectUrl) {
-        try { URL.revokeObjectURL(backgroundImageObjectUrl) } catch { /* ignore */ }
-        backgroundImageObjectUrl = ''
-      }
-    }
-
-    function releaseBackgroundMedia() {
-      releaseBackgroundVideo()
-      releaseBackgroundImage()
-    }
-
-    function holdSpaRouteChrome(serial) {
-      if (serial !== spaSerial) return false
-      spaRouteChromeSerial = serial
-      document.documentElement.classList.add(SPA_ROUTE_PENDING_CLASS)
-      return true
-    }
-
-    function releaseSpaRouteChrome(serial) {
-      if (serial !== spaSerial || spaRouteChromeSerial !== serial) return false
-      spaRouteChromeSerial = 0
-      document.documentElement.classList.remove(SPA_ROUTE_PENDING_CLASS)
-      return true
-    }
-
-    function clearSpaRouteChromeHold() {
-      spaRouteChromeSerial = 0
-      document.documentElement.classList.remove(SPA_ROUTE_PENDING_CLASS)
-    }
-
-    function setRoutePhase(serial, phase) {
-      if (serial !== spaSerial) return false
-      const root = document.documentElement
-      if (phase) root.dataset.lsbRoutePhase = phase
-      else delete root.dataset.lsbRoutePhase
-      return true
-    }
-
-    function settleSpaRoute(serial) {
-      if (serial !== spaSerial) return false
-      delete document.documentElement.dataset.lsbRoutePhase
-      releaseSpaRouteChrome(serial)
-      return true
-    }
-
-    function releaseFontFace() {
-      loadedFontFace?.dispose?.()
-      loadedFontFace = null
-      loadedFontObjectUrl = ''
-    }
-
-    async function loadLocalMedia(kind, key) {
-      if (!key || !api.ui.shellMedia?.readMedia) return null
-      const db = await ensureMediaDb()
-      if (!db) return null
-      try {
-        const value = await api.ui.shellMedia.readMedia({ db, kind, key: String(key) })
-        if (value && api.ui.shellMedia.validateMediaFile) {
-          const check = api.ui.shellMedia.validateMediaFile(value, { kind })
-          if (!check.ok) return null
-        }
-        return value
-      } catch {
-        return null
-      }
-    }
-
-    // · C2 syncBackgroundMedia/syncShellFont: 背景/字体同步链 ──
-    async function syncBackgroundMedia() {
-      const root = document.documentElement
-      const canvasMode = canvasShell instanceof Element && canvasShell.getAttribute('data-lsb-canvas-shell') === 'true'
-      const workspace = canvasMode ? document.body : shellWorkspace()
-      const appearance = canvasEffective?.appearance || {}
-      const requestedMode = String(appearance.background || '').toLowerCase()
-      const mode = requestedMode === 'video' || (requestedMode !== 'image' && cfg.backgroundVideoEnabled === true) ? 'video' : requestedMode === 'image' ? 'image' : 'static'
-      const remoteVideo = String(appearance.backgroundVideoUrl || cfg.backgroundVideoUrl || '').trim()
-      const localVideoKey = String(appearance.backgroundVideoLocalKey || cfg.backgroundVideoLocalKey || '').trim()
-      const remoteImage = String(appearance.backgroundImageUrl || cfg.backgroundImageUrl || '').trim()
-      const localImageKey = String(appearance.backgroundImageLocalKey || cfg.backgroundImageLocalKey || '').trim()
-      const validVideo = !!api.ui.shellMedia?.isHttpsUrl?.(remoteVideo)
-      const validImage = !!api.ui.shellMedia?.isHttpsUrl?.(remoteImage)
-      const sourceKey = mode === 'video'
-        ? `${validVideo ? remoteVideo : ''}|${localVideoKey}`
-        : mode === 'image'
-          ? `${validImage ? remoteImage : ''}|${localImageKey}`
-          : ''
-      const specKey = `${mode}|${appearance.motion || 'auto'}|${sourceKey}`
-      if (specKey === backgroundSpecKey && (mode === 'video' ? backgroundVideo : mode === 'image' ? backgroundImage : !backgroundVideo && !backgroundImage)) return
-      backgroundSpecKey = specKey
-      mediaGeneration += 1
-      const generation = mediaGeneration
-      releaseBackgroundMedia()
-      root.classList.remove('lsb-skin-video-on')
-      root.classList.remove('lsb-skin-image-on')
-      if (!cfg.shell || mode === 'static' || !(workspace instanceof Element)) return
-
-      let source = ''
-      const kind = mode === 'video' ? 'video' : 'image'
-      const localKey = mode === 'video' ? localVideoKey : localImageKey
-      const remote = mode === 'video' ? remoteVideo : remoteImage
-      const validRemote = mode === 'video' ? validVideo : validImage
-      if (localKey) {
-        const file = await loadLocalMedia(kind, localKey)
-        if (generation !== mediaGeneration) return
-        if (file) {
-          try {
-            const objectUrl = URL.createObjectURL(file)
-            if (mode === 'video') backgroundVideoObjectUrl = objectUrl
-            else backgroundImageObjectUrl = objectUrl
-            source = objectUrl
-          } catch { source = '' }
-        }
-      }
-      if (!source && validRemote) source = remote
-      if (generation !== mediaGeneration || !source) return
-
-      if (mode === 'image') {
-        const image = document.createElement('img')
-        image.setAttribute('data-lsb-shell-image', '')
-        image.setAttribute('data-lsb-shell-image-layer', canvasMode ? 'canvas' : 'windowed')
-        image.setAttribute('aria-hidden', 'true')
-        image.alt = ''
-        image.decoding = 'async'
-        image.loading = 'eager'
-        image.addEventListener('error', () => {
-          if (generation !== mediaGeneration || backgroundImage !== image) return
-          root.classList.remove('lsb-skin-image-on')
-          image.dataset.lsbShellImageState = 'error'
-          api.ui.toast?.('静态背景加载失败，已使用原始背景', { type: 'error' })
-        })
-        workspace.prepend(image)
-        backgroundImage = image
-        image.src = source
-        if (generation === mediaGeneration && backgroundImage === image) {
-          root.classList.add('lsb-skin-image-on')
-          image.dataset.lsbShellImageState = 'loaded'
-        }
-        return
-      }
-
-      const video = document.createElement('video')
-      video.setAttribute('data-lsb-shell-video', '')
-      video.setAttribute('data-lsb-shell-video-layer', canvasMode ? 'canvas' : 'windowed')
-      video.setAttribute('aria-hidden', 'true')
-      video.setAttribute('muted', '')
-      video.setAttribute('autoplay', '')
-      video.setAttribute('loop', '')
-      video.setAttribute('playsinline', '')
-      video.defaultMuted = true
-      video.muted = true
-      video.loop = true
-      video.autoplay = true
-      video.playsInline = true
-      video.preload = 'auto'
-      const markVideoError = () => {
-        if (generation !== mediaGeneration || backgroundVideo !== video) return
-        if (video.dataset.lsbShellVideoState === 'error') return
-        root.classList.remove('lsb-skin-video-on')
-        video.controls = false
-        video.style.pointerEvents = 'none'
-        video.dataset.lsbShellVideoState = 'error'
-        api.ui.toast?.('视频背景加载失败，已使用静态背景', { type: 'error' })
-      }
-      video.addEventListener('error', markVideoError)
-      workspace.prepend(video)
-      backgroundVideo = video
-      video.src = source
-      try { video.load?.() } catch { /* an older media element may not expose load */ }
-      const exposeManualPlayback = (message) => {
-        if (generation !== mediaGeneration || backgroundVideo !== video) return
-        if (video.dataset.lsbShellVideoState === 'error' || video.error) return
-        root.classList.add('lsb-skin-video-on')
-        video.controls = false
-        video.style.pointerEvents = 'none'
-        video.dataset.lsbShellVideoState = 'manual'
-        if (message) api.ui.toast?.(message, { type: 'info' })
-      }
-      if (appearance.motion === 'reduced' || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
-        exposeManualPlayback('视频已暂停以减少动态')
-        return
-      }
-      try {
-        await video.play()
-        if (generation === mediaGeneration && backgroundVideo === video) {
-          if (video.dataset.lsbShellVideoState === 'error' || video.error) return
-          root.classList.add('lsb-skin-video-on')
-          video.controls = false
-          video.style.pointerEvents = 'none'
-          video.dataset.lsbShellVideoState = 'playing'
-        }
-      } catch {
-        exposeManualPlayback('浏览器阻止自动播放，视频背景保持静止')
-      }
-    }
-
-    async function syncBackgroundVideo() {
-      return syncBackgroundMedia()
-    }
-
-    async function syncShellFont() {
-      const root = document.documentElement
-      const appearance = canvasEffective?.appearance || {}
-      const remote = String(appearance.fontUrl || cfg.fontUrl || '').trim()
-      const localKey = String(appearance.fontLocalKey || cfg.fontLocalKey || '').trim()
-      const validRemote = !!api.ui.shellMedia?.isHttpsUrl?.(remote)
-      const specKey = `${validRemote ? remote : ''}|${localKey}`
-      if (specKey === fontSpecKey && (loadedFontFace || !remote && !localKey)) return
-      fontSpecKey = specKey
-      releaseFontFace()
-      const configuredFamily = shellStyleApi?.sanitizeTokenValue?.('fontFamily', appearance.fontFamily || cfg.fontFamily)
-      if (configuredFamily) root.style.setProperty('--lsb-shell-font-family', configuredFamily)
-      else root.style.removeProperty('--lsb-shell-font-family')
-      if (!validRemote && !localKey) return
-      const generation = mediaGeneration
-      let source = validRemote ? `url(${remote})` : null
-      if (!source && localKey) source = await loadLocalMedia('font', localKey)
-      if (generation !== mediaGeneration || !source || !api.ui.shellMedia?.loadFontFace) return
-      try {
-        loadedFontFace = await api.ui.shellMedia.loadFontFace({
-          family: 'LSBShellUserFont',
-          source,
-          document,
-          URLCtor: URL,
-        })
-        if (generation === mediaGeneration) root.style.setProperty('--lsb-shell-font-family', 'LSBShellUserFont')
-      } catch {
-        loadedFontFace = null
-        if (!configuredFamily) root.style.removeProperty('--lsb-shell-font-family')
-        api.ui.toast?.('字体加载失败，已回退站点字体', { type: 'error' })
-      }
-    }
-
-    function syncShellMedia() {
-      void syncBackgroundMedia()
-      void syncShellFont()
-    }
-
-    // ── D: 原生结构接管（applyMarkers/restyle/nativeHeaders） ──
-    // · D1 applyMarkers: 逐容器打点与兴趣节点标记 ──
-    function applyMarkers() {
-      const root = document.documentElement
-      const shellOn = shellUiActive()
-      const canvasOn = !!cfg.shell && effectiveUiMode() === 'ios27'
-      const shellHome = shellOn && (pagePath() === '/' || pagePath() === '/index.php')
-      root.classList.toggle('lsb-skin-type-on', !!cfg.typography)
-      root.classList.toggle('lsb-skin-density-compact', cfg.density === '紧凑')
-      root.classList.toggle('lsb-skin-code-on', !!cfg.codeblock)
-      root.classList.toggle('lsb-skin-floors-on', !!cfg.floors)
-      root.classList.toggle('lsb-skin-measure-on', !!cfg.measure)
-      root.classList.toggle('lsb-skin-shell-on', shellOn)
-      root.classList.toggle('lsb-skin-shell-home', shellHome)
-      root.classList.toggle('lsb-canvas-mode', canvasOn)
-      root.classList.toggle('lsb-skin-shell-topic', shellOn && api.page?.type === 'topic')
-      root.classList.toggle('lsb-skin-shell-user', shellOn && api.page?.type === 'user')
-      /* 旧模式始终为固定三栏；窗口化布局已不再是可选模式。 */
-      root.classList.remove('lsb-skin-shell-windowed')
-      root.removeAttribute('data-lsb-shell-mode')
-    }
-
-    // · D2 restyle: 按兴趣重写布局骨架（topic/suite 归一） ──
-    function restyle() {
-      applyMarkers()
-      applyShellTokens()
-      const id = 'lsb-skin-style'
-      let el = document.getElementById(id)
-      if (!el) {
-        el = document.createElement('style')
-        el.id = id
-        document.head.appendChild(el)
-      }
-      el.textContent = css()
-    }
-
-    // · D3 nativeHeaders/Sidebars: 原生头部/侧栏收敛 ──
-    function nativeHeaders() {
-      const headers = new Set(document.querySelectorAll('body > .top, body > header, body > .site-header, body > [data-site-header]'))
-      for (const menu of document.querySelectorAll('[data-slot~="top.menu_links"]')) {
-        if (menu.closest('#mobile-menu, #mobile-menu-drawer, .mobile-menu-drawer')) continue
-        let header = menu
-        while (header.parentElement && header.parentElement !== document.body) header = header.parentElement
-        if (header.parentElement === document.body) headers.add(header)
-      }
-      return [...headers]
-    }
-
-    function nativeSidebars() {
-      return [...new Set(document.querySelectorAll('aside.sidebar, [data-slot~="sidebar.stack"]'))].filter(
-        (el) => el.id !== 'mobile-menu-drawer' && !el.classList.contains('mobile-menu-drawer'),
-      )
-    }
-
-    function nativeLeftRails(scope = document) {
-      return [...(scope?.querySelectorAll?.('.forum-enhancements-left-fixed') || [])]
-    }
-
-    function markNative(on) {
-      for (const el of nativeHeaders()) el.classList.toggle('lsb-native-header-hidden', on)
-      for (const el of nativeSidebars()) el.classList.toggle('lsb-native-sidebar-hidden', on)
-      for (const el of nativeLeftRails()) el.classList.toggle('lsb-native-left-hidden', on)
-      for (const el of document.querySelectorAll('.sidebar-card.user-card')) el.toggleAttribute('data-lsb-shell-me', on)
-    }
-
-    // ── E: 侧栏与氢壳视图（asideWide/asideSetActive/syncAsideViews） ──
-    // · E1 asideWide: 侧栏宽度与可见性判定 ──
-    function asideWide() {
-      try {
-        if (typeof window.matchMedia === 'function') return !!window.matchMedia('(min-width: 1100px)').matches
-      } catch {
-        /* jsdom and older embedded browsers may not implement matchMedia */
-      }
-      const width = Number(window.innerWidth || document.documentElement?.clientWidth || 0)
-      return width >= 1100
-    }
-
-    function onUiModeResize() {
-      const wide = asideWide()
-      if (wide === uiModeWideSnapshot) return
-      uiModeWideSnapshot = wide
-      scheduleRefresh(false)
-    }
-
-    function bindUiModeResize() {
-      if (uiModeResizeBound) return
-      uiModeResizeBound = true
-      uiModeWideSnapshot = asideWide()
-      window.addEventListener('resize', onUiModeResize)
-    }
-
-    function unbindUiModeResize() {
-      if (!uiModeResizeBound) return
-      window.removeEventListener('resize', onUiModeResize)
-      uiModeResizeBound = false
-      uiModeWideSnapshot = null
-    }
-
-    function bindCloudflareChallengeWatch() {
-      if (cloudflareChallengeObserver || typeof MutationObserver !== 'function') return
-      const root = document.documentElement
-      if (!root) return
-      cloudflareChallengeObserver = new MutationObserver(() => scheduleRefresh(false))
-      cloudflareChallengeObserver.observe(root, {
-        attributes: true,
-        attributeFilter: [CLOUDFLARE_CHALLENGE_ATTR],
-      })
-    }
-
-    function unbindCloudflareChallengeWatch() {
-      cloudflareChallengeObserver?.disconnect?.()
-      cloudflareChallengeObserver = null
-    }
-
-    function shellUiActive() {
-      return !!cfg.shell && (effectiveUiMode() === 'ios27' || asideWide())
-    }
-
-    function asideContext() {
-      return {
-        page: api.page,
-        route: api.page,
-        snapshot: api.snapshot,
-        wide: asideWide(),
-      }
-    }
 
     // · E2 asideSetActive/removeAsideView: 侧栏视图激活与销毁 ──
     function asideSetActive(id, aside = document.querySelector('#lsb-shell-aside'), persist = false) {
       if (!(aside instanceof Element)) return 'site'
-      const registered = api.ui.shellAsideViews(asideContext()).find((view) => view.id === id)
+      const registered = getViews(getContext()).find((view) => view.id === id)
       const exists = id === 'site' || asideViews.has(id) || !!registered
       asideActiveId = exists ? id : 'site'
       if (persist && exists) {
         asidePreferredId = asideActiveId
         try {
-          api.store.set(ASIDE_ACTIVE_KEY, asidePreferredId)
+          store.set(ASIDE_ACTIVE_KEY, asidePreferredId)
         } catch {
           /* A storage failure must not block the current tab selection. */
         }
@@ -8655,12 +9921,8 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         pane.hidden = pane.getAttribute('data-lsb-shell-aside-pane') !== asideActiveId
       }
       const selectedView = asideViews.get(asideActiveId)?.view
-        || api.ui.shellAsideViews(asideContext()).find((view) => view.id === asideActiveId)
-      const windowId = selectedView?.windowId || 'site'
-      if (windowId !== 'site' && shellWindowLayout?.windows?.[windowId]) focusShellWindow(windowId)
-      for (const current of externalWindowViews.values()) {
-        if (current.view?.windowId) current.host.dataset.lsbShellOpen = current.view.id === asideActiveId ? 'true' : 'false'
-      }
+        || getViews(getContext()).find((view) => view.id === asideActiveId)
+      onSelect(asideActiveId, selectedView)
       return asideActiveId
     }
 
@@ -8692,9 +9954,9 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       const site = panes?.querySelector('[data-lsb-shell-aside-pane="site"]')
       if (!(tabs instanceof Element) || !(panes instanceof Element) || !(site instanceof Element)) return
 
-      const wide = asideWide()
-      const context = asideContext()
-      const visible = wide ? api.ui.shellAsideViews(context) : []
+      const wide = getContext().wide
+      const context = getContext()
+      const visible = wide ? getViews(context) : []
       const next = new Map(visible.map((view) => [view.id, view]))
 
       for (const id of [...asideViews.keys()]) {
@@ -8768,229 +10030,1905 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function onAsideResize() {
-      if (cfg.shell) syncAsideViews()
+      if (isEnabled()) syncAsideViews()
     }
 
-    // ── F: 插件特性与工具菜单（collectBoards/collectTools） ──
-    // · F1 collectBoards: 版块清单与插件特性聚合 ──
-    function collectBoards() {
-      const forums = api.forums || []
-      const cached = api.store.get('boardCounts') || {}
-      const live = {}
-      for (const f of forums) {
-        if (Number.isFinite(f.topics)) live[f.id] = f.topics
-      }
-      const counts = { ...cached, ...live }
-      if (Object.keys(live).length) api.store.set('boardCounts', counts)
-      if (forums.length) {
-        return forums.map((f) => ({
-          href: `/forum/${f.id}`,
-          label: f.name,
-          count: counts[f.id],
-        }))
-      }
-      const seen = new Set()
-      const out = []
-      for (const a of document.querySelectorAll('.forum-nav a[href^="/forum/"]')) {
-        const href = a.getAttribute('href')
-        const label = (a.textContent || '').trim()
-        if (!href || seen.has(href)) continue
-        seen.add(href)
-        const id = Number((href.match(/\/forum\/(\d+)/) || [])[1])
-        out.push({ href, label, count: counts[id] })
-      }
-      return out
+    return { setActive: asideSetActive, sync: syncAsideViews, destroy: destroyAsideViews,
+      bindResize: bindAsideResize, unbindResize: unbindAsideResize,
+      get activeId() { return asideActiveId }, get preferredId() { return asidePreferredId } }
+  }
+  /** Owns skin configuration and persisted canvas preferences; no DOM or resources. */
+  function createSkinConfigController({ getConfig, saveConfig, store, getLocation, getViewport, stateApi, sanitizeTokenValue, isHttpsUrl }) {
+    const { CANVAS_STATE_KEY, CANVAS_STATE_VERSION, CANVAS_WIDTH_CLASSES, CANVAS_DEFAULT_APPEARANCE, defaultCanvasState, migrateLegacySkinState, canvasMerge, canvasCopy, mergeCanvasState, siteKeyFromLocation, widthClass } = stateApi
+    let cfg = getConfig()
+    function effectiveUiMode() {
+      return cfg?.uiMode === 'ios27' ? 'ios27' : 'legacy'
     }
 
-    const PLUGIN_FEATURES = [
-      { plugin: 'ai-summary', panel: 'ai-summary-history', label: 'AI 历史' },
-      { plugin: 'checkin-calendar', panel: 'checkin-calendar', label: '签到日历' },
-      { plugin: 'points-title-workbench', rpc: 'points-title-workbench:open', label: '积分-称号' },
-      { plugin: 'annual-report', panel: 'annual-report', label: '年度报告' },
-    ]
-
-    function collectPluginFeatureEntries() {
-      const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
-      const info = w.LSB?.info?.() || {}
-      const states = new Map((info.plugins || []).map((plugin) => [plugin.id, plugin.state]))
-      const panelIds = new Set(api.ui.panels().map((panel) => panel.id))
-      const handlers = new Set((info.handlers || []).map((handler) => handler.name))
-      const settings = new Set(api.ui.settingsPlugins().map((plugin) => plugin.id))
-      return PLUGIN_FEATURES
-        .filter((item) => states.get(item.plugin) === 'active')
-        .filter((item) => item.panel ? panelIds.has(item.panel) : handlers.has(item.rpc))
-        .map((item) => ({ ...item, hasSettings: settings.has(item.plugin) }))
-    }
-
-    function collectPluginSettingsEntries() {
-      return api.ui.settingsPlugins()
-    }
-
-    function renderPluginFeatureEntries() {
-      const host = canvasSurface('plugin-features-sheet')?.querySelector('[data-plugin-feature-list]')
-      if (!(host instanceof Element)) return
-      host.replaceChildren()
-      const entries = collectPluginFeatureEntries()
-      if (!entries.length) {
-        const empty = document.createElement('p')
-        empty.className = 'lsb-empty'
-        empty.textContent = '目前没有可用的插件功能。'
-        host.append(empty)
-        return
+    const topicSpaMigrationKey = 'topicSpaNewWorldDefaultMigrationV1'
+    try {
+      if (store.get(topicSpaMigrationKey) !== true) {
+        saveConfig({ topicSpa: true })
+        cfg = { ...cfg, topicSpa: true }
+        store.set(topicSpaMigrationKey, true)
       }
-      for (const entry of entries) {
-        const row = document.createElement('div')
-        row.className = 'lsb-plugin-entry'
-        row.setAttribute('data-plugin-feature-entry', entry.plugin)
-        const action = document.createElement('button')
-        action.type = 'button'
-        action.className = 'lsb-plugin-entry-main'
-        action.setAttribute('data-plugin-feature-action', entry.plugin)
-        action.textContent = entry.label
-        row.append(action)
-        if (entry.hasSettings) {
-          const settings = document.createElement('button')
-          settings.type = 'button'
-          settings.className = 'lsb-plugin-entry-settings'
-          settings.setAttribute('data-plugin-settings-open', entry.plugin)
-          settings.setAttribute('aria-label', `打开${entry.label}设置`)
-          settings.title = `${entry.label}设置`
-          settings.textContent = '⚙'
-          row.append(settings)
+    } catch {
+      // Keep the resolved config when migration storage is unavailable.
+    }
+    let canvasState = null
+    let canvasEffective = null
+    let canvasSiteKey = siteKeyFromLocation(getLocation())
+    let canvasWidthClass = widthClass(getViewport().width)
+
+    function readCanvasState() {
+      let stored = null
+      try { stored = store.get(CANVAS_STATE_KEY, null) } catch { stored = null }
+      if (!stored || typeof stored !== 'object' || Number(stored.version) !== CANVAS_STATE_VERSION) {
+        canvasState = migrateLegacySkinState(cfg)
+        try { store.set(CANVAS_STATE_KEY, canvasCopy(canvasState)) } catch { /* storage may be unavailable */ }
+      } else {
+        const base = defaultCanvasState()
+        canvasState = canvasMerge(base, stored)
+        canvasState.version = CANVAS_STATE_VERSION
+        canvasState.sites = stored.sites && typeof stored.sites === 'object' ? canvasCopy(stored.sites) : {}
+      }
+      canvasSiteKey = siteKeyFromLocation(getLocation())
+      canvasWidthClass = widthClass(getViewport().width)
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
+      return canvasEffective
+    }
+
+    function saveCanvasState() {
+      if (!canvasState) return
+      try { store.set(CANVAS_STATE_KEY, canvasCopy(canvasState)) } catch { /* storage failure is non-fatal */ }
+    }
+
+    function reload() {
+      cfg = getConfig()
+      return cfg
+    }
+
+    function refreshContext() {
+      canvasSiteKey = siteKeyFromLocation(getLocation())
+      canvasWidthClass = widthClass(getViewport().width)
+      if (canvasState) canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
+    }
+
+    function tokenValues() {
+      const appearance = canvasEffective?.appearance || {}
+      return {
+        baseFontSize: appearance.fontSize ?? cfg.baseFontSize,
+        fontFamily: appearance.fontFamily || cfg.fontFamily,
+        textColor: appearance.textColor,
+        panelColor: appearance.panelColor,
+        accentColor: appearance.accentColor,
+        glassOpacity: appearance.opacity ?? (cfg.glass ? (cfg.glassOpacity ?? 0.72) : 0.72),
+        glassBlur: appearance.blur ?? (cfg.glass ? (cfg.glassBlur ?? 18) : 18),
+        density: cfg.density,
+      }
+    }
+
+    function canvasSetAppearance(name, value, options = {}) {
+      const key = String(name || '')
+      if (!CANVAS_DEFAULT_APPEARANCE.hasOwnProperty(key) || !canvasState) return false
+      let next = value
+      if (['opacity', 'blur', 'fontSize', 'radius'].includes(key)) {
+        const n = Number(value)
+        if (!Number.isFinite(n)) return false
+        const bounds = { opacity: [.35, 1], blur: [0, 32], fontSize: [12, 32], radius: [8, 32] }[key]
+        next = Math.min(bounds[1], Math.max(bounds[0], n))
+      }
+      if (['textColor', 'panelColor', 'accentColor'].includes(key)) {
+        const text = String(value || '').trim()
+        if (!text) next = ''
+        else {
+          const valid = sanitizeTokenValue(key, text)
+          if (!valid) return false
+          next = text
         }
-        host.append(row)
       }
-    }
-
-    function pluginStateLabel(state) {
-      if (state === 'disabled') return '已停用'
-      if (state === 'skipped') return '当前页面未启用'
-      if (state === 'error') return '异常'
-      if (state === 'registered') return '等待启用'
-      return ''
-    }
-
-    function renderPluginSettingsEntries() {
-      const host = canvasSurface('plugin-settings-sheet')?.querySelector('[data-plugin-settings-list]')
-      if (!(host instanceof Element)) return
-      host.replaceChildren()
-      const entries = collectPluginSettingsEntries()
-      if (!entries.length) {
-        const empty = document.createElement('p')
-        empty.className = 'lsb-empty'
-        empty.textContent = '没有声明配置项的插件。'
-        host.append(empty)
-        return
-      }
-      for (const entry of entries) {
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.className = 'lsb-plugin-settings-entry'
-        button.setAttribute('data-plugin-settings-entry', entry.id)
-        const name = document.createElement('span')
-        name.textContent = entry.name || entry.id
-        button.append(name)
-        const state = pluginStateLabel(entry.state)
-        if (state) {
-          const status = document.createElement('small')
-          status.textContent = state
-          button.append(status)
+      if (key === 'fontFamily') {
+        if (!value) next = ''
+        else {
+          const valid = sanitizeTokenValue('fontFamily', value)
+          if (!valid) return false
+          next = String(value)
         }
-        host.append(button)
       }
+      if (['backgroundVideoUrl', 'backgroundImageUrl', 'fontUrl'].includes(key)) {
+        if (value && !isHttpsUrl(value)) return false
+        next = String(value || '').trim()
+      }
+      const site = canvasState.sites[canvasSiteKey] || {}
+      const appearancePatch = { [key]: next }
+      if (key === 'backgroundVideoUrl' && next) {
+        appearancePatch.background = 'video'
+        appearancePatch.backgroundImageUrl = ''
+        appearancePatch.backgroundImageLocalKey = ''
+      }
+      if (key === 'backgroundImageUrl' && next) {
+        appearancePatch.background = 'image'
+        appearancePatch.backgroundVideoUrl = ''
+        appearancePatch.backgroundVideoLocalKey = ''
+      }
+      if (key === 'backgroundVideoUrl' && !next) appearancePatch.background = 'static'
+      if (key === 'backgroundImageUrl' && !next) appearancePatch.background = 'static'
+      canvasState.sites[canvasSiteKey] = canvasMerge(site, { appearance: appearancePatch })
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
+      if (!options.defer) saveCanvasState()
+      return true
     }
 
-    // · F2 collectTools/invalidateTools: 工具菜单（入口与失效） ──
-    function collectTools() {
-      if (toolsCache) return toolsCache
-      const w = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window
-      const active = new Set(
-        (w.LSB?.info?.().plugins || []).filter((p) => p.state === 'active').map((p) => p.id),
-      )
-      toolsCache = PLUGIN_FEATURES
-        .filter((tool) => active.has(tool.plugin))
-        .map(({ panel, rpc, label }) => (rpc ? { rpc, label } : { panel, label }))
-      return toolsCache
+    function canvasSetBackgroundMode(mode) {
+      if (!canvasState) return false
+      const nextMode = ['image', 'video'].includes(String(mode)) ? String(mode) : 'static'
+      const site = canvasState.sites[canvasSiteKey] || {}
+      const appearancePatch = {
+        background: nextMode,
+        ...(nextMode === 'static' || nextMode === 'video' ? { backgroundImageUrl: '', backgroundImageLocalKey: '' } : {}),
+        ...(nextMode === 'static' || nextMode === 'image' ? { backgroundVideoUrl: '', backgroundVideoLocalKey: '' } : {}),
+      }
+      canvasState.sites[canvasSiteKey] = canvasMerge(site, { appearance: appearancePatch })
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
+      saveCanvasState()
+      return true
     }
 
-    function invalidateTools() {
-      toolsCache = null
+    function canvasChoosePreset(preset) {
+      if (!canvasState || !['native-site', 'balanced-glass', 'immersive-video', 'static-readable'].includes(preset)) return false
+      const values = {
+        'native-site': { opacity: 1, blur: 0, background: 'static', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', fontFamily: '', fontUrl: '', fontLocalKey: '', fontSize: 14, textColor: '', panelColor: '', accentColor: '', radius: 16, motion: 'auto', transparency: 'reduced' },
+        'balanced-glass': { opacity: .72, blur: 18, background: 'static', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', textColor: '', panelColor: '', accentColor: '', motion: 'auto', transparency: 'auto' },
+        'immersive-video': { opacity: .56, blur: 22, background: 'video', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', textColor: '', panelColor: '', accentColor: '', motion: 'auto', transparency: 'auto' },
+        'static-readable': { opacity: .94, blur: 0, background: 'static', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', textColor: '', panelColor: '', accentColor: '', motion: 'reduced', transparency: 'reduced' },
+      }[preset]
+      const site = canvasState.sites?.[canvasSiteKey]
+      if (site?.appearance) {
+        const next = { ...site }
+        delete next.appearance
+        canvasState.sites[canvasSiteKey] = next
+      }
+      canvasState.global = canvasMerge(canvasState.global, { preset, appearance: values })
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
+      saveCanvasState()
+      return true
     }
 
-    // ── G: 导航与搜索（pagePath/shellSearchHost/adoptSearch） ──
-    // · G1 pagePath/locationText/isActiveHref: 当前路径与站点文案 ──
-    function pagePath() {
+    function canvasResetAppearance() {
+      if (!canvasState) return false
+      const site = canvasState.sites[canvasSiteKey]
+      if (site?.appearance) {
+        const next = { ...site }
+        delete next.appearance
+        canvasState.sites[canvasSiteKey] = next
+      }
+      canvasState.global = canvasMerge(canvasState.global, { preset: 'balanced-glass', appearance: canvasCopy(CANVAS_DEFAULT_APPEARANCE) })
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
+      saveCanvasState()
+      return true
+    }
+
+    function canvasResetLayout() {
+      if (!canvasState) return false
+      const site = canvasState.sites[canvasSiteKey]
+      if (site?.layout) {
+        const next = { ...site }
+        delete next.layout
+        canvasState.sites[canvasSiteKey] = next
+      }
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
+      saveCanvasState()
+      return true
+    }
+
+    function canvasPersistSurfaceRect(id, rect) {
+      if (!canvasState || !canvasSiteKey || !CANVAS_WIDTH_CLASSES.includes(canvasWidthClass)) return false
+      const site = canvasState.sites[canvasSiteKey] || {}
+      const layout = site.layout && typeof site.layout === 'object' ? site.layout : {}
+      const bucket = layout[canvasWidthClass] && typeof layout[canvasWidthClass] === 'object' ? layout[canvasWidthClass] : {}
+      canvasState.sites[canvasSiteKey] = canvasMerge(site, { layout: { [canvasWidthClass]: { ...bucket, [id]: canvasCopy(rect) } } })
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
+      saveCanvasState()
+      return true
+    }
+
+    function setMediaKey(kind, key) {
+      if (!canvasState) return false
+      const field = kind === 'video' ? 'backgroundVideoLocalKey' : kind === 'image' ? 'backgroundImageLocalKey' : 'fontLocalKey'
+      const site = canvasState?.sites?.[canvasSiteKey] || {}
+      const appearancePatch = {
+        [field]: key,
+        ...(kind === 'video' ? { background: 'video', backgroundVideoUrl: '', backgroundImageUrl: '', backgroundImageLocalKey: '' } : {}),
+        ...(kind === 'image' ? { background: 'image', backgroundImageUrl: '', backgroundVideoUrl: '', backgroundVideoLocalKey: '' } : {}),
+      }
+      canvasState.sites[canvasSiteKey] = canvasMerge(site, { appearance: appearancePatch })
+      canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
+      saveCanvasState()
+      return true
+    }
+
+    function saveLegacyMedia(kind, key) {
+      const configKey = kind === 'video' ? 'backgroundVideoLocalKey' : kind === 'image' ? 'backgroundImageLocalKey' : 'fontLocalKey'
+      const enabledKey = kind === 'video' ? 'backgroundVideoEnabled' : ''
+      saveConfig({
+        [configKey]: key,
+        ...(enabledKey ? { [enabledKey]: true } : {}),
+        ...(kind === 'video' ? { backgroundVideoUrl: '', backgroundImageUrl: '', backgroundImageLocalKey: '' } : {}),
+        ...(kind === 'image' ? { backgroundVideoEnabled: false, backgroundVideoUrl: '', backgroundVideoLocalKey: '' } : {}),
+      })
+      cfg = getConfig()
+      return cfg
+    }
+
+    return { reload, read: readCanvasState, save: saveCanvasState, refreshContext, effectiveUiMode, tokenValues,
+      setAppearance: canvasSetAppearance, setBackgroundMode: canvasSetBackgroundMode, setMediaKey,
+      choosePreset: canvasChoosePreset, resetAppearance: canvasResetAppearance,
+      resetLayout: canvasResetLayout, persistSurfaceRect: canvasPersistSurfaceRect, saveLegacyMedia,
+      get config() { return cfg }, get state() { return canvasState }, get effective() { return canvasEffective },
+      get siteKey() { return canvasSiteKey }, get widthClass() { return canvasWidthClass } }
+  }
+  // Validates and commits SPA documents; event and request ownership stays with the caller.
+  function createSkinSpaDocumentController({ window, document, getConfig, findRouteOutlet, nativeLeftRails, lifecycle, applyHistory }) {
+    const { canvasStopSidebarWatch, canvasRestoreSiteSidebar, canvasRestoreProfile, restoreDetachedNativeSidebars, canvasStagePersistentSiteCardOrigins, canvasRebindPersistentSiteCardOrigins, markNative, syncOnlineBoot } = lifecycle
+    function containsTopicPostContent(root) {
+      return !!root?.matches?.('ul.topic-post-list, li.post-entry')
+        || !!root?.querySelector?.('ul.topic-post-list, li.post-entry')
+    }
+
+    function hideNativeSidebars(root) {
+      if (!root?.querySelectorAll) return
+      for (const el of root.querySelectorAll('aside.sidebar, [data-slot~="sidebar.stack"]')) {
+        if (el.id === 'mobile-menu-drawer' || el.classList.contains('mobile-menu-drawer')) continue
+        el.classList.add('lsb-native-sidebar-hidden')
+      }
+      for (const el of nativeLeftRails(root)) el.classList.add('lsb-native-left-hidden')
+    }
+
+    function topicSpaUrl(urlLike) {
+      if (!getConfig().shell || getConfig().topicSpa !== true) return null
+      let url
       try {
-        return location.pathname.replace(/\/+$/, '') || '/'
+        url = new URL(urlLike, window.location.href)
       } catch {
-        return ''
+        return null
+      }
+      if (url.origin !== window.location.origin) return null
+      const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
+      const match = path.match(/^\/topic\/([1-9]\d*)\/?$/)
+      if (!match || !Number.isSafeInteger(Number(match[1]))) return null
+      return url
+    }
+
+    function isSpaUrl(urlLike) {
+      if (!getConfig().shell) return false
+      let url
+      try {
+        url = new URL(urlLike, window.location.href)
+      } catch {
+        return false
+      }
+      if (url.origin !== window.location.origin) return false
+      const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
+      // 帖子阅读路由只由 topicSpaUrl 判定；关闭试验开关时仍整页导航。
+      if (topicSpaUrl(url.href)) return true
+      if (/^\/topic(?:\/|$)/.test(path)) return false
+      // 淘帖详情仍靠站点脚本在整页生命周期里挂载；不能用软跳剥掉脚本。
+      if (/^\/topic_collection\/\d+\/?$/.test(path)) return false
+      return (
+        path === '/'
+        || path === '/index.php'
+        || path === '/topic_featured'
+        || path === '/hot_discussions'
+        || path === '/unread_topic_notice_footprint'
+        || path === '/topic_collections'
+        || path === '/topic_essence_review_list'
+        || /^\/forum\/\d+/.test(path)
+        || /^\/category\/\d+/.test(path)
+      )
+    }
+
+    function viewCacheKey(href) {
+      const u = new URL(href, window.location.href)
+      let path = u.pathname.replace(/\/{2,}/g, '/') || '/'
+      if (path === '/index.php') path = '/'
+      return path + u.search
+    }
+
+    function snapshotOutletAttrs(el) {
+      if (!(el instanceof window.Element)) return []
+      return [...el.attributes].map((a) => [a.name, a.value])
+    }
+
+    function applyView(entry, outlet) {
+      if (!outlet || !entry?.frag) return
+      canvasRestoreSiteSidebar()
+      canvasRestoreProfile()
+      restoreDetachedNativeSidebars()
+      if (entry.attrs) {
+        for (const name of [...outlet.getAttributeNames()]) outlet.removeAttribute(name)
+        for (const [name, value] of entry.attrs) {
+          if (name.startsWith('data-lsb-')) continue
+          outlet.setAttribute(name, value)
+        }
+      }
+      outlet.replaceChildren()
+      outlet.append(entry.frag)
+      canvasRebindPersistentSiteCardOrigins(outlet)
+      outlet.setAttribute('tabindex', '-1')
+      markRouteContentEnter(outlet)
+      if (entry.head) applyRouteHeadSnapshot(entry.head)
+      else if (entry.title) document.title = entry.title
+      outlet.removeAttribute('aria-busy')
+      markNative(true)
+    }
+
+    function parseOutletFrag(html) {
+      const pageDoc = new window.DOMParser().parseFromString(html, 'text/html')
+      const remote = findRouteOutlet(pageDoc)
+      if (!remote) return null
+      remote.querySelectorAll('script').forEach((node) => node.remove())
+      hideNativeSidebars(remote)
+      canvasStagePersistentSiteCardOrigins(remote)
+      const frag = document.createDocumentFragment()
+      for (const node of [...remote.childNodes]) frag.appendChild(document.importNode(node, true))
+      canvasRebindPersistentSiteCardOrigins(frag)
+      return { frag, title: pageDoc.title || '', head: routeHeadSnapshot(pageDoc), attrs: snapshotOutletAttrs(remote) }
+    }
+
+    function routeHeadSnapshot(source = document) {
+      const read = (selector, attribute) => source.querySelector(selector)?.getAttribute(attribute) ?? null
+      return {
+        title: source.title || '',
+        canonical: read('link[rel="canonical"]', 'href'),
+        description: read('meta[name="description"]', 'content'),
+        ogTitle: read('meta[property="og:title"]', 'content'),
       }
     }
 
-    function locationText() {
-      const p = api.page || {}
-      const path = pagePath()
-      const type = p.type
-      if (type === 'collections' || path === '/topic_collections') {
-        let tab = type === 'collections' ? p.tab : null
-        if (tab == null) {
-          try {
-            tab = new URL(location.href).searchParams.get('tab')
-          } catch {
-            tab = null
+    function applyRouteHeadSnapshot(snapshot) {
+      if (!snapshot) return
+      document.title = String(snapshot.title || '')
+      const fields = [
+        ['link[rel="canonical"]', 'href', 'canonical'],
+        ['meta[name="description"]', 'content', 'description'],
+        ['meta[property="og:title"]', 'content', 'ogTitle'],
+      ]
+      for (const [selector, attribute, key] of fields) {
+        const node = document.querySelector(selector)
+        if (!node) continue
+        const value = snapshot[key]
+        if (value === null || value === undefined) node.removeAttribute(attribute)
+        else node.setAttribute(attribute, String(value))
+      }
+    }
+
+    function captureRouteHead() {
+      return routeHeadSnapshot(document)
+    }
+
+    function syncRouteHead(pageDoc) {
+      const snapshot = routeHeadSnapshot(pageDoc)
+      applyRouteHeadSnapshot(snapshot)
+      return snapshot
+    }
+
+    function markRouteContentEnter(outlet) {
+      if (!outlet) return
+      outlet.removeAttribute('data-lsb-route-content-enter')
+      void outlet.offsetWidth
+      outlet.setAttribute('data-lsb-route-content-enter', '')
+    }
+
+    function topicResponseMatches(pageDoc, finalUrl) {
+      const target = topicSpaUrl(finalUrl)
+      if (!target) return true
+      const targetId = Number((target.pathname.match(/^\/topic\/(\d+)/) || [])[1])
+      if (!Number.isSafeInteger(targetId) || targetId <= 0) return false
+      const canonical = pageDoc.querySelector('link[rel="canonical"]')?.getAttribute('href') || ''
+      if (!canonical) return false
+      let canonicalUrl
+      try {
+        canonicalUrl = new URL(canonical, finalUrl)
+      } catch {
+        return false
+      }
+      const canonicalTopic = topicSpaUrl(canonicalUrl.href)
+      const canonicalId = Number((canonicalTopic?.pathname.match(/^\/topic\/(\d+)/) || [])[1])
+      if (!canonicalTopic || canonicalId !== targetId) return false
+      const remote = findRouteOutlet(pageDoc)
+      const list = remote?.querySelector('ul.topic-post-list')
+      const posts = list?.querySelectorAll('li.post-entry:not(.reply-pin-duplicate)')
+      return !!remote && !!list && !!posts?.length
+    }
+
+    function syncOutletAttrs(outlet, remote) {
+      for (const attr of [...outlet.attributes]) {
+        if (attr.name.startsWith('data-lsb-') || attr.name === 'aria-busy') continue
+        outlet.removeAttribute(attr.name)
+      }
+      for (const attr of [...remote.attributes]) {
+        if (attr.name.startsWith('data-lsb-')) continue
+        outlet.setAttribute(attr.name, attr.value)
+      }
+    }
+
+    function commitRoute(pageDoc, remoteOutlet, targetUrl, historyMode) {
+      const outlet = findRouteOutlet()
+      if (!outlet || !remoteOutlet) throw new Error('no outlet')
+      /* Hide any native chrome before the old outlet is detached.  The shell
+         remains the only visible navigation layer for the whole transaction. */
+      markNative(true)
+      canvasStopSidebarWatch()
+      canvasRestoreSiteSidebar()
+      canvasRestoreProfile()
+      restoreDetachedNativeSidebars()
+      remoteOutlet.querySelectorAll('script').forEach((node) => node.remove())
+      hideNativeSidebars(remoteOutlet)
+      canvasStagePersistentSiteCardOrigins(remoteOutlet)
+      const kids = [...remoteOutlet.childNodes].map((node) => document.importNode(node, true))
+      applyHistory(targetUrl, historyMode)
+      syncRouteHead(pageDoc)
+      syncOutletAttrs(outlet, remoteOutlet)
+      outlet.replaceChildren(...kids)
+      syncOnlineBoot(pageDoc)
+      canvasRebindPersistentSiteCardOrigins(outlet)
+      outlet.setAttribute('tabindex', '-1')
+      markRouteContentEnter(outlet)
+      outlet.removeAttribute('aria-busy')
+      markNative(true)
+    }
+
+    return { topicUrl: topicSpaUrl, accepts: isSpaUrl, cacheKey: viewCacheKey,
+      containsTopicPostContent, snapshotOutletAttrs, captureHead: captureRouteHead,
+      parse: parseOutletFrag, matchesTopic: topicResponseMatches, commit: commitRoute, applyView }
+  }
+  // Owns bounded live view fragments and background homepage refreshes.
+  function createSkinViewCache({ window, document, request, getContext, parse, isTopic, cacheKey }) {
+    const VIEW_CACHE_MAX = 5
+    const HOME_STASH_REFRESH_MS = 30000
+    const viewCache = new Map()
+    let homeStashTimer = 0
+    let homeStashInflight = null
+    let homeSeedInflight = null
+    let homeStashGen = 0
+    let homeStashPending = false
+
+    function rememberView(key, entry) {
+      if (viewCache.has(key)) viewCache.delete(key)
+      viewCache.set(key, entry)
+      while (viewCache.size > VIEW_CACHE_MAX) {
+        const oldest = viewCache.keys().next().value
+        viewCache.delete(oldest)
+      }
+    }
+
+    function takeView(key) {
+      if (isTopic(key)) return null
+      const entry = viewCache.get(key)
+      if (!entry) return null
+      viewCache.delete(key)
+      return entry
+    }
+
+    function wantsHomeStashRefresh() {
+      return getContext().enabled && getContext().viewKey !== '/' && viewCache.has('/')
+    }
+
+    function stopHomeStashRefresh() {
+      if (homeStashTimer) {
+        window.clearTimeout(homeStashTimer)
+        homeStashTimer = 0
+      }
+      homeStashPending = false
+      homeStashGen += 1
+      const operation = homeStashInflight
+      homeStashInflight = null
+      operation?.controller.abort()
+    }
+
+    function scheduleHomeStashRefresh() {
+      if (!wantsHomeStashRefresh()) {
+        stopHomeStashRefresh()
+        return
+      }
+      if (homeStashTimer || homeStashInflight) return
+      homeStashTimer = window.setTimeout(() => {
+        homeStashTimer = 0
+        void refreshStashedHome()
+      }, HOME_STASH_REFRESH_MS)
+    }
+
+    async function refreshStashedHome() {
+      if (!wantsHomeStashRefresh()) return
+      if (document.visibilityState === 'hidden') {
+        homeStashPending = true
+        return
+      }
+      homeStashPending = false
+      if (homeStashInflight) return homeStashInflight.promise
+      const gen = homeStashGen
+      const operation = { controller: new window.AbortController(), promise: null }
+      homeStashInflight = operation
+      operation.promise = (async () => {
+        try {
+          const res = await request('/', { queue: false, timeout: 15000, retry: 0, signal: operation.controller.signal })
+          if (gen !== homeStashGen || homeStashInflight !== operation) return
+          if (!res.ok || !wantsHomeStashRefresh()) return
+          const parsed = parse(res.text)
+          if (!parsed || gen !== homeStashGen || !wantsHomeStashRefresh()) return
+          rememberView('/', {
+            frag: parsed.frag,
+            title: parsed.title,
+            head: parsed.head,
+            scrollX: 0,
+            scrollY: 0,
+            live: false,
+            attrs: parsed.attrs,
+          })
+        } catch {
+          /* 后台刷新失败则还回仍用旧存档 */
+        } finally {
+          if (homeStashInflight === operation) {
+            homeStashInflight = null
+            if (gen === homeStashGen) scheduleHomeStashRefresh()
           }
         }
-        return tab === 'mine' || !tab ? '我的淘帖' : '淘帖中心'
-      }
-      if (type === 'collection' || /^\/topic_collection\/\d+$/.test(path)) {
-        const title = (document.querySelector('h1.post-content-title, h1')?.textContent || '').trim()
-        return title || '淘帖'
-      }
-      if (type === 'identity' || path === '/identity_center') return '认证中心'
-      if (type === 'promotions' || path === '/promotions') return '我的广告'
-      if (type === 'messages' || path === '/direct_messages') return '我的私信'
-      if (type === 'user_block' || path === '/user_block') return '屏蔽名单'
-      if (type === 'essence_review' || path === '/topic_essence_review_list') return '申精'
-      if (type === 'home' || path === '/' || path === '/index.php') {
-        if (path === '/' || path === '/index.php') {
-          if (p.sort === 'lucky') return '抽奖'
-          if (p.sort === 'card') return '发卡'
-          if (p.sort === 'red_packet') return '红包'
-          if (p.sort === 'comment') return '新评论'
-          return '新帖子'
-        }
-      }
-      if (type === 'forum') {
-        const f = (api.forums || []).find((x) => x.id === p.id)
-        return f?.name || '版块'
-      }
-      if (type === 'topic') {
-        try {
-          const title = api.parse.topic(document)?.title
-          if (title) return title
-        } catch {
-          /* 解析失败则读标题节点 */
-        }
-        return (document.querySelector('h1.post-content-title')?.textContent || '').trim() || '帖子'
-      }
-      if (type === 'user') return '用户'
-      if (type === 'featured') return '精华'
-      if (type === 'hot_discussions' || path === '/hot_discussions') return '热议'
-      if (type === 'footprint') return '足迹'
-      if (type === 'gacha') return '称号抽取'
-      if (type === 'gacha_market') return '称号交易'
-      if (type === 'gacha_profile') return '我的称号'
-      if (type === 'wallet') return '我的烧饼'
-      if (type === 'invite') return '邀请中心'
-      return 'LINUX SB'
+      })()
+      return operation.promise
     }
 
-    function isActiveHref(href) {
-      const p = api.page || {}
-      if (href === '/' || href === '') return p.type === 'home'
-      if (p.type === 'forum') return href === `/forum/${p.id}`
+    function onHomeStashVisible() {
+      if (document.visibilityState !== 'visible' || !homeStashPending) return
+      homeStashPending = false
+      void refreshStashedHome()
+    }
+
+    function seedHomeView() {
+      const here = cacheKey(getContext().href)
+      if (!getContext().enabled || here === '/' || viewCache.has('/')) return
+      if (homeSeedInflight) return homeSeedInflight.promise
+      const operation = { controller: new window.AbortController(), promise: null }
+      homeSeedInflight = operation
+      const current = () => homeSeedInflight === operation && getContext().enabled
+        && !viewCache.has('/') && getContext().viewKey !== '/'
+      operation.promise = (async () => {
+        try {
+          const res = await request('/', { queue: false, timeout: 15000, retry: 0, signal: operation.controller.signal })
+          if (!res.ok || !current()) return
+          const parsed = parse(res.text)
+          if (!parsed || !current()) return
+          rememberView('/', {
+            frag: parsed.frag,
+            title: parsed.title,
+            head: parsed.head,
+            scrollX: 0,
+            scrollY: 0,
+            live: false,
+            attrs: parsed.attrs,
+          })
+          scheduleHomeStashRefresh()
+        } catch {
+          /* 预取失败则点首页仍 GET */
+        } finally {
+          if (homeSeedInflight === operation) homeSeedInflight = null
+        }
+      })()
+      return operation.promise
+    }
+
+    function stop() {
+      stopHomeStashRefresh()
+      const operation = homeSeedInflight
+      homeSeedInflight = null
+      operation?.controller.abort()
+    }
+
+    return { remember: rememberView, take: takeView, seed: seedHomeView,
+      schedule: scheduleHomeStashRefresh, onVisible: onHomeStashVisible, stop,
+      clear: () => viewCache.clear() }
+  }
+  // Owns SPA requests, browser events, cancellation, progress and route settlement.
+  function createSkinSpaController({ window, document, getConfig, request, routeDocument, viewCacheController, historyController, hooks, perf, pendingClass }) {
+    const history = window.history
+    const { topicUrl: topicSpaUrl, accepts: isSpaUrl, cacheKey: viewCacheKey,
+      matchesTopic: topicResponseMatches, commit: commitRoute, applyView } = routeDocument
+    const { take: takeView, seed: seedHomeView, schedule: scheduleHomeStashRefresh,
+      onVisible: onHomeStashVisible } = viewCacheController
+    const { rememberScroll: rememberHistoryScroll, apply: applyHistory } = historyController
+    const { findRouteOutlet, stashView, markNative, applyMarkers, fillShell, refreshRouteEnhancements, syncShellRoute, scrollToTopicTarget, refreshNativeRouteEnhancements, unbindHomeInfiniteScroll, syncHomeInfiniteScroll, cancelRefresh } = hooks
+    const { span: perfSpan, spanAsync: perfSpanAsync, emit: perfEmit } = perf
+    let spaRouteChromeSerial = 0
+    let spaSerial = 0
+    let spaFilledSerial = 0
+    let spaAbortController = null
+    let spaProgressTimer = 0
+    let spaIgnorePop = false
+    let spaBound = false
+    let spaViewKey = ''
+
+    function holdSpaRouteChrome(serial) {
+      if (serial !== spaSerial) return false
+      spaRouteChromeSerial = serial
+      document.documentElement.classList.add(pendingClass)
+      return true
+    }
+
+    function releaseSpaRouteChrome(serial) {
+      if (serial !== spaSerial || spaRouteChromeSerial !== serial) return false
+      spaRouteChromeSerial = 0
+      document.documentElement.classList.remove(pendingClass)
+      return true
+    }
+
+    function clearSpaRouteChromeHold() {
+      spaRouteChromeSerial = 0
+      document.documentElement.classList.remove(pendingClass)
+    }
+
+    function setRoutePhase(serial, phase) {
+      if (serial !== spaSerial) return false
+      const root = document.documentElement
+      if (phase) root.dataset.lsbRoutePhase = phase
+      else delete root.dataset.lsbRoutePhase
+      return true
+    }
+
+    function settleSpaRoute(serial) {
+      if (serial !== spaSerial) return false
+      delete document.documentElement.dataset.lsbRoutePhase
+      releaseSpaRouteChrome(serial)
+      return true
+    }
+
+    function hasUnsavedEditor() {
+      return [...document.querySelectorAll('textarea, [contenteditable="true"]')].some((el) => {
+        if (el.closest('#lsb-shell, .lsb-panel')) return false
+        const value = 'value' in el ? el.value : el.textContent
+        return String(value || '').trim().length > 0
+      })
+    }
+
+    function ensureProgress() {
+      const shell = document.getElementById('lsb-shell')
+      if (!shell) return null
+      let el = document.getElementById('lsb-shell-progress')
+      if (el) return el
+      el = document.createElement('div')
+      el.id = 'lsb-shell-progress'
+      el.setAttribute('aria-hidden', 'true')
+      el.innerHTML = '<span data-lsb-shell-progress-bar></span>'
+      shell.append(el)
+      return el
+    }
+
+    function ensureRouteAnnouncer() {
+      const shell = document.getElementById('lsb-shell')
+      if (!shell) return null
+      let announcer = shell.querySelector('#lsb-route-announcer')
+      if (announcer) return announcer
+      announcer = document.createElement('span')
+      announcer.id = 'lsb-route-announcer'
+      announcer.setAttribute('role', 'status')
+      announcer.setAttribute('aria-live', 'polite')
+      shell.append(announcer)
+      return announcer
+    }
+
+    function focusAndAnnounceRoute(source) {
+      if (source === 'history') return
+      const outlet = findRouteOutlet()
+      if (!outlet) return
+      outlet.setAttribute('tabindex', '-1')
+      try {
+        outlet.focus({ preventScroll: true })
+      } catch {
+        outlet.focus?.()
+      }
+      const announcer = ensureRouteAnnouncer()
+      if (announcer) announcer.textContent = `已打开：${document.title}`
+    }
+
+    function startProgress(serial) {
+      const el = ensureProgress()
+      if (!el) return
+      el.dataset.phase = 'idle'
+      el.style.setProperty('--lsb-shell-progress', '.08')
+      window.clearTimeout(spaProgressTimer)
+      spaProgressTimer = window.setTimeout(() => {
+        if (serial !== spaSerial) return
+        el.dataset.phase = 'loading'
+        el.style.setProperty('--lsb-shell-progress', '.72')
+      }, 90)
+    }
+
+    function finishProgress(serial) {
+      const el = document.getElementById('lsb-shell-progress')
+      window.clearTimeout(spaProgressTimer)
+      spaProgressTimer = 0
+      if (!el) return
+      if (serial !== spaSerial) return
+      el.dataset.phase = 'done'
+      el.style.setProperty('--lsb-shell-progress', '1')
+      spaProgressTimer = window.setTimeout(() => {
+        el.dataset.phase = 'idle'
+        el.style.setProperty('--lsb-shell-progress', '0')
+      }, 220)
+    }
+
+    function hideProgress(serial) {
+      window.clearTimeout(spaProgressTimer)
+      spaProgressTimer = 0
+      if (serial !== spaSerial) return
+      const el = document.getElementById('lsb-shell-progress')
+      if (!el) return
+      el.dataset.phase = 'idle'
+      el.style.setProperty('--lsb-shell-progress', '0')
+    }
+
+    function notifyRoute() {
+      spaIgnorePop = true
+      try {
+        const view = document.defaultView
+        const Ev = view.PopStateEvent || view.Event
+        view.dispatchEvent(new Ev('popstate'))
+      } catch {
+        try {
+          window.dispatchEvent(new window.Event('popstate'))
+        } catch {
+          /* 基座还有 url 轮询兜底 */
+        }
+      } finally {
+        spaIgnorePop = false
+      }
+    }
+
+    function fallbackRoute(mode, targetUrl) {
+      if (mode === 'none') window.location.reload()
+      else if (mode === 'replace') window.location.replace(targetUrl)
+      else window.location.assign(targetUrl)
+    }
+
+    async function navigateSpa(href, options = {}) {
+      const settings = { historyMode: 'push', force: false, source: 'user', ...options }
+      let target
+      try {
+        target = new URL(href, window.location.href)
+      } catch {
+        return false
+      }
+      if (!isSpaUrl(target.href)) return false
+      if (!settings.force && hasUnsavedEditor() && !window.confirm('当前编辑内容尚未保存，确定离开吗？')) {
+        return false
+      }
+      historyController.cancelRestore()
+      const same = target.pathname === window.location.pathname && target.search === window.location.search
+      if (same && !settings.force) {
+        if (target.hash) {
+          const id = decodeURIComponent(target.hash.slice(1))
+          document.getElementById(id)?.scrollIntoView()
+        }
+        return true
+      }
+
+      if (settings.historyMode !== 'none') rememberHistoryScroll()
+      const fromKey = spaViewKey
+      unbindHomeInfiniteScroll()
+      const destKey = viewCacheKey(target.href)
+      const cached = takeView(destKey)
+      const serial = ++spaSerial
+      spaAbortController?.abort()
+      const requestController = new window.AbortController()
+      spaAbortController = requestController
+      const tTotal = perf.enabled() ? perf.now() : 0
+      const outlet = findRouteOutlet()
+      holdSpaRouteChrome(serial)
+      markNative(true)
+      outlet?.setAttribute('aria-busy', 'true')
+      setRoutePhase(serial, 'preparing')
+      startProgress(serial)
+      let committed = false
+      try {
+        if (cached) {
+          setRoutePhase(serial, 'committing')
+          stashView(fromKey)
+          perfSpan('spa.commit', () => applyView(cached, findRouteOutlet() || outlet))
+          committed = true
+          applyHistory(target, settings.historyMode)
+          spaViewKey = destKey
+          scheduleHomeStashRefresh()
+          perfSpan('spa.fillShell', () => {
+            applyMarkers()
+            fillShell()
+          })
+          spaFilledSerial = serial
+          cancelRefresh()
+          hideProgress(serial)
+          historyController.restoreScroll(settings.historyMode)
+          if (tTotal) perfEmit('spa.total', perf.now() - tTotal)
+          afterPaint(() => {
+            if (serial !== spaSerial) return
+            setRoutePhase(serial, 'settling')
+            try {
+              perfSpan('spa.notify', () => {
+                notifyRoute()
+                if (!refreshRouteEnhancements(serial)) return
+                syncShellRoute()
+                scrollToTopicTarget(target.href)
+                focusAndAnnounceRoute(settings.source)
+              })
+            } finally {
+              settleSpaRoute(serial)
+            }
+            try {
+              perf.emitGlobal('spa:view-restored', { href: destKey, live: !!cached.live })
+            } catch {
+              /* 实时流缺席不得打断壳 */
+            }
+          })
+          return true
+        }
+
+        setRoutePhase(serial, 'fetching')
+        const res = await perfSpanAsync('spa.fetch', () =>
+          request(`${target.pathname}${target.search}`, {
+            queue: false,
+            timeout: 15000,
+            retry: 0,
+            signal: requestController.signal,
+          }),
+        )
+        if (serial !== spaSerial) return false
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const finalUrl = new URL(res.url || target.href, target.href)
+        if (!finalUrl.hash && target.hash) finalUrl.hash = target.hash
+        if (!isSpaUrl(finalUrl.href)) {
+          hideProgress(serial)
+          outlet?.removeAttribute('aria-busy')
+          settleSpaRoute(serial)
+          fallbackRoute(settings.historyMode, finalUrl.href)
+          return false
+        }
+        const pageDoc = perfSpan('spa.parse', () => new window.DOMParser().parseFromString(res.text, 'text/html'))
+        const remoteOutlet = findRouteOutlet(pageDoc)
+        if (!remoteOutlet) throw new Error('no remote outlet')
+        if (!topicResponseMatches(pageDoc, finalUrl)) throw new Error('invalid topic response')
+        setRoutePhase(serial, 'committing')
+        stashView(fromKey)
+        perfSpan('spa.commit', () => {
+          commitRoute(pageDoc, remoteOutlet, finalUrl, settings.historyMode)
+        })
+        committed = true
+        spaViewKey = viewCacheKey(finalUrl.href)
+        scheduleHomeStashRefresh()
+        perfSpan('spa.fillShell', () => {
+          applyMarkers()
+          fillShell()
+        })
+        spaFilledSerial = serial
+        cancelRefresh()
+        finishProgress(serial)
+        historyController.restoreScroll(settings.historyMode)
+        if (tTotal) perfEmit('spa.total', perf.now() - tTotal)
+        afterPaint(() => {
+          if (serial !== spaSerial) return
+          setRoutePhase(serial, 'settling')
+          try {
+            perfSpan('spa.notify', () => {
+              notifyRoute()
+              if (!refreshRouteEnhancements(serial)) return
+              syncShellRoute()
+              scrollToTopicTarget(finalUrl.href)
+              focusAndAnnounceRoute(settings.source)
+            })
+          } finally {
+            settleSpaRoute(serial)
+          }
+        })
+        return true
+      } catch (err) {
+        if (serial !== spaSerial) return false
+        hideProgress(serial)
+        settleSpaRoute(serial)
+        outlet?.removeAttribute('aria-busy')
+        const aborted = requestController.signal.aborted || err?.name === 'AbortError'
+        if (!committed && !aborted) fallbackRoute(settings.historyMode, target.href)
+        return false
+      } finally {
+        if (spaAbortController === requestController) spaAbortController = null
+      }
+    }
+
+    function onSpaClick(event) {
+      if (event.defaultPrevented || event.button !== 0) return
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const anchor = event.target?.closest?.('a[href]')
+      if (
+        !anchor
+        || anchor.hasAttribute('download')
+        || (anchor.target && anchor.target !== '_self')
+        || /\bexternal\b/i.test(anchor.rel || '')
+        || anchor.matches('[data-method], [data-confirm], [data-no-spa]')
+      ) return
+      const currentTopic = !!topicSpaUrl(window.location.href)
+      const targetTopic = !!topicSpaUrl(anchor.href)
+      if (anchor.closest('.pagination-bar, .pagination') && (!currentTopic || !targetTopic)) return
+      if (!isSpaUrl(anchor.href)) return
+      if (anchor.href === window.location.href) {
+        if (cancelPendingSpaNavigation()) event.preventDefault()
+        return
+      }
+      event.preventDefault()
+      void navigateSpa(anchor.href)
+    }
+
+    function onSpaSubmit(event) {
+      if (event.defaultPrevented || !getConfig().shell) return
+      const form = event.target instanceof window.HTMLFormElement ? event.target : null
+      if (!form || String(form.method || 'get').toLowerCase() !== 'get') return
+      if (form.target && form.target !== '_self') return
+      if (form.matches('[data-no-spa], [data-confirm], [data-method]')) return
+      let target
+      try {
+        target = new URL(form.action || window.location.href, window.location.href)
+        const data = event.submitter ? new window.FormData(form, event.submitter) : new window.FormData(form)
+        target.search = new window.URLSearchParams(data).toString()
+      } catch {
+        return
+      }
+      if (!isSpaUrl(target.href)) return
+      event.preventDefault()
+      void navigateSpa(target.href)
+    }
+
+    function onSpaPop() {
+      if (spaIgnorePop || !getConfig().shell) return
+      if (!historyController.acceptPop(() =>
+        !hasUnsavedEditor() || window.confirm('当前编辑内容尚未保存，确定离开吗？'))) return
+      if (!isSpaUrl(window.location.href)) {
+        // 软跳文档被后退到交易页/帖子等整页地址时，主栏还是列表，必须重开。
+        // 交易页本身就是整页打开的，不能见 popstate 就 reload，否则会刷死。
+        let paintedSpa = false
+        try {
+          paintedSpa = isSpaUrl(new URL(spaViewKey || '/', window.location.origin).href)
+        } catch {
+          paintedSpa = false
+        }
+        if (paintedSpa) window.location.reload()
+        return
+      }
+      let targetHref = window.location.href
+      try {
+        const recorded = new URL(history.state?.lsbShellSpaUrl || '', window.location.href)
+        if (recorded.origin === window.location.origin && recorded.href === window.location.href) targetHref = recorded.href
+      } catch {
+        /* 地址栏仍是该历史项的权威目标 */
+      }
+      void navigateSpa(targetHref, { historyMode: 'none', force: true, source: 'history' })
+    }
+
+    function clearSpaTransaction() {
+      spaSerial += 1
+      historyController.cancel()
+      const controller = spaAbortController
+      spaAbortController = null
+      controller?.abort()
+      window.clearTimeout(spaProgressTimer)
+      spaProgressTimer = 0
+      findRouteOutlet()?.removeAttribute('aria-busy')
+      clearSpaRouteChromeHold()
+      const root = document.documentElement
+      delete root.dataset.lsbRoutePhase
+      const progress = document.getElementById('lsb-shell-progress')
+      if (progress) {
+        progress.dataset.phase = 'idle'
+        progress.style.setProperty('--lsb-shell-progress', '0')
+      }
+    }
+
+    function cancelPendingSpaNavigation() {
+      const root = document.documentElement
+      const pending = !!spaAbortController
+        || root.hasAttribute('data-lsb-route-phase')
+        || root.classList.contains(pendingClass)
+      if (!pending) return false
+      clearSpaTransaction()
+      try {
+        spaViewKey = viewCacheKey(window.location.href)
+      } catch {
+        spaViewKey = ''
+      }
+      if (getConfig().shell) {
+        applyMarkers()
+        if (document.getElementById('lsb-shell')) fillShell()
+        else syncHomeInfiniteScroll()
+        refreshNativeRouteEnhancements()
+      }
+      return true
+    }
+
+    function onSpaPageShow(event) {
+      if (event.persisted) clearSpaTransaction()
+    }
+
+    function bindSpa() {
+      if (spaBound) return
+      spaBound = true
+      document.addEventListener('click', onSpaClick, true)
+      document.addEventListener('submit', onSpaSubmit, true)
+      window.addEventListener('popstate', onSpaPop)
+      window.addEventListener('pageshow', onSpaPageShow)
+      document.addEventListener('visibilitychange', onHomeStashVisible)
+      historyController.bind()
+      spaViewKey = viewCacheKey(window.location.href)
+      seedHomeView()
+      scheduleHomeStashRefresh()
+    }
+
+    function unbindSpa() {
+      if (!spaBound) return
+      spaBound = false
+      clearSpaTransaction()
+      historyController.dispose()
+      document.removeEventListener('click', onSpaClick, true)
+      document.removeEventListener('submit', onSpaSubmit, true)
+      window.removeEventListener('popstate', onSpaPop)
+      window.removeEventListener('pageshow', onSpaPageShow)
+      document.removeEventListener('visibilitychange', onHomeStashVisible)
+      viewCacheController.stop()
+      document.getElementById('lsb-shell-progress')?.remove()
+    }
+
+    function afterPaint(fn) {
+      // One rAF runs before paint; the second lets the committed outlet paint first.
+      // Hidden and prerendered documents may pause rAF, so notify without waiting for an invisible frame.
+      const requestFrame = window.requestAnimationFrame
+      if (typeof requestFrame !== 'function' || document.visibilityState !== 'visible') {
+        window.queueMicrotask(fn)
+        return
+      }
+      requestFrame.call(window, () => requestFrame.call(window, fn))
+    }
+
+    return { navigate: navigateSpa, bind: bindSpa, unbind: unbindSpa,
+      clear: clearSpaTransaction, cancelPending: cancelPendingSpaNavigation, clearChrome: clearSpaRouteChromeHold,
+      resetView() { spaViewKey = '' },
+      isCurrent: (serial) => serial === spaSerial,
+      markFilled(serial) { spaFilledSerial = serial },
+      get bound() { return spaBound }, get viewKey() { return spaViewKey },
+      get filled() { return !!spaFilledSerial && spaFilledSerial === spaSerial } }
+  }
+  // Owns homepage infinite loading, per-list records and route-aware cleanup.
+  function createSkinHomeInfiniteController({ window, document, getConfig, request, cacheKey, containsTopicPostContent, getScrollRoot }) {
+    let homeInf = null
+    const homeInfRecords = new WeakMap()
+
+    function isHomeInfPath(urlLike = window.location.href) {
+      try {
+        const url = new window.URL(urlLike, window.location.href)
+        const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
+        if (path !== '/' && path !== '/index.php') return false
+        if (url.searchParams.get('q')) return false
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    function homeInfEnabled() {
+      if ((document.cookie.match(/(?:^|; )sb_infinite_scroll_enabled=([^;]*)/) || [])[1] === '0') return false
+      const config = window.__sbInfiniteScrollConfig || window.__infiniteScrollConfig || {}
+      return config.enabled !== false
+    }
+
+    function homeInfTopicKey(item) {
+      const title = item?.querySelector?.('.post-title')
+      const href = title?.getAttribute('href') || ''
+      if (href) return href.replace(/([?&])replyid=[^&]*/g, '').replace(/([?&])p=[^&]*/g, '')
+      return `${(title?.textContent || '').trim()}|${(item?.textContent || '').trim().slice(0, 80)}`
+    }
+
+    function homeInfHasNext(root) {
+      const pag = root?.querySelector?.('.pagination-bar') || root
+      if (!pag?.querySelectorAll) return false
+      for (const a of pag.querySelectorAll('a')) {
+        if ((a.textContent || '').trim() === '下一页') return true
+      }
+      const page = homeInf?.page || 1
+      for (const el of pag.querySelectorAll('a, span')) {
+        const num = parseInt(el.textContent, 10)
+        if (num > page) return true
+      }
       return false
     }
+
+    function rememberHomeInfState(state) {
+      if (!state?.list) return
+      homeInfRecords.set(state.list, {
+        page: state.page,
+        loaded: state.loaded,
+        seen: state.seen,
+        hasMore: state.hasMore,
+      })
+    }
+
+    function unbindHomeInfiniteScroll() {
+      if (!homeInf) return
+      const state = homeInf
+      rememberHomeInfState(state)
+      for (const target of state.scrollTargets || [window]) target.removeEventListener?.('scroll', state.onScroll)
+      if (state.scrollTimer) {
+        window.clearTimeout(state.scrollTimer)
+        state.scrollTimer = 0
+      }
+      state.status?.remove()
+      state.controller?.abort()
+      homeInf = null
+    }
+
+    function homeInfStateActive(state) {
+      if (!state || homeInf !== state || !isHomeInfPath()) return false
+      let routeKey
+      try {
+        routeKey = cacheKey(window.location.href)
+      } catch {
+        return false
+      }
+      return (
+        state.routeKey === routeKey
+        && state.list?.isConnected
+        && state.list === document.querySelector('.main-panel > ul.post-list')
+        && state.pagination?.isConnected
+        && state.pagination === document.querySelector('.pagination-bar')
+      )
+    }
+
+    function hideHomePagination(pagination) {
+      if (!(pagination instanceof window.Element)) return
+      pagination.classList.add('sb-infinite-scroll-pagination-hidden')
+      pagination.setAttribute('aria-hidden', 'true')
+      pagination.setAttribute('data-lsb-shell-inf', '1')
+    }
+
+    function setHomeInfStatus(kind, text) {
+      if (!homeInf?.pagination?.parentNode) return
+      homeInf.status?.remove()
+      if (!kind) {
+        homeInf.status = null
+        return
+      }
+      const el = document.createElement('div')
+      el.className = kind === 'end' ? 'infinite-scroll-end' : 'infinite-scroll-loader'
+      el.setAttribute('data-lsb-inf-status', kind)
+      el.textContent = text
+      homeInf.pagination.parentNode.insertBefore(el, homeInf.pagination)
+      homeInf.status = el
+    }
+
+    async function loadHomeInfPage() {
+      const state = homeInf
+      if (!homeInfStateActive(state) || state.loading || !state.hasMore) return
+      state.loading = true
+      setHomeInfStatus('loading', '加载中...')
+      let next = state.page + 1
+      while (state.loaded[next]) next += 1
+      const url = new window.URL(window.location.href)
+      url.searchParams.set('p', String(next))
+      try {
+        const res = await request(`${url.pathname}${url.search}`, {
+          queue: false,
+          timeout: 15000,
+          retry: 0,
+          ...(state.controller?.signal ? { signal: state.controller.signal } : {}),
+        })
+        if (!homeInfStateActive(state)) return
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const doc = new window.DOMParser().parseFromString(res.text, 'text/html')
+        const remoteList = doc.querySelector('.main-panel > ul.post-list, ul.post-list')
+        const items = remoteList
+          ? [...remoteList.children].filter((item) => item.matches?.('.post-item') && !item.classList.contains('post-entry'))
+          : []
+        if (!items.length) {
+          state.hasMore = false
+          rememberHomeInfState(state)
+          setHomeInfStatus('end', '没有更多内容了')
+          return
+        }
+        const fresh = []
+        for (const item of items) {
+          const key = homeInfTopicKey(item)
+          if (key && state.seen[key]) continue
+          if (key) state.seen[key] = true
+          fresh.push(document.importNode(item, true))
+        }
+        if (fresh.length) state.list.append(...fresh)
+        const pagHtml = doc.querySelector('.pagination-bar')?.innerHTML
+        if (pagHtml) state.pagination.innerHTML = pagHtml
+        hideHomePagination(state.pagination)
+        state.loaded[next] = true
+        state.page = Math.max(state.page, next)
+        if (!homeInfHasNext(doc)) {
+          state.hasMore = false
+          setHomeInfStatus('end', '没有更多内容了')
+        } else {
+          setHomeInfStatus(null)
+        }
+        rememberHomeInfState(state)
+        document.dispatchEvent(new window.CustomEvent('sb:topic-list-updated', {
+          detail: { list: state.list, items: fresh, page: next, source: 'lsb_shell' },
+        }))
+      } catch {
+        if (homeInf !== state) return
+        setHomeInfStatus('end', '加载失败，继续滚动或点分页重试')
+      } finally {
+        if (homeInf === state) state.loading = false
+      }
+    }
+
+    function bindHomeInfiniteScroll(list, pagination) {
+      const prior = homeInfRecords.get(list)
+      const seen = prior?.seen || {}
+      if (!prior) {
+        for (const item of list.children) {
+          if (item.matches?.('.post-item')) {
+            const key = homeInfTopicKey(item)
+            if (key) seen[key] = true
+          }
+        }
+      }
+      const pageFromUrl = parseInt(new window.URL(window.location.href).searchParams.get('p'), 10) || 1
+      const loaded = prior?.loaded || {}
+      loaded[pageFromUrl] = true
+      const page = Math.max(pageFromUrl, Number(prior?.page) || pageFromUrl)
+      const scrollRoot = getScrollRoot()
+      const scrollTargets = scrollRoot ? [scrollRoot, window] : [window]
+      const onScroll = () => {
+        if (!homeInfStateActive(homeInf) || homeInf.loading || !homeInf.hasMore) return
+        if (homeInf.scrollTimer) return
+        homeInf.scrollTimer = window.setTimeout(() => {
+          if (homeInf) homeInf.scrollTimer = 0
+          if (!homeInfStateActive(homeInf) || homeInf.list !== list) return
+          const rect = list.getBoundingClientRect()
+          const root = homeInf.scrollRoot instanceof window.Element ? homeInf.scrollRoot : null
+          const rootRect = root?.getBoundingClientRect?.()
+          const viewportBottom = root
+            ? (Number(rootRect?.bottom) || Number(rootRect?.top || 0) + Number(root.clientHeight || 0))
+            : (window.innerHeight || 0)
+          const distance = rect.bottom - viewportBottom
+          if (distance <= 100) void loadHomeInfPage()
+        }, 80)
+      }
+      hideHomePagination(pagination)
+      homeInf = {
+        list,
+        pagination,
+        routeKey: cacheKey(window.location.href),
+        seen,
+        loaded,
+        page,
+        loading: false,
+        hasMore: prior ? prior.hasMore : homeInfHasNext(document),
+        onScroll,
+        scrollRoot,
+        scrollTargets,
+        scrollTimer: 0,
+        status: null,
+        controller: typeof window.AbortController === 'function' ? new window.AbortController() : null,
+      }
+      rememberHomeInfState(homeInf)
+      if (!homeInf.hasMore) {
+        setHomeInfStatus('end', '没有更多内容了')
+        return
+      }
+      for (const target of scrollTargets) target.addEventListener?.('scroll', onScroll, { passive: true })
+    }
+
+    function syncHomeInfiniteScroll() {
+      if (!getConfig().shell || !isHomeInfPath() || !homeInfEnabled()) {
+        unbindHomeInfiniteScroll()
+        return
+      }
+      const list = document.querySelector('.main-panel > ul.post-list')
+      const pagination = document.querySelector('.pagination-bar')
+      if (!list || !pagination || containsTopicPostContent(list)) {
+        unbindHomeInfiniteScroll()
+        return
+      }
+      const routeKey = cacheKey(window.location.href)
+      const scrollRoot = getScrollRoot()
+      if (
+        homeInf?.list === list
+        && homeInf.pagination === pagination
+        && homeInf.routeKey === routeKey
+        && homeInf.scrollRoot === scrollRoot
+      ) return
+      unbindHomeInfiniteScroll()
+      if (
+        pagination.classList.contains('sb-infinite-scroll-pagination-hidden')
+        && !pagination.hasAttribute('data-lsb-shell-inf')
+        && !(scrollRoot instanceof window.Element)
+      ) return
+      bindHomeInfiniteScroll(list, pagination)
+    }
+
+    return { sync: syncHomeInfiniteScroll, unbind: unbindHomeInfiniteScroll }
+  }
+  // Owns native reply threads, verification widgets and their route lifecycle.
+  function createSkinNativeEnhancementsController({ window, document, topicUrl, startOnline }) {
+    let nativeThreadObserver = null
+    let nativeThreadList = null
+    let nativeThreadApplyTimer = 0
+    let nativeThreadLifecycleBound = false
+    const nativeReplyParentByForm = new WeakMap()
+    let nativeCaptchaObserver = null
+    let nativeCaptchaApplyTimer = 0
+    let nativeCaptchaEpoch = 0
+    const nativeCaptchaSolvers = new WeakMap()
+
+    const NATIVE_THREAD_VISIBLE_LIMIT = 5
+
+    function nativeThreadFloor(value) {
+      const text = String(value || '')
+      return /^[1-9]\d*$/.test(text) ? text : ''
+    }
+
+    function nativeThreadParentFromContent(row, replyRows) {
+      for (const link of row.querySelectorAll('.post-content a[href]')) {
+        try {
+          const url = new window.URL(link.href, window.location.href)
+          const floor = nativeThreadFloor(url.searchParams.get('floor'))
+          if (floor) return floor
+          const replyId = nativeThreadFloor(url.searchParams.get('replyid') || url.searchParams.get('reply_id'))
+          const parentFloor = replyId ? nativeThreadFloor(replyRows.get(replyId)?.dataset.floor) : ''
+          if (parentFloor) return parentFloor
+        } catch {
+          /* A malformed quote link cannot determine a parent. */
+        }
+      }
+      return nativeThreadFloor(String(row.querySelector('.post-content')?.textContent || '').match(/@[^\s#]+\s+#([1-9]\d*)\b/u)?.[1])
+    }
+
+    function nativeThreadParentFromForm(form) {
+      if (!(form instanceof window.HTMLFormElement)) return ''
+      const explicit = form.dataset.quoteThreadsParentFloor
+        || form.querySelector('[name="quote_threads_parent_floor"], [name="parent_floor"], [data-quote-threads-parent-floor]')?.value
+      const explicitFloor = nativeThreadFloor(explicit)
+      if (explicitFloor) return explicitFloor
+      const body = form.querySelector('textarea[name="body"], textarea[name="content"], [contenteditable="true"]')
+      const text = 'value' in (body || {}) ? body.value : body?.textContent
+      return nativeThreadFloor(String(text || '').match(/@[^ #]+ +#([1-9][0-9]*)/u)?.[1])
+    }
+
+    function nativeThreadReplyId(row) {
+      return String(row?.id || '').match(/^post-([1-9][0-9]*)$/)?.[1] || ''
+    }
+
+    function addNativeThreadReference(row, parentFloor) {
+      const floor = nativeThreadFloor(parentFloor)
+      if (!(row instanceof window.Element) || !floor) return
+      const meta = row.querySelector('.post-meta')
+      if (!(meta instanceof window.Element)) return
+      let reference = meta.querySelector(':scope > .quote-threads-reference')
+      if (!reference) {
+        reference = document.createElement('span')
+        reference.className = 'quote-threads-reference'
+        meta.prepend(reference)
+      }
+      reference.textContent = `回复 #${floor}`
+      reference.dataset.quoteThreadsParentFloor = floor
+    }
+
+    function normalizeNativeThreadLinks(rows, byFloor) {
+      const currentTopic = topicUrl(window.location.href)
+      if (!currentTopic) return
+      const normalize = (link, ownReplyId = '') => {
+        if (!(link instanceof window.HTMLAnchorElement)) return
+        let url
+        try {
+          url = new window.URL(link.getAttribute('href') || link.href, window.location.href)
+        } catch {
+          return
+        }
+        if (url.origin !== currentTopic.origin || url.pathname !== currentTopic.pathname) return
+        const floor = nativeThreadFloor(url.searchParams.get('floor'))
+        const replyId = ownReplyId || (floor ? nativeThreadReplyId(byFloor.get(floor)) : '')
+        if (!replyId) return
+        url.searchParams.delete('floor')
+        url.searchParams.delete('p')
+        url.searchParams.delete('reply_id')
+        url.searchParams.set('replyid', replyId)
+        link.setAttribute('href', url.href)
+      }
+      for (const row of rows) {
+        const ownReplyId = nativeThreadReplyId(row)
+        for (const link of row.querySelectorAll('a[href]')) normalize(link, link.classList.contains('post-floor') ? ownReplyId : '')
+      }
+    }
+
+    function handleNativeReplySubmit(event) {
+      const form = event.target instanceof window.HTMLFormElement
+        ? event.target
+        : event.target?.closest?.('form.ajax-reply-form')
+      if (!(form instanceof window.HTMLFormElement)) return
+      const parentFloor = nativeThreadParentFromForm(form)
+      if (parentFloor) nativeReplyParentByForm.set(form, parentFloor)
+    }
+
+    function handleNativeReplySaved(event) {
+      const detail = event.detail && typeof event.detail === 'object' ? event.detail : {}
+      const form = detail.form instanceof window.HTMLFormElement ? detail.form : null
+      const replyCandidate = detail.reply || detail.post || detail.element || event.target
+      const reply = replyCandidate instanceof window.Element
+        ? (replyCandidate.matches('li.post-item.post-entry') ? replyCandidate : replyCandidate.closest('li.post-item.post-entry'))
+        : null
+      if (!reply) return
+      const parentFloor = nativeThreadFloor(nativeReplyParentByForm.get(form))
+        || nativeThreadFloor(reply.dataset.quoteThreadsParentFloor)
+        || nativeThreadParentFromContent(reply, new Map())
+      if (parentFloor) reply.dataset.quoteThreadsParentFloor = parentFloor
+      const list = reply.closest('ul.post-list.topic-post-list') || nativeThreadList
+      if (list) rebuildNativeThreadTree(list)
+    }
+
+    function bindNativeThreadLifecycle() {
+      if (nativeThreadLifecycleBound) return
+      nativeThreadLifecycleBound = true
+      document.addEventListener('submit', handleNativeReplySubmit, true)
+      document.addEventListener('bbs1:reply-saved', handleNativeReplySaved)
+    }
+
+    function unbindNativeThreadLifecycle() {
+      if (!nativeThreadLifecycleBound) return
+      nativeThreadLifecycleBound = false
+      document.removeEventListener('submit', handleNativeReplySubmit, true)
+      document.removeEventListener('bbs1:reply-saved', handleNativeReplySaved)
+    }
+
+    function renderNativeThreadCollapse(list, root, rootRow, branch) {
+      if (!(rootRow instanceof window.Element) || branch.length <= NATIVE_THREAD_VISIBLE_LIMIT) return
+      const containsTarget = branch.some((row) => (
+        row.classList.contains('post-highlight')
+        || (new window.URL(window.location.href).searchParams.get('replyid') && row.id === `post-${new window.URL(window.location.href).searchParams.get('replyid')}`)
+        || (new window.URL(window.location.href).searchParams.get('floor') && row.dataset.floor === new window.URL(window.location.href).searchParams.get('floor'))
+      ))
+      if (containsTarget && rootRow.dataset.quoteThreadsTargetRevealed !== '1') {
+        rootRow.dataset.quoteThreadsExpanded = '1'
+        rootRow.dataset.quoteThreadsTargetRevealed = '1'
+      }
+      const expanded = rootRow.dataset.quoteThreadsExpanded === '1'
+      branch.forEach((row, index) => {
+        row.classList.toggle('quote-threads-is-collapsed', !expanded && index >= NATIVE_THREAD_VISIBLE_LIMIT)
+      })
+      if (!expanded) {
+        branch[branch.length - 1].classList.remove('quote-threads-thread-end')
+        branch[NATIVE_THREAD_VISIBLE_LIMIT - 1].classList.add('quote-threads-thread-end')
+      }
+      const toggleRow = document.createElement('li')
+      toggleRow.className = 'quote-threads-toggle-row'
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'quote-threads-toggle'
+      button.dataset.quoteThreadsToggle = root
+      button.dataset.expanded = expanded ? '1' : '0'
+      button.setAttribute('aria-expanded', expanded ? 'true' : 'false')
+      button.textContent = expanded ? '收起讨论串' : `展开剩余 ${branch.length - NATIVE_THREAD_VISIBLE_LIMIT} 条回复`
+      toggleRow.append(button)
+      ;(expanded ? branch[branch.length - 1] : branch[NATIVE_THREAD_VISIBLE_LIMIT - 1]).after(toggleRow)
+    }
+
+    function rebuildNativeThreadTree(list) {
+      if (!(list instanceof window.Element)) return
+      list.querySelectorAll(':scope > .quote-threads-toggle-row').forEach((row) => row.remove())
+      const rows = [...list.querySelectorAll(':scope > li.post-item.post-entry')]
+      list.dataset.quoteThreadsCollapseReady = '1'
+      if (rows.length < 2) return
+
+      const byFloor = new Map()
+      const replyRows = new Map()
+      const parents = new Map()
+      const roots = new Map()
+      const branches = new Map()
+      const branchRoots = []
+
+      rows.forEach((row) => {
+        row.dataset.quoteThreadsProcessed = '1'
+        row.querySelectorAll('.quote-threads-reference').forEach((reference) => reference.remove())
+        const floor = nativeThreadFloor(row.dataset.floor)
+        if (floor) byFloor.set(floor, row)
+        const replyId = String(row.id || '').match(/^post-([1-9][0-9]*)$/)?.[1] || ''
+        if (replyId) replyRows.set(replyId, row)
+        row.classList.remove(
+          'quote-threads-child',
+          'quote-threads-cross-page',
+          'quote-threads-thread-item',
+          'quote-threads-thread-end',
+          'quote-threads-is-collapsed',
+        )
+      })
+
+      rows.forEach((row) => {
+        const floor = nativeThreadFloor(row.dataset.floor)
+        let parentFloor = nativeThreadFloor(row.dataset.quoteThreadsParentFloor)
+        if (!parentFloor) {
+          parentFloor = nativeThreadParentFromContent(row, replyRows)
+          if (parentFloor) row.dataset.quoteThreadsParentFloor = parentFloor
+        }
+        if (!floor || !parentFloor || parentFloor === floor) return
+        addNativeThreadReference(row, parentFloor)
+        if (byFloor.has(parentFloor)) parents.set(floor, parentFloor)
+        else row.classList.add('quote-threads-cross-page')
+      })
+      normalizeNativeThreadLinks(rows, byFloor)
+
+      const rootFloor = (floor) => {
+        if (roots.has(floor)) return roots.get(floor)
+        const trail = []
+        const seen = new Set()
+        let current = floor
+        let root = floor
+        while (true) {
+          if (roots.has(current)) {
+            root = roots.get(current)
+            break
+          }
+          if (seen.has(current)) break
+          seen.add(current)
+          trail.push(current)
+          const parentFloor = parents.get(current)
+          if (!parentFloor) {
+            root = current
+            break
+          }
+          current = parentFloor
+        }
+        trail.forEach((value) => roots.set(value, root))
+        return root
+      }
+
+      rows.forEach((row, index) => {
+        const floor = nativeThreadFloor(row.dataset.floor)
+        const root = floor ? rootFloor(floor) : `@${index}`
+        if (!branches.has(root)) {
+          branches.set(root, [])
+          branchRoots.push(root)
+        }
+        branches.get(root).push(row)
+      })
+
+      const orderedRows = []
+      const collapsibleBranches = []
+      for (const root of branchRoots) {
+        const rootRow = byFloor.get(root)
+        const storedBranch = branches.get(root)
+        const branch = rootRow && storedBranch.length > 1
+          ? [rootRow, ...storedBranch.filter((row) => row !== rootRow)]
+          : storedBranch
+        if (rootRow && branch.length > 1) {
+          branch.forEach((row) => {
+            row.classList.add('quote-threads-thread-item')
+            if (row !== rootRow) row.classList.add('quote-threads-child')
+          })
+          branch[branch.length - 1].classList.add('quote-threads-thread-end')
+          collapsibleBranches.push([root, rootRow, branch])
+        } else if (branch.length === 1 && branch[0].classList.contains('quote-threads-cross-page')) {
+          branch[0].classList.add('quote-threads-thread-item', 'quote-threads-child', 'quote-threads-thread-end')
+        }
+        branch.forEach((row) => orderedRows.push(row))
+      }
+
+      if (!rows.every((row, index) => row === orderedRows[index])) {
+        const fragment = document.createDocumentFragment()
+        orderedRows.forEach((row) => fragment.append(row))
+        list.append(fragment)
+      }
+      collapsibleBranches.forEach(([root, rootRow, branch]) => renderNativeThreadCollapse(list, root, rootRow, branch))
+    }
+
+    function clearNativeThreadObserver() {
+      nativeThreadObserver?.disconnect?.()
+      nativeThreadObserver = null
+      nativeThreadList = null
+      if (nativeThreadApplyTimer) {
+        window.clearTimeout(nativeThreadApplyTimer)
+        nativeThreadApplyTimer = 0
+      }
+    }
+
+    function observeNativeThreadTree(list) {
+      if (!(list instanceof window.Element)) {
+        clearNativeThreadObserver()
+        return
+      }
+      bindNativeThreadLifecycle()
+      if (nativeThreadList === list && nativeThreadObserver) {
+        rebuildNativeThreadTree(list)
+        return
+      }
+      clearNativeThreadObserver()
+      nativeThreadList = list
+      if (list.dataset.lsbNativeThreadBound !== '1') {
+        list.dataset.lsbNativeThreadBound = '1'
+        list.addEventListener('click', (event) => {
+          const button = event.target?.closest?.('[data-quote-threads-toggle]')
+          if (!(button instanceof window.HTMLButtonElement)) return
+          const root = nativeThreadFloor(button.dataset.quoteThreadsToggle)
+          const rootRow = [...list.querySelectorAll(':scope > li.post-item.post-entry')]
+            .find((row) => nativeThreadFloor(row.dataset.floor) === root)
+          if (!rootRow) return
+          rootRow.dataset.quoteThreadsExpanded = button.dataset.expanded === '1' ? '0' : '1'
+          rebuildNativeThreadTree(list)
+        })
+      }
+      rebuildNativeThreadTree(list)
+      if (typeof window.MutationObserver !== 'function') return
+      nativeThreadObserver = new window.MutationObserver((records) => {
+        const hasNewReply = records.some((record) => [...record.addedNodes].some((node) => (
+          node instanceof window.Element
+          && (node.matches('li.post-item.post-entry') || !!node.querySelector('li.post-item.post-entry'))
+          && [...(node.matches('li.post-item.post-entry') ? [node] : node.querySelectorAll('li.post-item.post-entry'))]
+            .some((reply) => reply.dataset.quoteThreadsProcessed !== '1')
+        )))
+        if (hasNewReply && !nativeThreadApplyTimer) {
+          nativeThreadApplyTimer = window.setTimeout(() => {
+            nativeThreadApplyTimer = 0
+            if (nativeThreadList === list && list.isConnected) rebuildNativeThreadTree(list)
+          }, 0)
+        }
+      })
+      nativeThreadObserver.observe(list, { childList: true, subtree: true })
+    }
+
+    function nativeCapVerificationSetStatus(root, message, error = false) {
+      const status = root?.querySelector?.('[data-cap-verification-status]')
+      if (!(status instanceof window.HTMLElement)) return
+      status.textContent = message
+      if (error) status.setAttribute('data-cap-error', '1')
+      else status.removeAttribute('data-cap-error')
+    }
+
+    function nativeCapVerificationLoad(root) {
+      const scriptUrl = root?.getAttribute?.('data-cap-widget-script') || ''
+      const wasmUrl = root?.getAttribute?.('data-cap-wasm-url') || ''
+      if (wasmUrl) window.CAP_CUSTOM_WASM_URL = wasmUrl
+      if (window.__capVerificationWidgetPromise) return Promise.resolve(window.__capVerificationWidgetPromise)
+      if (window.customElements?.get?.('cap-widget')) return Promise.resolve()
+      if (!scriptUrl) return Promise.resolve()
+      try {
+        const promise = import(scriptUrl)
+        window.__capVerificationWidgetPromise = promise
+        promise.catch((error) => { window.__capVerificationWidgetError = error })
+        return promise
+      } catch (error) {
+        return Promise.reject(error)
+      }
+    }
+
+    function prepareNativeCapVerification(root = document) {
+      const widgets = []
+      if (root?.matches?.('[data-cap-verification]')) widgets.push(root)
+      root?.querySelectorAll?.('[data-cap-verification]')?.forEach((widget) => widgets.push(widget))
+      for (const widget of widgets) {
+        if (widget.dataset.capVerificationBound !== '1') {
+          widget.dataset.capVerificationBound = '1'
+          const capWidget = widget.querySelector('cap-widget')
+          capWidget?.addEventListener?.('solve', () => {
+            nativeCapVerificationSetStatus(widget, '人机验证已完成，可以提交。')
+          })
+          capWidget?.addEventListener?.('error', () => {
+            nativeCapVerificationSetStatus(widget, '人机验证失败，请重新验证。', true)
+          })
+        }
+        nativeCapVerificationLoad(widget).then(() => {
+          if (!widget.isConnected) return
+          const form = widget.closest('form')
+          const token = form?.querySelector('input[name="cap_token"]')
+          if (!token || !String(token.value || '').trim()) {
+            nativeCapVerificationSetStatus(widget, '人机验证已加载，请完成验证。')
+          }
+        }).catch(() => {
+          nativeCapVerificationSetStatus(widget, '人机验证加载失败，请刷新页面后重试。', true)
+        })
+      }
+    }
+
+    function nativeCaptchaHex(buffer) {
+      return [...new Uint8Array(buffer)].map((value) => value.toString(16).padStart(2, '0')).join('')
+    }
+
+    async function solveNativeCaptcha(widget) {
+      if (!(widget instanceof window.Element) || !widget.isConnected) return false
+      const epoch = nativeCaptchaEpoch
+      const powInput = widget.querySelector('input[name="native_captcha_pow"]')
+      if (!powInput || powInput.value) return true
+      const status = widget.querySelector('[data-native-captcha-status]')
+      if (widget.dataset.powRequired === '0') {
+        if (status) status.textContent = '微信浏览器已免除浏览器校验'
+        return true
+      }
+      const generation = widget.dataset.powGeneration || ''
+      const prefix = widget.dataset.powPrefix || ''
+      const zeroes = Math.max(2, Math.min(5, Number(widget.dataset.powZeroes || 3)))
+      const cryptoApi = window.crypto
+      const TextEncoderCtor = window.TextEncoder || globalThis.TextEncoder
+      if (!cryptoApi?.subtle || typeof TextEncoderCtor !== 'function') {
+        if (status) status.textContent = '当前浏览器不支持浏览器校验，请换用新版浏览器'
+        return false
+      }
+      const target = '0'.repeat(zeroes)
+      const encoder = new TextEncoderCtor()
+      if (status) status.textContent = '校验准备中…'
+      for (let i = 0; i < 2000000; i += 1) {
+        const nonce = i.toString(16)
+        const digest = nativeCaptchaHex(await cryptoApi.subtle.digest('SHA-256', encoder.encode(`${prefix}:${nonce}`)))
+        if (epoch !== nativeCaptchaEpoch || !widget.isConnected) return false
+        if (digest.slice(0, zeroes) === target) {
+          if ((widget.dataset.powGeneration || '') !== generation) return false
+          powInput.value = nonce
+          if (status) status.textContent = '校验已就绪'
+          return true
+        }
+        if (i > 0 && i % 250 === 0) await new Promise((resolve) => window.setTimeout(resolve, 0))
+      }
+      if (status) status.textContent = '浏览器校验准备超时，请刷新页面后重试'
+      return false
+    }
+
+    function prepareNativeCaptcha(root = document) {
+      const widgets = []
+      if (root?.matches?.('[data-native-captcha]')) widgets.push(root)
+      root?.querySelectorAll?.('[data-native-captcha]')?.forEach((widget) => widgets.push(widget))
+      for (const widget of widgets) {
+        if (nativeCaptchaSolvers.has(widget)) continue
+        const task = solveNativeCaptcha(widget)
+        nativeCaptchaSolvers.set(widget, task)
+        task.then(
+          () => {
+            if (nativeCaptchaSolvers.get(widget) === task) nativeCaptchaSolvers.delete(widget)
+          },
+          () => {
+            if (nativeCaptchaSolvers.get(widget) === task) nativeCaptchaSolvers.delete(widget)
+          },
+        )
+      }
+    }
+
+    function clearNativeCaptchaObserver() {
+      nativeCaptchaEpoch += 1
+      nativeCaptchaObserver?.disconnect?.()
+      nativeCaptchaObserver = null
+      if (nativeCaptchaApplyTimer) {
+        window.clearTimeout(nativeCaptchaApplyTimer)
+        nativeCaptchaApplyTimer = 0
+      }
+    }
+
+    function bindNativeCaptchaObserver() {
+      if (nativeCaptchaObserver || typeof window.MutationObserver !== 'function' || !document.body) return
+      nativeCaptchaObserver = new window.MutationObserver((records) => {
+        const roots = []
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (!(node instanceof window.Element)) continue
+            const hasNativeCaptcha = node.matches('[data-native-captcha]') || !!node.querySelector('[data-native-captcha]')
+            const hasCapVerification = node.matches('[data-cap-verification]') || !!node.querySelector('[data-cap-verification]')
+            if (hasNativeCaptcha || hasCapVerification) roots.push(node)
+          }
+        }
+        if (!roots.length || nativeCaptchaApplyTimer) return
+        nativeCaptchaApplyTimer = window.setTimeout(() => {
+          nativeCaptchaApplyTimer = 0
+          roots.forEach((root) => {
+            prepareNativeCaptcha(root)
+            prepareNativeCapVerification(root)
+          })
+        }, 0)
+      })
+      nativeCaptchaObserver.observe(document.body, { childList: true, subtree: true })
+    }
+
+    function refreshNativeRouteEnhancements() {
+      observeNativeThreadTree(document.querySelector('ul.post-list.topic-post-list'))
+      prepareNativeCaptcha(document)
+      prepareNativeCapVerification(document)
+      bindNativeCaptchaObserver()
+      startOnline()
+    }
+
+    return {
+      refresh: refreshNativeRouteEnhancements,
+      clear() {
+        clearNativeThreadObserver()
+        unbindNativeThreadLifecycle()
+        clearNativeCaptchaObserver()
+      },
+    }
+  }
+  // Owns the skin settings renderer and the current userscript menu registration.
+  function createSkinSettingsController({ document, ui, getConfig, saveConfig, configController, mediaController, applyAll }) {
+    function renderSkinSettings(host) {
+      const section = document.createElement('section')
+      section.className = 'lsb-skin-media-settings'
+      const heading = document.createElement('h3')
+      heading.textContent = '本地资源与窗口布局'
+      section.append(heading)
+      const hint = document.createElement('p')
+      hint.className = 'lsb-row-desc'
+      hint.textContent = '视频单文件不超过 50MB，字体单文件不超过 10MB；二进制只保存在本机 IndexedDB。'
+      section.append(hint)
+
+      const appendFile = (kind, labelText, accept) => {
+        const label = document.createElement('label')
+        label.className = 'lsb-field'
+        const title = document.createElement('span')
+        title.textContent = labelText
+        const input = document.createElement('input')
+        input.type = 'file'
+        input.accept = accept
+        input.addEventListener('change', async () => {
+          const file = input.files?.[0]
+          if (!file || !ui.shellMedia) return
+          const check = ui.shellMedia.validateMediaFile(file, { kind })
+          if (!check.ok) {
+            ui.toast?.(kind === 'video' ? '视频文件超过 50MB 或类型不受支持' : kind === 'image' ? '图片文件超过 20MB 或类型不受支持' : '字体文件超过 10MB 或类型不受支持', { type: 'error' })
+            input.value = ''
+            return
+          }
+          try {
+            const key = await mediaController.saveFile(kind, file)
+            configController.saveLegacyMedia(kind, key)
+            applyAll()
+            ui.toast?.('本地资源已保存', { type: 'success' })
+          } catch (error) {
+            if (error?.name === 'AbortError') return
+            ui.toast?.('本地资源保存失败', { type: 'error' })
+          } finally {
+            input.value = ''
+          }
+        })
+        label.append(title, input)
+        section.append(label)
+      }
+
+      appendFile('video', '选择本地视频', 'video/*')
+      appendFile('image', '选择静态图片', 'image/*')
+      appendFile('font', '选择本地字体', '.woff2,.woff,.ttf,.otf,font/*')
+
+      const actions = document.createElement('div')
+      actions.className = 'lsb-actions'
+      const arrange = document.createElement('button')
+      arrange.type = 'button'
+      arrange.className = 'lsb-btn'
+      arrange.textContent = '一键整理窗口'
+      arrange.addEventListener('click', () => ui.shellWindowArrange?.())
+      const reset = document.createElement('button')
+      reset.type = 'button'
+      reset.className = 'lsb-btn'
+      reset.textContent = '恢复默认布局'
+      reset.addEventListener('click', () => ui.shellWindowReset?.())
+      actions.append(arrange, reset)
+      section.append(actions)
+      host.append(section)
+    }
+
+    let unregMenu = () => {}
+    function syncGmMenu() {
+      unregMenu()
+      const on = !!getConfig().shell
+      unregMenu = ui.menuCommand(on ? '氢壳：关闭，回到原版界面' : '氢壳：开启', () => {
+        saveConfig({ shell: !getConfig().shell })
+      })
+    }
+
+    return { render: renderSkinSettings, syncMenu: syncGmMenu, clearMenu() { unregMenu() } }
+  }
+  // Owns topbar links, native appearance controls, and their original DOM positions.
+  function createSkinTopbarController({ window, document, store, isEnabled, getWidthClass, getTopStatus }) {
+    const { Element, HTMLAnchorElement, MutationObserver, URL, location } = window
+    const canvasStatusLinkHomes = new Map()
+    const extrasHomes = new Map()
+    let themeToggleHome = null
+    let colorSchemeHome = null
+    let colorSchemeModalHome = null
+    let extrasObs = null
 
     function restoreNode(el, home, cls) {
       if (!el) return
@@ -9004,621 +11942,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       } else {
         home.parent.append(el)
       }
-    }
-
-    // · G2 shellSearchHost/adoptSearch/restoreSearch: 搜索框接管 ──
-    function shellSearchHost() {
-      return document.querySelector('#lsb-shell [data-canvas-search-host]') || document.querySelector('.lsb-shell-search-host')
-    }
-
-    function adoptSearch(host) {
-      if (!(host instanceof Element)) return
-      const canvasHost = host.matches('[data-canvas-search-host]')
-      const panel = canvasHost ? host.querySelector('[data-canvas-search-panel]') : host
-      if (!(panel instanceof Element)) return
-      const hostedForm = panel.querySelector(SEARCH_FORM_SELECTOR)
-      if (hostedForm) {
-        hostedForm.classList.add('lsb-shell-search')
-        if (canvasHost) host.hidden = false
-        return
-      }
-      const nativeForm = document.querySelector(TOP_SEARCH_FORM_SELECTOR) || document.querySelector(SEARCH_FORM_SELECTOR)
-      if (nativeForm && !panel.contains(nativeForm)) {
-        const fallback = panel.querySelector('a.search-page-link')
-        if (fallback) {
-          fallback.classList.remove('lsb-shell-search')
-          fallback.remove()
-        }
-        searchHome = { parent: nativeForm.parentNode, next: nativeForm.nextSibling }
-        nativeForm.classList.add('lsb-shell-search')
-        panel.append(nativeForm)
-        if (canvasHost) host.hidden = false
-        return
-      }
-      const adoptedLink = panel.querySelector('a.search-page-link')
-      if (adoptedLink) {
-        if (canvasHost) host.hidden = false
-        return
-      }
-      const el =
-        document.querySelector('body > .top .search-page-link') ||
-        document.querySelector('a.search-page-link')
-      if (!(el instanceof Element) || host.contains(el)) {
-        if (canvasHost) host.hidden = true
-        return
-      }
-      searchHome = { parent: el.parentNode, next: el.nextSibling }
-      el.classList.add('lsb-shell-search')
-      panel.append(el)
-      if (canvasHost) host.hidden = false
-    }
-
-    function restoreSearch() {
-      const el = document.querySelector('.lsb-shell-search')
-      restoreNode(el, searchHome, 'lsb-shell-search')
-      searchHome = null
-    }
-
-    function findNativeUserCard() {
-      const hosted = document.querySelector('#lsb-shell [data-lsb-shell-me] .sidebar-card.user-card')
-      if (hosted) return hosted
-      for (const side of nativeSidebars()) {
-        const card = side.querySelector('.sidebar-card.user-card')
-        if (card) return card
-      }
-      return document.querySelector('aside.sidebar .sidebar-card.user-card')
-    }
-
-    function isSelfUserCard(card) {
-      if (!(card instanceof Element)) return false
-      const uid = api.me?.uid
-      if (uid == null) return true
-      const href = card.querySelector('a.user-name')?.getAttribute('href') || ''
-      return href.includes(`/user/${uid}`)
-    }
-
-    function findIncomingSelfCard(host) {
-      for (const card of document.querySelectorAll('.sidebar-card.user-card')) {
-        if (host?.contains(card)) continue
-        if (!isSelfUserCard(card)) continue
-        return card
-      }
-      return null
-    }
-
-    function userCardKey(card) {
-      if (!(card instanceof Element)) return ''
-      return [...card.querySelectorAll('a[href]')]
-        .map((a) => a.getAttribute('href') || '')
-        .join('\n')
-    }
-
-    function adoptUserCard(host) {
-      if (!(host instanceof Element)) return
-      const userPageProfile = api.page?.type === 'user' && host.hasAttribute('data-lsb-canvas-profile')
-      const incoming = userPageProfile ? null : findIncomingSelfCard(host)
-      const hosted = host.querySelector('.sidebar-card.user-card')
-      if (incoming && incoming !== hosted) {
-        if (hosted && userCardKey(hosted) === userCardKey(incoming)) return
-        if (hosted) restoreUserCard()
-        userCardHome = { parent: incoming.parentNode, next: incoming.nextSibling }
-        incoming.classList.add('lsb-shell-user-card')
-        host.append(incoming)
-        return
-      }
-      if (hosted) return
-      let card = findNativeUserCard()
-      if (userPageProfile) {
-        card = nativeSidebars()
-          .flatMap((side) => [...side.querySelectorAll('.sidebar-card.user-card')])
-          .find((candidate) => !host.contains(candidate) && !isSelfUserCard(candidate)) || card
-      }
-      if (!(card instanceof Element) || host.contains(card) || (!userPageProfile && !isSelfUserCard(card))) return
-      userCardHome = { parent: card.parentNode, next: card.nextSibling }
-      card.classList.add('lsb-shell-user-card')
-      host.append(card)
-    }
-
-    function restoreUserCard() {
-      const card = document.querySelector('.lsb-shell-user-card')
-      restoreNode(card, userCardHome, 'lsb-shell-user-card')
-      userCardHome = null
-    }
-
-    function canvasProfileSetExpanded(host, expanded, locked = canvasSelfProfileLocked) {
-      if (!(host instanceof Element)) return
-      const next = !!expanded
-      host.dataset.expanded = String(next)
-      host.dataset.locked = String(!!locked)
-      const button = host.querySelector('[data-canvas-profile-expand]')
-      if (button instanceof HTMLElement) {
-        button.setAttribute('aria-expanded', String(next))
-        button.textContent = next ? '⌃' : '⌄'
-        button.setAttribute('title', next ? (locked ? '收起个人资料卡' : '个人资料卡已展开') : '展开个人资料卡')
-      }
-    }
-
-    function canvasBindSelfProfile(host) {
-      if (!(host instanceof Element) || host.dataset.canvasProfileBound === '1') return
-      host.dataset.canvasProfileBound = '1'
-      host.addEventListener('mouseenter', () => {
-        if (canvasViewport().width < 1100 || canvasSelfProfileLocked) return
-        canvasProfileSetExpanded(host, true, false)
-      })
-      host.addEventListener('mouseleave', () => {
-        if (canvasSelfProfileLocked) return
-        canvasProfileSetExpanded(host, false, false)
-      })
-      host.addEventListener('focusout', (event) => {
-        if (canvasSelfProfileLocked || host.contains(event.relatedTarget)) return
-        canvasProfileSetExpanded(host, false, false)
-      })
-      const button = host.querySelector('[data-canvas-profile-expand]')
-      button?.addEventListener('click', (event) => {
-        event.preventDefault()
-        event.stopPropagation()
-        const next = !canvasSelfProfileLocked
-        canvasSelfProfileLocked = next
-        canvasProfileSetExpanded(host, next, canvasSelfProfileLocked)
-      })
-    }
-
-    function canvasPrepareSelfProfileCard(card) {
-      if (!(card instanceof Element)) return
-      card.classList.add('lsb-canvas-self-user-card')
-      card.id = 'lsb-canvas-self-profile-card'
-      const host = card.closest('[data-canvas-profile-host]')
-      host?.querySelector('[data-canvas-profile-expand]')?.setAttribute('aria-controls', card.id)
-      const bell = [...card.querySelectorAll('a[href]')].find((a) => {
-        const href = a.getAttribute('href') || ''
-        return /[?&]tab=notifications(?:&|$)/.test(href)
-      })
-      if (bell) {
-        bell.setAttribute('data-canvas-profile-bell', '')
-        bell.setAttribute('aria-label', '我的通知')
-        bell.setAttribute('title', '我的通知')
-      }
-    }
-
-    function canvasMountSelfProfile() {
-      const host = canvasSurfaceHost?.querySelector?.('[data-canvas-profile-host]')
-      if (!(host instanceof Element)) return null
-      canvasSelfProfileHost = host
-      canvasBindSelfProfile(host)
-      let card = host.querySelector('.sidebar-card.user-card')
-      if (card instanceof Element) {
-        canvasPrepareSelfProfileCard(card)
-        host.hidden = false
-        canvasSelfProfileLocked = false
-        canvasProfileSetExpanded(host, false, false)
-        return host
-      }
-      if (!(card instanceof Element)) {
-        card = document.querySelector('.lsb-canvas-self-user-card')
-      }
-      if (!(card instanceof Element)) {
-        card = findIncomingSelfCard(host) || findNativeUserCard()
-      }
-      if (!(card instanceof Element) || host.contains(card) || !isSelfUserCard(card)) {
-        host.hidden = true
-        canvasSelfProfileLocked = false
-        canvasProfileSetExpanded(host, false, false)
-        return host
-      }
-      if (!canvasSelfProfileHome) canvasSelfProfileHome = { parent: card.parentNode, next: card.nextSibling }
-      canvasPrepareSelfProfileCard(card)
-      host.append(card)
-      host.hidden = false
-      canvasSelfProfileLocked = false
-      canvasProfileSetExpanded(host, false, false)
-      return host
-    }
-
-    function canvasRestoreSelfProfile() {
-      const card = document.querySelector('.lsb-canvas-self-user-card')
-      restoreNode(card, canvasSelfProfileHome, 'lsb-canvas-self-user-card')
-      canvasSelfProfileHome = null
-      canvasSelfProfileLocked = false
-      if (canvasSelfProfileHost) {
-        canvasSelfProfileHost.hidden = true
-        canvasSelfProfileHost.removeAttribute('data-expanded')
-        canvasSelfProfileHost.removeAttribute('data-locked')
-      }
-      canvasSelfProfileHost = null
-    }
-
-    function canvasProfileSlotFor(outlet) {
-      if (!(outlet instanceof Element)) return null
-      let slot = [...outlet.children].find((node) => node.getAttribute?.('data-canvas-profile-slot') === 'true')
-      if (!(slot instanceof Element)) {
-        slot = document.createElement('div')
-        slot.setAttribute('data-canvas-profile-slot', 'true')
-        slot.setAttribute('aria-label', '个人信息')
-        outlet.insertBefore(slot, outlet.firstChild)
-      } else if (slot !== outlet.firstElementChild) {
-        outlet.insertBefore(slot, outlet.firstChild)
-      }
-      return slot
-    }
-
-    function canvasRestoreProfile() {
-      canvasRestoreSelfProfile()
-      restoreUserCard()
-      if (canvasListSurface) canvasListSurface.removeAttribute('data-lsb-canvas-list')
-      canvasListSurface = null
-      canvasListHome = null
-      canvasProfileExpanded = false
-      canvasProfileScrollMode = 'full'
-      canvasProfileSlot?.remove()
-      canvasProfileSlot = null
-      canvasProfileOutlet = null
-    }
-
-    function canvasUserListSurface(outlet) {
-      if (!(outlet instanceof Element) || api.page?.type !== 'user') return null
-      const direct = [...outlet.children].find((node) => node.matches?.('.home-shell, .forum-layout, .forum-main, .main-panel'))
-      const list = direct || outlet.querySelector('.home-shell, .forum-layout, .forum-main, .main-panel')
-      if (!(list instanceof Element)) return null
-      if (canvasListSurface && canvasListSurface !== list) canvasListSurface.removeAttribute('data-lsb-canvas-list')
-      if (!canvasListHome) canvasListHome = { node: list, parent: list.parentNode, next: list.nextSibling }
-      list.setAttribute('data-lsb-canvas-list', '')
-      canvasListSurface = list
-      return list
-    }
-
-    function canvasApplyUserSurfaceState(outlet, slot) {
-      if (!(slot instanceof Element) || api.page?.type !== 'user') return
-      canvasProfileExpanded = false
-      canvasProfileScrollMode = 'full'
-      slot.setAttribute('data-lsb-canvas-profile', '')
-      slot.dataset.scrollMode = canvasProfileScrollMode
-      slot.dataset.expanded = String(canvasProfileExpanded)
-      canvasUserListSurface(outlet)
-    }
-
-    function canvasMountProfile(outlet) {
-      if (!(outlet instanceof Element)) return null
-      if (canvasProfileOutlet && canvasProfileOutlet !== outlet) canvasRestoreProfile()
-      canvasMountSelfProfile()
-      canvasProfileOutlet = outlet
-      if (api.page?.type !== 'user') return canvasSelfProfileHost
-      const slot = canvasProfileSlotFor(outlet)
-      if (!(slot instanceof Element)) return null
-      canvasProfileSlot = slot
-      slot.setAttribute('data-lsb-canvas-profile', '')
-      adoptUserCard(slot)
-      if (!slot.querySelector('.sidebar-card.user-card')) {
-        slot.hidden = true
-      } else {
-        slot.hidden = false
-        canvasApplyUserSurfaceState(outlet, slot)
-      }
-      return slot
-    }
-
-    function canvasPersistentSiteCardKind(card) {
-      if (!(card instanceof Element)) return ''
-      if (card.matches('.sidebar-promotions-card')) return 'promotions'
-      if (card.matches('.daily-hot-topics-card')) return 'daily-hot-topics'
-      return ''
-    }
-
-    function canvasEnsurePersistentSiteCard(card) {
-      const kind = canvasPersistentSiteCardKind(card)
-      if (!kind) return null
-      let record = canvasPersistentSiteCards.get(kind)
-      if (!record) {
-        const parent = card.parentNode
-        const placeholder = document.createComment(`lsb-canvas-${kind}-origin`)
-        parent?.insertBefore(placeholder, card)
-        record = { node: card, placeholder, originalParent: parent, originalNext: card.nextSibling }
-        canvasPersistentSiteCards.set(kind, record)
-      }
-      return record
-    }
-
-    function canvasAdoptRebuiltPersistentSiteCard(kind, card) {
-      const record = canvasPersistentSiteCards.get(kind)
-      const parent = card?.parentNode
-      if (!record || record.node?.isConnected || !parent) return false
-      const placeholder = document.createComment(`lsb-canvas-${kind}-origin`)
-      const originalNext = card.nextSibling
-      parent.insertBefore(placeholder, card)
-      canvasSiteSidebarHomes.delete(record.node)
-      record.node = card
-      record.placeholder = placeholder
-      record.originalParent = parent
-      record.originalNext = originalNext
-      return true
-    }
-
-    function canvasRestorePersistentSiteCard(kind, record, { release = true } = {}) {
-      if (!record?.node) return
-      const { node, placeholder, originalParent, originalNext } = record
-      const placeholderParent = placeholder?.parentNode
-      const connectedParent = placeholderParent?.isConnected
-        ? placeholderParent
-        : (originalParent?.isConnected ? originalParent : nativeSidebars().find((side) => side.isConnected))
-      if (connectedParent && placeholderParent === connectedParent) {
-        connectedParent.replaceChild(node, placeholder)
-      } else if (connectedParent) {
-        const before = originalNext?.parentNode === connectedParent ? originalNext : null
-        connectedParent.insertBefore(node, before)
-      } else if (originalParent?.isConnected) {
-        const before = originalNext?.parentNode === originalParent ? originalNext : null
-        originalParent.insertBefore(node, before)
-      } else if (!node.parentNode?.isConnected) {
-        node.remove()
-      }
-      node.classList.remove('lsb-canvas-site-card')
-      if (release) canvasPersistentSiteCards.delete(kind)
-      canvasSiteSidebarHomes.delete(node)
-    }
-
-    function canvasStagePersistentSiteCardOrigins(remoteOutlet) {
-      if (!(remoteOutlet instanceof Element)) return
-      for (const [kind] of canvasPersistentSiteCards) {
-        const remotes = [...remoteOutlet.querySelectorAll('.sidebar-promotions-card, .daily-hot-topics-card')]
-          .filter((card) => canvasPersistentSiteCardKind(card) === kind)
-        for (const remote of remotes) {
-          const marker = remote.ownerDocument.createElement('span')
-          marker.hidden = true
-          marker.dataset.lsbCanvasSiteOrigin = kind
-          marker.setAttribute('aria-hidden', 'true')
-          remote.replaceWith(marker)
-        }
-      }
-    }
-
-    function canvasRebindPersistentSiteCardOrigins(routeOutlet) {
-      if (!routeOutlet?.querySelector) return
-      for (const [kind, record] of canvasPersistentSiteCards) {
-        const marker = routeOutlet.querySelector(`[data-lsb-canvas-site-origin="${kind}"]`)
-        if (!marker) continue
-        record.placeholder = marker
-        record.originalParent = marker.parentNode
-        record.originalNext = marker.nextSibling
-      }
-    }
-
-    function canvasRestoreSiteSidebar({ releasePersistent = false, restorePersistent = false } = {}) {
-      const persistentByNode = new Map(
-        [...canvasPersistentSiteCards].map(([kind, record]) => [record.node, { kind, record }]),
-      )
-      for (const [card, home] of [...canvasSiteSidebarHomes]) {
-        const persistent = persistentByNode.get(card)
-        if (persistent && !releasePersistent) continue
-        if (persistent) canvasRestorePersistentSiteCard(persistent.kind, persistent.record, { release: releasePersistent })
-        else restoreNode(card, home, 'lsb-canvas-site-card')
-        canvasSiteSidebarHomes.delete(card)
-      }
-      if (restorePersistent && !releasePersistent) {
-        for (const [kind, record] of canvasPersistentSiteCards) {
-          canvasRestorePersistentSiteCard(kind, record, { release: false })
-        }
-      }
-      if (releasePersistent) {
-        for (const [kind, record] of [...canvasPersistentSiteCards]) {
-          canvasRestorePersistentSiteCard(kind, record, { release: true })
-        }
-      }
-      for (const card of [...(canvasSiteSidebarHost?.querySelectorAll?.(':scope > .sidebar-card') || [])]) {
-        if (!releasePersistent && persistentByNode.has(card)) continue
-        card.remove()
-      }
-      if (releasePersistent) canvasPersistentSiteCards.clear()
-      canvasSiteSidebarHost = null
-      canvasSiteStatusHost = null
-      canvasSiteStatusLocked = false
-    }
-
-    function canvasPromotionNeedsNativeInitialization(card) {
-      if (!(card instanceof Element) || !card.matches('.sidebar-promotions-card')) return false
-      const links = [...card.querySelectorAll('[data-sidebar-promotions-ad-link="1"]')]
-      const textLinks = links.filter((link) =>
-        link.matches('.sidebar-promotions-slot-text, [data-sidebar-promotions-lottery-slot="1"]')
-        || (!link.matches('.sidebar-promotions-slot-image') && !link.querySelector('img')),
-      )
-      if (!textLinks.length) return false
-      return textLinks.some((link) => {
-        const style = link.getAttribute('style') || ''
-        return !/--sidebar-promotion-text\s*:/.test(style)
-          || !/--sidebar-promotion-background\s*:/.test(style)
-      })
-    }
-
-    function canvasNativeSiteCards() {
-      const cards = []
-      const emittedPersistentKinds = new Set()
-      for (const side of nativeSidebars()) {
-        for (const card of [...side.children].filter((node) => node.matches?.('.sidebar-card'))) {
-          if (card.classList.contains('user-card')) continue
-          if (card.classList.contains('mobile-menu-drawer')) continue
-          const kind = canvasPersistentSiteCardKind(card)
-          if (kind) {
-            const existing = canvasPersistentSiteCards.get(kind)
-            if (existing && existing.node !== card) {
-              if (existing.node?.isConnected) {
-                if (canvasPromotionNeedsNativeInitialization(card)) card.remove()
-                else cards.push(card)
-                continue
-              }
-              if (canvasPromotionNeedsNativeInitialization(card)) {
-                card.remove()
-                continue
-              }
-              canvasAdoptRebuiltPersistentSiteCard(kind, card)
-            }
-            const record = canvasEnsurePersistentSiteCard(card)
-            if (!record) continue
-            if (!emittedPersistentKinds.has(kind)) {
-              cards.push(record.node)
-              emittedPersistentKinds.add(kind)
-            }
-            continue
-          }
-          cards.push(card)
-        }
-      }
-      for (const [kind, record] of canvasPersistentSiteCards) {
-        if (record.node.isConnected && !emittedPersistentKinds.has(kind)) cards.push(record.node)
-      }
-      return cards
-    }
-
-    function canvasSiteStatusBody() {
-      return canvasSurface('site-status')?.querySelector('[data-canvas-site-status-body]') || null
-    }
-
-    function canvasSiteStatusSetExpanded(host, expanded, locked = canvasSiteStatusLocked) {
-      if (!(host instanceof Element)) return
-      const next = !!expanded
-      canvasSiteStatusLocked = !!locked
-      host.dataset.expanded = String(next)
-      host.dataset.locked = String(canvasSiteStatusLocked)
-      const button = host.querySelector('[data-canvas-site-status-expand]')
-      const label = host.querySelector('[data-canvas-site-status-label]')
-      if (label instanceof HTMLElement) label.setAttribute('aria-expanded', String(next))
-      if (button instanceof HTMLElement) {
-        button.setAttribute('aria-expanded', String(next))
-        button.textContent = next ? '⌃' : '⌄'
-        button.setAttribute('title', next ? '收起站点信息' : '展开站点信息')
-        button.setAttribute('aria-label', next ? '收起站点信息' : '展开站点信息')
-      }
-    }
-
-    function canvasSyncPersistentSiteCards(surface = canvasSurface('site-card')) {
-      const statusSurface = canvasSurface('site-status')
-      const statusHost = statusSurface?.querySelector('[data-canvas-site-status-host]')
-      const useStatusHost = canvasWidthClass === 'wide' && statusHost instanceof Element
-      const host = useStatusHost ? canvasSiteStatusBody() : surface?.querySelector?.('[data-canvas-site-sidebar]')
-      if (!(host instanceof Element)) return
-      canvasSiteSidebarHost = host
-      canvasSiteStatusHost = useStatusHost ? statusHost : null
-      const cards = []
-      const emitted = new Set()
-      for (const side of nativeSidebars()) {
-        for (const card of [...side.children].filter((node) => node.matches?.('.sidebar-card'))) {
-          const kind = canvasPersistentSiteCardKind(card)
-          if (!kind) continue
-          const existing = canvasPersistentSiteCards.get(kind)
-          if (existing && existing.node !== card) {
-            if (existing.node?.isConnected) {
-              if (canvasPromotionNeedsNativeInitialization(card)) card.remove()
-              continue
-            }
-            if (canvasPromotionNeedsNativeInitialization(card)) {
-              card.remove()
-              continue
-            }
-            canvasAdoptRebuiltPersistentSiteCard(kind, card)
-          }
-          const record = canvasEnsurePersistentSiteCard(card)
-          if (record && !emitted.has(kind)) {
-            cards.push(record.node)
-            emitted.add(kind)
-          }
-        }
-      }
-      for (const [kind, record] of canvasPersistentSiteCards) {
-        if (record.node.isConnected && !emitted.has(kind)) cards.push(record.node)
-      }
-      for (const card of cards) {
-        if (host.contains(card)) continue
-        card.classList.add('lsb-canvas-site-card')
-        host.append(card)
-      }
-      const empty = host.querySelector('[data-canvas-site-empty-state]')
-      if (empty instanceof HTMLElement) empty.hidden = cards.length > 0
-    }
-
-    function canvasSyncSiteSidebar(surface = canvasSurface('site-card')) {
-      const statusSurface = canvasSurface('site-status')
-      const statusHost = statusSurface?.querySelector('[data-canvas-site-status-host]')
-      const useStatusHost = canvasWidthClass === 'wide' && statusHost instanceof Element
-      const host = useStatusHost ? canvasSiteStatusBody() : surface?.querySelector?.('[data-canvas-site-sidebar]')
-      if (!(host instanceof Element)) return
-      canvasSiteSidebarHost = host
-      canvasSiteStatusHost = useStatusHost ? statusHost : null
-      if (statusSurface instanceof HTMLElement) statusSurface.hidden = !useStatusHost
-      if (statusHost instanceof HTMLElement) {
-        statusHost.hidden = !useStatusHost
-        if (!useStatusHost) canvasSiteStatusSetExpanded(statusHost, false, false)
-      }
-      const cards = canvasNativeSiteCards()
-      const current = new Set(cards)
-      const persistentNodes = new Set(
-        [...canvasPersistentSiteCards.values()].map((record) => record.node),
-      )
-      for (const [card] of [...canvasSiteSidebarHomes]) {
-        if (!card.isConnected) canvasSiteSidebarHomes.delete(card)
-      }
-      for (const card of [...host.children].filter((node) => node.matches?.('.sidebar-card'))) {
-        if (persistentNodes.has(card) || current.has(card) || canvasSiteSidebarHomes.has(card)) continue
-        const home = canvasSiteSidebarHomes.get(card)
-        if (home) {
-          restoreNode(card, home, 'lsb-canvas-site-card')
-          canvasSiteSidebarHomes.delete(card)
-        } else {
-          card.remove()
-        }
-      }
-      for (const card of cards) {
-        if (host.contains(card)) continue
-        if (!persistentNodes.has(card) && !canvasSiteSidebarHomes.has(card)) {
-          canvasSiteSidebarHomes.set(card, { parent: card.parentNode, next: card.nextSibling })
-        }
-        card.classList.add('lsb-canvas-site-card')
-        host.append(card)
-      }
-      const empty = host.querySelector('[data-canvas-site-empty-state]')
-      if (empty instanceof HTMLElement) {
-        const mounted = host.querySelectorAll(':scope > .sidebar-card').length
-        empty.hidden = cards.length > 0 || mounted > 0
-      }
-    }
-
-    function canvasBindSiteStatus(host) {
-      if (!(host instanceof Element) || host.dataset.canvasSiteStatusBound === '1') return
-      host.dataset.canvasSiteStatusBound = '1'
-      canvasSiteStatusSetExpanded(host, false, false)
-    }
-
-    function canvasOpenSiteStatus(trigger = null) {
-      const host = canvasSurface('site-status')?.querySelector('[data-canvas-site-status-host]')
-      if (!(host instanceof Element)) return null
-      if (canvasActiveSheet && canvasActiveSheet !== 'site-card') canvasCloseSurface(canvasActiveSheet, false)
-      canvasFocusReturn = trigger instanceof Element
-        ? trigger
-        : (document.activeElement instanceof Element ? document.activeElement : null)
-      canvasSyncSiteSidebar()
-      host.hidden = false
-      canvasSiteStatusSetExpanded(host, true, true)
-      canvasActiveSheet = 'site-card'
-      canvasSetBackdrop(false)
-      canvasZIndex += 1
-      host.style.zIndex = String(8010 + canvasZIndex)
-      return host
-    }
-
-    function canvasWatchSidebar() {
-      canvasSidebarObserver?.disconnect?.()
-      canvasSidebarObserver = null
-      const sides = nativeSidebars()
-      if (!sides.length || typeof MutationObserver !== 'function') return
-      canvasSidebarObserver = new MutationObserver(() => {
-        if (!cfg.shell) return
-        canvasMountProfile(findRouteOutlet())
-        const site = canvasSurface('site-card')
-        canvasSyncPersistentSiteCards(site)
-        if (canvasActiveSheet === 'site-card' || site?.dataset.surfaceMode === 'rail') canvasSyncSiteSidebar(site)
-      })
-      for (const side of sides) canvasSidebarObserver.observe(side, { childList: true, subtree: true })
-    }
-
-    function canvasStopSidebarWatch() {
-      canvasSidebarObserver?.disconnect?.()
-      canvasSidebarObserver = null
     }
 
     function extraLabel(a) {
@@ -9711,7 +12034,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         }
       }
       document.querySelectorAll('.feature-links a, .mobile-menu-section a.mobile-menu-link').forEach((node) => add(node))
-      for (const item of api.store.get('topExtras') || []) add(null, item)
+      for (const item of store.get('topExtras') || []) add(null, item)
       return out
     }
 
@@ -9721,14 +12044,14 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function renderCanvasTopLinks() {
-      const host = canvasSurface('top-status')?.querySelector('[data-canvas-status-links]')
-      const pinnedLinks = canvasSurface('top-status')?.querySelector('[data-canvas-pinned-links]')
+      const host = getTopStatus()?.querySelector('[data-canvas-status-links]')
+      const pinnedLinks = getTopStatus()?.querySelector('[data-canvas-pinned-links]')
       if (!(host instanceof Element) || !(pinnedLinks instanceof Element)) return
       restoreCanvasTopLinks()
       host.replaceChildren()
       pinnedLinks.replaceChildren()
       const items = collectCanvasTopLinks()
-      const visibleItems = canvasWidthClass === 'narrow' ? items.slice(0, 4) : items
+      const visibleItems = getWidthClass() === 'narrow' ? items.slice(0, 4) : items
       const makeNavigationTrigger = () => {
         const button = document.createElement('button')
         button.type = 'button'
@@ -9822,13 +12145,13 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       const links = [...host.querySelectorAll('a[href]')]
         .map((a) => ({ href: a.getAttribute('href'), label: extraLabel(a) || (a.textContent || '').trim() }))
         .filter((x) => x.href && x.label && !isAiConsoleExtra(null, x.href, x.label) && !isJunkExtra(x.href, x.label))
-      if (links.length) api.store.set('topExtras', links)
+      if (links.length) store.set('topExtras', links)
     }
 
     function hydrateTopExtras(host, have) {
       if (!(host instanceof Element)) return
       const known = have || new Set([...host.querySelectorAll('a[href]')].map((a) => a.href))
-      for (const item of api.store.get('topExtras') || []) {
+      for (const item of store.get('topExtras') || []) {
         if (!item?.href || !item.label || isAiConsoleExtra(null, item.href, item.label) || isJunkExtra(item.href, item.label)) continue
         let abs
         try {
@@ -9897,401 +12220,13 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       colorSchemeModalHome = null
     }
 
-    function nativeCards() {
-      return nativeSidebars().flatMap((side) => [...side.querySelectorAll('.sidebar-card')])
-    }
-
-    function asidePersistentCardKind(card) {
-      if (!(card instanceof Element)) return ''
-      if (card.matches('.sidebar-promotions-card')) return 'promotions'
-      if (card.matches('.daily-hot-topics-card')) return 'daily-hot-topics'
-      return ''
-    }
-
-    function ensureAsidePersistentCard(card) {
-      const kind = asidePersistentCardKind(card)
-      if (!kind) return null
-      const existing = asidePersistentCards.get(kind)
-      if (existing?.node?.isConnected) return existing
-      const parent = card.parentNode
-      const record = { node: card, originalParent: parent, originalNext: card.nextSibling }
-      asidePersistentCards.set(kind, record)
-      return record
-    }
-
-    function removeRebuiltAsidePersistentCards() {
-      for (const [kind, record] of asidePersistentCards) {
-        for (const card of nativeCards()) {
-          if (card !== record.node && asidePersistentCardKind(card) === kind) card.remove()
-        }
-      }
-    }
-
-    function restoreAsidePersistentCards() {
-      for (const [kind, record] of [...asidePersistentCards]) {
-        const node = record?.node
-        if (!(node instanceof Element)) {
-          asidePersistentCards.delete(kind)
-          continue
-        }
-        const parent = record.originalParent?.isConnected
-          ? record.originalParent
-          : nativeSidebars().find((side) => side.isConnected)
-        if (!(parent instanceof Element)) continue
-        const before = record.originalNext?.parentNode === parent ? record.originalNext : null
-        parent.insertBefore(node, before)
-        node.classList.remove('lsb-shell-aside-card')
-        asidePersistentCards.delete(kind)
-      }
-    }
-
-    function pickAsideCards() {
-      const persistent = [...asidePersistentCards.values()]
-        .map((record) => record.node)
-        .filter((node) => node?.isConnected)
-      const hosted = [...document.querySelectorAll('#lsb-shell-aside .sidebar-card')]
-      const all = [...persistent, ...hosted, ...nativeCards()]
-      const seen = new Set()
-      const uniq = all.filter((el) => {
-        if (seen.has(el)) return false
-        seen.add(el)
-        return true
-      })
-      const text = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim()
-      const onUser = api.page?.type === 'user'
-      const profile = onUser
-        ? uniq.find(
-            (c) =>
-              c.classList.contains('user-card')
-              && !c.classList.contains('lsb-shell-user-card')
-              && !isSelfUserCard(c),
-          )
-        : null
-      const bio = onUser ? uniq.find((c) => c.classList.contains('bio-card')) : null
-      const promo = uniq.find((c) => c.classList.contains('sidebar-promotions-card'))
-      const announce = uniq.find(
-        (c) => c.classList.contains('forum-enhancements-left-announcements') || text(c).startsWith('站务公告'),
-      )
-      const quick = uniq.find((c) => text(c).startsWith('快捷功能'))
-      const hot = uniq.find((c) => c.classList.contains('daily-hot-topics-card'))
-      const stats = uniq.find((c) => c.classList.contains('stats-card'))
-      const online = uniq.find((c) => c.classList.contains('online-users-card'))
-      return [profile, bio, promo, announce, quick, hot, stats, online].filter(Boolean)
-    }
-
-    function adoptAsideCards(host) {
-      if (!(host instanceof Element)) return
-      for (const card of pickAsideCards()) {
-        const kind = asidePersistentCardKind(card)
-        if (kind) {
-          const record = ensureAsidePersistentCard(card)
-          if (record?.node !== card) {
-            card.remove()
-            continue
-          }
-          if (host.contains(card)) continue
-        } else if (host.contains(card) || card.classList.contains('lsb-shell-user-card')) {
-          continue
-        } else {
-          asideHomes.set(card, { parent: card.parentNode, next: card.nextSibling })
-        }
-        card.classList.add('lsb-shell-aside-card')
-        host.append(card)
-      }
-      removeRebuiltAsidePersistentCards()
-      hydrateAsideKeep(host)
-      snapshotAsideKeep(host)
-      if (onlineUsersBoot()) syncOnlineUserDots()
-    }
-
-    function cardLabel(el) {
-      return (el.textContent || '').replace(/\s+/g, ' ').trim()
-    }
-
-    function snapshotAsideKeep(host) {
-      if (!(host instanceof Element)) return
-      const keep = { ...(api.store.get('asideKeep') || {}) }
-      const live = [...host.querySelectorAll('.sidebar-card')].filter(
-        (el) => !el.hasAttribute('data-lsb-aside-keep'),
-      )
-      const quick = live.find((c) => cardLabel(c).startsWith('快捷功能'))
-      const stats = live.find((c) => c.classList.contains('stats-card'))
-      const online = live.find((c) => c.classList.contains('online-users-card'))
-      let changed = false
-      if (quick) {
-        const node = quick.cloneNode(true)
-        node.querySelectorAll('[data-themes-mode-toggle], .dark-mode-control').forEach((n) => n.remove())
-        keep.quick = node.outerHTML
-        changed = true
-      }
-      if (stats) {
-        keep.stats = stats.outerHTML
-        changed = true
-      }
-      if (online) {
-        keep.online = online.outerHTML
-        changed = true
-      }
-      if (changed) api.store.set('asideKeep', keep)
-    }
-
-    function injectKeptCard(host, html, slot, before) {
-      if (!html || host.querySelector(`[data-lsb-aside-keep="${slot}"]`)) return
-      const box = document.createElement('div')
-      box.innerHTML = html
-      const el = box.firstElementChild
-      if (!(el instanceof Element)) return
-      el.setAttribute('data-lsb-aside-keep', slot)
-      el.classList.add('lsb-shell-aside-card')
-      if (before instanceof Node && before.parentNode === host) host.insertBefore(el, before)
-      else host.append(el)
-    }
-
-    function hydrateAsideKeep(host) {
-      if (!(host instanceof Element)) return
-      const keep = api.store.get('asideKeep') || {}
-      const live = [...host.querySelectorAll('.sidebar-card')].filter(
-        (el) => !el.hasAttribute('data-lsb-aside-keep'),
-      )
-      const hasQuick = live.some((c) => cardLabel(c).startsWith('快捷功能'))
-      const hasStats = live.some((c) => c.classList.contains('stats-card'))
-      const hasOnline = live.some((c) => c.classList.contains('online-users-card'))
-      if (hasQuick) host.querySelector('[data-lsb-aside-keep="quick"]')?.remove()
-      else injectKeptCard(host, keep.quick, 'quick', host.querySelector('.daily-hot-topics-card'))
-      if (hasStats) host.querySelector('[data-lsb-aside-keep="stats"]')?.remove()
-      else {
-        const hot = host.querySelector('.daily-hot-topics-card')
-        injectKeptCard(host, keep.stats, 'stats', hot?.nextSibling)
-      }
-      if (hasOnline) host.querySelector('[data-lsb-aside-keep="online"]')?.remove()
-      else injectKeptCard(host, keep.online, 'online', null)
-    }
-
-    function restoreAsideCards() {
-      for (const [card, home] of asideHomes) restoreNode(card, home, 'lsb-shell-aside-card')
-      asideHomes.clear()
-    }
-
-    function pruneDetachedAsideCards() {
-      for (const [card, home] of [...asideHomes]) {
-        if (home?.parent?.isConnected) continue
-        restoreNode(card, home, 'lsb-shell-aside-card')
-        asideHomes.delete(card)
-      }
-    }
-
-    function watchOnlineCard() {
-      if (onlineObs || document.querySelector('#lsb-shell-aside .online-users-card')) return
-      const sides = nativeSidebars()
-      if (!sides.length) return
-      onlineObs = new MutationObserver(() => {
-        const host = document.querySelector('#lsb-shell-aside')
-        if (!host || !cfg.shell) return
-        adoptAsideCards(host)
-        if (host.querySelector('.online-users-card')) stopOnlineWatch()
-      })
-      for (const side of sides) onlineObs.observe(side, { childList: true, subtree: true })
-    }
-
-    function stopOnlineWatch() {
-      onlineObs?.disconnect()
-      onlineObs = null
-    }
-
-    function onlineUserIdFromHref(href) {
-      const value = String(href || '')
-      const pretty = value.match(/\/user\/(\d+)(?:[/?#]|$)/)
-      if (pretty) return pretty[1]
-      if (!/[?&]a=user(?:&|$)/.test(value)) return ''
-      return value.match(/[?&]id=(\d+)(?:&|$)/)?.[1] || ''
-    }
-
-    function onlineUsersBoot(root = document) {
-      if (!root?.querySelector) return null
-      return root.querySelector('[data-online-users-ids]')
-    }
-
-    function syncOnlineUserDots() {
-      const boot = onlineUsersBoot()
-      if (!(boot instanceof Element)) return false
-      const ids = new Set(String(boot.dataset.onlineUsersIds || '').split(',').map((id) => id.trim()).filter(Boolean))
-      const label = boot.dataset.onlineUsersLabel || '在线'
-      for (const img of document.querySelectorAll('img.avatar-img')) {
-        const host = img.parentElement
-        if (!(host instanceof Element)) continue
-        const dot = host.querySelector(':scope > .online-users-dot')
-        const marked = host.closest('[data-online-user-id]')
-        const link = img.closest('a[href]')
-        const uid = String(marked?.getAttribute('data-online-user-id') || (link ? onlineUserIdFromHref(link.getAttribute('href')) : '')).trim()
-        if (uid && ids.has(uid)) {
-          host.classList.add('online-users-host')
-          if (dot) dot.title = label
-          else {
-            const next = document.createElement('span')
-            next.className = 'online-users-dot'
-            next.title = label
-            host.append(next)
-          }
-        } else {
-          dot?.remove()
-          host.classList.remove('online-users-host')
-        }
-      }
-      return true
-    }
-
-    function syncOnlineUserBoot(sourceDoc) {
-      const source = onlineUsersBoot(sourceDoc)
-      if (!(source instanceof Element)) return false
-      let target = onlineUsersBoot()
-      if (!(target instanceof Element)) {
-        target = document.createElement('span')
-        target.className = 'online-users-boot'
-        target.hidden = true
-        document.body?.append(target)
-      }
-      if (!(target instanceof Element)) return false
-      target.dataset.onlineUsersIds = source.dataset.onlineUsersIds || ''
-      target.dataset.onlineUsersLabel = source.dataset.onlineUsersLabel || '在线'
-      const synced = syncOnlineUserDots()
-      if (synced) onlineUserLastSyncAt = Date.now()
-      return synced
-    }
-
-    function wantsOnlineUserRefresh() {
-      return !!cfg.shell && !isCloudflareChallengeDocument(document)
-    }
-
-    function onlineUserRefreshPath() {
-      const url = new URL('/', location.href)
-      return `${url.pathname}${url.search}`
-    }
-
-    function stopOnlineUserRefresh() {
-      if (onlineUserRefreshTimer) {
-        window.clearTimeout(onlineUserRefreshTimer)
-        onlineUserRefreshTimer = 0
-      }
-      onlineUserRefreshPending = false
-      onlineUserRefreshAfterInflight = false
-      onlineUserRefreshGeneration += 1
-      if (onlineUserRefreshVisibilityBound) {
-        document.removeEventListener('visibilitychange', onOnlineUserVisibilityChange)
-        onlineUserRefreshVisibilityBound = false
-      }
-    }
-
-    function scheduleOnlineUserRefresh(delay = ONLINE_USER_REFRESH_MS, force = false, bypassCooldown = false) {
-      if (!wantsOnlineUserRefresh()) {
-        stopOnlineUserRefresh()
-        return
-      }
-      if (onlineUserRefreshTimer) {
-        if (!force) return
-        window.clearTimeout(onlineUserRefreshTimer)
-        onlineUserRefreshTimer = 0
-      }
-      if (onlineUserRefreshInflight) {
-        if (bypassCooldown) onlineUserRefreshAfterInflight = true
-        return
-      }
-      const elapsed = onlineUserLastSyncAt ? Date.now() - onlineUserLastSyncAt : 0
-      const notBefore = bypassCooldown || !onlineUserLastSyncAt
-        ? 0
-        : Math.max(0, ONLINE_USER_REFRESH_MS - Math.max(0, elapsed))
-      const wait = Math.max(0, Number(delay) || 0, notBefore)
-      onlineUserRefreshTimer = window.setTimeout(() => {
-        onlineUserRefreshTimer = 0
-        void refreshOnlineUsers()
-      }, wait)
-    }
-
-    async function refreshOnlineUsers() {
-      if (!wantsOnlineUserRefresh()) return
-      if (document.visibilityState === 'hidden') {
-        onlineUserRefreshPending = true
-        return
-      }
-      onlineUserRefreshPending = false
-      if (onlineUserRefreshInflight) return onlineUserRefreshInflight
-      const generation = onlineUserRefreshGeneration
-      const task = (async () => {
-        try {
-          const res = await api.net.raw(onlineUserRefreshPath(), {
-            queue: false,
-            timeout: 15000,
-            retry: 0,
-            headers: { 'cache-control': 'no-cache' },
-          })
-          if (generation !== onlineUserRefreshGeneration || !wantsOnlineUserRefresh() || !res.ok) return
-          const sourceDoc = new DOMParser().parseFromString(res.text || '', 'text/html')
-          if (syncOnlineUserBoot(sourceDoc)) onlineUserLastSyncAt = Date.now()
-        } catch {
-          /* 在线清单刷新失败时保留上一份清单，下一周期继续尝试。 */
-        } finally {
-          if (onlineUserRefreshInflight === task) onlineUserRefreshInflight = null
-          const rerun = onlineUserRefreshAfterInflight
-          onlineUserRefreshAfterInflight = false
-          if (generation === onlineUserRefreshGeneration) {
-            if (rerun) scheduleOnlineUserRefresh(0, true, true)
-            else scheduleOnlineUserRefresh()
-          }
-        }
-      })()
-      onlineUserRefreshInflight = task
-      return task
-    }
-
-    function onOnlineUserVisibilityChange() {
-      if (document.visibilityState !== 'visible' || !onlineUserRefreshPending) return
-      onlineUserRefreshPending = false
-      void refreshOnlineUsers()
-    }
-
-    function startOnlineUserRefresh() {
-      if (!wantsOnlineUserRefresh()) return
-      if (!onlineUserRefreshVisibilityBound) {
-        document.addEventListener('visibilitychange', onOnlineUserVisibilityChange)
-        onlineUserRefreshVisibilityBound = true
-      }
-      scheduleOnlineUserRefresh()
-    }
-
-    function scheduleOnlineUserDots() {
-      if (onlineAvatarTimer) return
-      onlineAvatarTimer = window.setTimeout(() => {
-        onlineAvatarTimer = 0
-        syncOnlineUserDots()
-      }, 50)
-    }
-
-    function watchOnlineUserDots() {
-      if (onlineAvatarObs || !(document.body instanceof Element) || !cfg.shell) return
-      onlineAvatarObs = new MutationObserver((records) => {
-        const hasAvatar = records.some((record) => [...record.addedNodes].some((node) => (
-          node instanceof Element && (node.matches('img.avatar-img') || !!node.querySelector('img.avatar-img'))
-        )))
-        if (hasAvatar) scheduleOnlineUserDots()
-      })
-      onlineAvatarObs.observe(document.body, { childList: true, subtree: true })
-    }
-
-    function stopOnlineUserDots() {
-      onlineAvatarObs?.disconnect()
-      onlineAvatarObs = null
-      if (onlineAvatarTimer) {
-        window.clearTimeout(onlineAvatarTimer)
-        onlineAvatarTimer = 0
-      }
-    }
-
     function watchTopExtras() {
       if (extrasObs) return
       const top = document.querySelector('body > .top')
       if (!top) return
       extrasObs = new MutationObserver(() => {
         const host = document.querySelector('[data-lsb-shell-extras]')
-        if (!host || !cfg.shell) return
+        if (!host || !isEnabled()) return
         adoptTopExtras(host)
       })
       extrasObs.observe(top, { childList: true, subtree: true })
@@ -10302,49 +12237,21 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       extrasObs = null
     }
 
-    function renderLinks(links) {
-      return links
-        .map((link) => {
-          if (link.rpc) {
-            return `<button type="button" class="lsb-shell-link" data-lsb-rpc="${esc(link.rpc)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
-          }
-          if (link.panel) {
-            return `<button type="button" class="lsb-shell-link" data-lsb-panel="${esc(link.panel)}"><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
-          }
-          const active = isActiveHref(link.href) ? ' is-active' : ''
-          const count = Number.isFinite(link.count)
-            ? `<span class="lsb-shell-count">${esc(String(link.count))}</span>`
-            : ''
-          return `<a class="lsb-shell-link${active}" href="${esc(link.href)}"><span class="lsb-shell-link-label">${esc(link.label)}</span>${count}</a>`
-        })
-        .join('')
+    return {
+      renderCanvasTopLinks, restoreCanvasTopLinks, adoptTopExtras, restoreTopExtras,
+      adoptThemeToggle, restoreThemeToggle, watchTopExtras, stopExtrasWatch,
     }
-
-    function paintActive(host) {
-      if (!(host instanceof Element)) return
-      for (const a of host.querySelectorAll('a.lsb-shell-link')) {
-        a.classList.toggle('is-active', isActiveHref(a.getAttribute('href')))
-      }
-    }
-
-    function setSection(host, title, links) {
-      if (!(host instanceof Element)) return
-      const sig = title + JSON.stringify(links)
-      if (host.dataset.sig === sig) {
-        paintActive(host)
-        return
-      }
-      host.dataset.sig = sig
-      if (!links.length) {
-        host.innerHTML = ''
-        return
-      }
-      const heading = title ? `<h2>${esc(title)}</h2>` : ''
-      host.innerHTML = `<section class="lsb-shell-nav-section">${heading}<div class="lsb-shell-nav">${renderLinks(links)}</div></section>`
-    }
+  }
+  // Owns the legacy topic timeline, scroll scheduling, and timeline performance sampling.
+  function createSkinTimelineController({ window, document, getPage, getPostSelector, isEnabled, hasPerfProbe, emitPerf }) {
+    const { performance, Date } = window
+    let timelineRaf = 0
+    let windowListening = false
+    let timelineEmitSec = -1
+    let timelineEmitN = 0
 
     function topicPosts() {
-      const sel = api.sel?.topicPosts || 'ul.topic-post-list > li.post-entry, ul.post-list > li.post-entry'
+      const sel = getPostSelector() || 'ul.topic-post-list > li.post-entry, ul.post-list > li.post-entry'
       const nodes = [...document.querySelectorAll(sel)]
       return nodes.slice().sort((a, b) => {
         const fa = Number(a.dataset?.floor)
@@ -10358,7 +12265,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
 
     function scrollToPost(post, block) {
       post?.scrollIntoView({
-        behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
         block: block || 'start',
       })
     }
@@ -10382,7 +12289,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function ensureTimeline(shellEl) {
-      const onTopic = api.page?.type === 'topic' && topicPosts().length > 0
+      const onTopic = getPage()?.type === 'topic' && topicPosts().length > 0
       let timeline = shellEl.querySelector('#lsb-shell-timeline')
       if (!onTopic) {
         if (timeline) timeline.hidden = true
@@ -10420,7 +12327,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
 
     function updateTimeline() {
       timelineRaf = 0
-      if (!api.hasHandler('perf-probe:record')) {
+      if (!hasPerfProbe()) {
         updateTimelineBody()
         return
       }
@@ -10435,7 +12342,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     function updateTimelineBody() {
       const doc = typeof document !== 'undefined' ? document : null
       const timeline = doc?.querySelector?.('#lsb-shell-timeline')
-      if (!timeline || !cfg.shell) return
+      if (!timeline || !isEnabled()) return
       const posts = topicPosts()
       if (!posts.length) {
         timeline.hidden = true
@@ -10477,6 +12384,677 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       window.removeEventListener('resize', scheduleTimeline)
     }
 
+    function perfEmitTimeline(ms) {
+      if (ms < 8) return
+      const sec = Math.floor(Date.now() / 1000)
+      if (sec !== timelineEmitSec) {
+        timelineEmitSec = sec
+        timelineEmitN = 0
+      }
+      if (timelineEmitN >= 2) return
+      timelineEmitN += 1
+      emitPerf('timeline.update', ms)
+    }
+
+    function cancelPending() {
+      if (timelineRaf) {
+        const cancel = window.cancelAnimationFrame || window.clearTimeout
+        cancel(timelineRaf)
+        timelineRaf = 0
+      }
+    }
+
+    return { ensure: ensureTimeline, schedule: scheduleTimeline, bind: bindWindow, unbind: unbindWindow, cancelPending }
+  }
+  // Owns canvas text selection, native context actions, and dismissal lifecycle.
+  function createSkinSelectionController({ window, document, ui, getPill, getSurfaceHost, getActiveSheet, restoreFocus, getViewport, nextZIndex }) {
+    const { Element, HTMLElement, SVGElement, navigator } = window
+    let canvasSelectionBound = false
+    let canvasSelectionHandler = null
+    let canvasSelectionPost = null
+    let canvasSelectionText = ''
+    let canvasSelectionDismissTimer = 0
+
+    function canvasCloseContextPill(restore = false) {
+      const pill = getPill()
+      if (pill) {
+        pill.setAttribute('data-canvas-surface-state', 'closing')
+        pill.hidden = true
+        pill.setAttribute('aria-hidden', 'true')
+        pill.setAttribute('data-canvas-surface-state', 'closed')
+      }
+      canvasSelectionPost = null
+      canvasSelectionText = ''
+      if (canvasSelectionDismissTimer) {
+        window.clearTimeout(canvasSelectionDismissTimer)
+        canvasSelectionDismissTimer = 0
+      }
+      if (restore) restoreFocus()
+    }
+
+    function canvasNativeAction(action) {
+      const post = canvasSelectionPost
+      const text = canvasSelectionText
+      if (!(post instanceof Element)) return
+      const clickFirst = (selectors) => {
+        for (const selector of selectors) {
+          const target = post.querySelector(selector) || document.querySelector(selector)
+          if (target instanceof HTMLElement || target instanceof SVGElement) {
+            target.click?.()
+            target.focus?.()
+            return true
+          }
+        }
+        return false
+      }
+      if (action === 'reply') {
+        clickFirst(['.reply-box', '.post-reply', '[data-reply-action]'])
+          || clickFirst(['.reply-panel textarea[name="body"]', '.reply-panel textarea', 'textarea[name="body"]', '.btn-post[href="#reply"]'])
+      } else if (action === 'quote') {
+        clickFirst(['.quote-reply', '[data-quote-action]', 'a[href="#reply"]'])
+      } else if (action === 'favorite') {
+        clickFirst(['.favorite-action', '[data-favorite-action]', '.topic-favorites-action .fav-btn', '.topic-favorites-action button'])
+      } else if (action === 'copy' && text) {
+        try {
+          const clipboard = navigator.clipboard
+          if (clipboard?.writeText) void clipboard.writeText(text)
+          else {
+            const area = document.createElement('textarea')
+            area.value = text
+            area.setAttribute('aria-hidden', 'true')
+            area.style.cssText = 'position:fixed;left:-9999px;top:0'
+            document.body.append(area)
+            area.select()
+            document.execCommand?.('copy')
+            area.remove()
+          }
+          ui.toast?.('已复制选中文本', { type: 'success' })
+        } catch {
+          ui.toast?.('复制失败，请手动选择文本', { type: 'error' })
+        }
+      }
+    }
+
+    function canvasShowContextPill(post, range) {
+      const pill = getPill()
+      if (!(pill instanceof Element) || !(post instanceof Element)) return
+      const text = String(window.getSelection?.()?.toString?.() || '').trim()
+      if (!text) return canvasCloseContextPill()
+      const rect = range?.getBoundingClientRect?.() || post.getBoundingClientRect?.()
+      canvasSelectionPost = post
+      canvasSelectionText = text.slice(0, 2000)
+      pill.hidden = false
+      pill.setAttribute('aria-hidden', 'false')
+      const zIndex = nextZIndex()
+      pill.style.zIndex = String(8020 + zIndex)
+      const viewport = getViewport()
+      const width = Math.min(260, Math.max(180, pill.getBoundingClientRect?.().width || 220))
+      const height = Math.max(36, pill.getBoundingClientRect?.().height || 42)
+      const x = Math.min(Math.max(8, Number(rect?.left || 0)), Math.max(8, viewport.width - width - 8))
+      const y = Math.min(Math.max(8, Number(rect?.bottom || 0) + 8), Math.max(8, viewport.height - height - 8))
+      pill.style.left = `${Math.round(x)}px`
+      pill.style.top = `${Math.round(y)}px`
+      pill.style.right = 'auto'
+      pill.style.bottom = 'auto'
+      if (canvasSelectionDismissTimer) window.clearTimeout(canvasSelectionDismissTimer)
+      canvasSelectionDismissTimer = window.setTimeout(() => {
+        canvasSelectionDismissTimer = 0
+        if (!pill.matches(':focus-within')) canvasCloseContextPill()
+      }, 8000)
+    }
+
+    function canvasSelectionSync() {
+      if (!getSurfaceHost() || getActiveSheet() === 'context-pill') return
+      const selection = window.getSelection?.()
+      const text = String(selection?.toString?.() || '').trim()
+      const node = selection?.anchorNode
+      const post = node?.nodeType === 1 ? node.closest?.('.post-entry, .post-item') : node?.parentElement?.closest?.('.post-entry, .post-item')
+      if (!text || !(post instanceof Element) || !document.documentElement.contains(post)) {
+        if (!getPill()?.matches(':focus-within')) canvasCloseContextPill()
+        return
+      }
+      canvasShowContextPill(post, selection.getRangeAt?.(0))
+    }
+
+    function canvasBindSelection() {
+      if (canvasSelectionBound) return
+      canvasSelectionBound = true
+      canvasSelectionHandler = () => {
+        const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
+        raf(canvasSelectionSync)
+      }
+      document.addEventListener('selectionchange', canvasSelectionHandler, { passive: true })
+      document.addEventListener('pointerup', canvasSelectionHandler, { passive: true })
+    }
+
+    function canvasUnbindSelection() {
+      if (!canvasSelectionBound) return
+      canvasSelectionBound = false
+      if (canvasSelectionHandler) {
+        document.removeEventListener('selectionchange', canvasSelectionHandler)
+        document.removeEventListener('pointerup', canvasSelectionHandler)
+      }
+      canvasSelectionHandler = null
+      canvasCloseContextPill()
+    }
+
+    return { close: canvasCloseContextPill, act: canvasNativeAction, bind: canvasBindSelection, unbind: canvasUnbindSelection }
+  }
+  // Coordinates canvas appearance controls with the existing config and media controllers.
+  function createSkinAppearanceController({
+    window, document, ui, configController, mediaController,
+    getSurfaceHost, getSurface, getShell, locationText,
+    saveState, applyTokens, syncMedia, applySurfaceModes,
+  }) {
+    const { Element } = window
+
+    function canvasSyncAppearance(feedback = '') {
+      if (!(getSurfaceHost() instanceof Element)) return
+      const appearance = configController.effective?.appearance || {}
+      const status = getSurface('appearance-sheet')?.querySelector('[data-canvas-appearance-status]')
+      const presetLabels = {
+        'native-site': 'D 原生站点',
+        'balanced-glass': 'A 平衡玻璃',
+        'immersive-video': 'B 沉浸视频',
+        'static-readable': 'C 静态可读',
+      }
+      if (status) status.textContent = feedback || `当前预设：${presetLabels[configController.effective?.preset] || presetLabels['balanced-glass']}`
+      for (const button of getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-preset]') || []) {
+        button.setAttribute('aria-pressed', button.getAttribute('data-canvas-preset') === (configController.effective?.preset || 'balanced-glass') ? 'true' : 'false')
+      }
+      const backgroundMode = String(appearance.background || 'static') === 'image'
+        ? 'image'
+        : String(appearance.background || 'static') === 'video' ? 'video' : 'original'
+      for (const button of getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-background]') || []) {
+        button.setAttribute('aria-pressed', button.getAttribute('data-canvas-background') === backgroundMode ? 'true' : 'false')
+      }
+      for (const input of getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-appearance]') || []) {
+        const key = input.getAttribute('data-canvas-appearance')
+        if (!key || document.activeElement === input) continue
+        if (appearance[key] != null) input.value = String(appearance[key])
+      }
+      const siteSummary = getSurface('site-card')?.querySelector('[data-canvas-site-summary]')
+      if (siteSummary) siteSummary.textContent = `${configController.siteKey.replace(/^https?:\/\//, '')} · ${locationText()}`
+      getShell()?.style.setProperty('--lsb-canvas-current-opacity', String(appearance.opacity ?? .72))
+    }
+
+    function canvasCommitAppearanceControls() {
+      const controls = getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-appearance]') || []
+      const values = [...controls].map((input) => [input.getAttribute('data-canvas-appearance'), input.value])
+      for (const [key, value] of values) {
+        const input = [...controls].find((node) => node.getAttribute('data-canvas-appearance') === key)
+        if (!key || String(configController.effective?.appearance?.[key] ?? '') === String(value ?? '')) continue
+        canvasSetAppearance(key, value, { defer: true })
+      }
+      saveState()
+      applyTokens()
+      canvasSyncAppearance()
+      syncMedia()
+    }
+
+    function canvasSaveAppearance() {
+      if (!configController.state) return
+      canvasCommitAppearanceControls()
+      canvasSyncAppearance('\u5916\u89c2\u5df2\u4fdd\u5b58')
+    }
+
+    function canvasSetAppearance(name, value, options = {}) {
+      if (!configController.setAppearance(name, value, options) || options.defer) return
+      applyTokens()
+      canvasSyncAppearance()
+      syncMedia()
+    }
+
+    function canvasSetBackgroundMode(mode) {
+      if (!configController.setBackgroundMode(mode)) return
+      canvasSyncAppearance()
+      syncMedia()
+    }
+
+    async function canvasSaveMediaFile(kind, file) {
+      if (!file || !ui.shellMedia?.validateMediaFile) return
+      const check = ui.shellMedia.validateMediaFile(file, { kind })
+      if (!check.ok) {
+        ui.toast?.(kind === 'video' ? '视频文件超过 50MB 或类型不受支持' : kind === 'image' ? '图片文件超过 20MB 或类型不受支持' : '字体文件超过 10MB 或类型不受支持', { type: 'error' })
+        return
+      }
+      try {
+        const key = await mediaController.saveFile(kind, file)
+        if (!configController.setMediaKey(kind, key)) return
+        canvasSyncAppearance()
+        syncMedia()
+        ui.toast?.('本地资源已保存并应用', { type: 'success' })
+      } catch (error) {
+        if (error?.name === 'AbortError') return
+        ui.toast?.('本地资源保存失败，已保留当前外观', { type: 'error' })
+      }
+    }
+
+    function canvasChoosePreset(preset) {
+      if (!configController.choosePreset(preset)) return
+      applyTokens()
+      canvasSyncAppearance()
+      syncMedia()
+    }
+
+    function canvasResetAppearance() {
+      if (!configController.resetAppearance()) return
+      applyTokens()
+      canvasSyncAppearance()
+      syncMedia()
+    }
+
+    function canvasResetLayout() {
+      if (!configController.resetLayout()) return
+      applySurfaceModes()
+    }
+
+    function bindAppearanceControls() {
+      const presets = getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-preset]') || []
+      for (const button of presets) {
+        if (button.dataset.canvasBound === '1') continue
+        button.dataset.canvasBound = '1'
+        button.addEventListener('click', () => canvasChoosePreset(button.getAttribute('data-canvas-preset')))
+      }
+      const backgroundButtons = getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-background]') || []
+      for (const button of backgroundButtons) {
+        if (button.dataset.canvasBound === '1') continue
+        button.dataset.canvasBound = '1'
+        button.addEventListener('click', () => canvasSetBackgroundMode(button.getAttribute('data-canvas-background')))
+      }
+      const controls = getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-appearance]') || []
+      for (const input of controls) {
+        if (input.dataset.canvasBound === '1') continue
+        input.dataset.canvasBound = '1'
+        const update = () => {
+          canvasSetAppearance(input.getAttribute('data-canvas-appearance'), input.value)
+        }
+        input.addEventListener(input.type === 'range' ? 'input' : 'change', update)
+      }
+      const mediaInputs = getSurface('appearance-sheet')?.querySelectorAll('[data-canvas-media-file]') || []
+      for (const input of mediaInputs) {
+        if (input.dataset.canvasBound === '1') continue
+        input.dataset.canvasBound = '1'
+        input.addEventListener('change', () => {
+          const file = input.files?.[0]
+          void canvasSaveMediaFile(input.getAttribute('data-canvas-media-file'), file).finally(() => { input.value = '' })
+        })
+      }
+      const resetAppearance = getSurface('appearance-sheet')?.querySelector('[data-canvas-reset-appearance]')
+      const resetLayout = getSurface('appearance-sheet')?.querySelector('[data-canvas-reset-layout]')
+      const saveAppearance = getSurface('appearance-sheet')?.querySelector('[data-canvas-save-appearance]')
+      if (saveAppearance && saveAppearance.dataset.canvasBound !== '1') {
+        saveAppearance.dataset.canvasBound = '1'
+        saveAppearance.addEventListener('click', canvasSaveAppearance)
+      }
+      if (resetAppearance && resetAppearance.dataset.canvasBound !== '1') {
+        resetAppearance.dataset.canvasBound = '1'
+        resetAppearance.addEventListener('click', canvasResetAppearance)
+      }
+      if (resetLayout && resetLayout.dataset.canvasBound !== '1') {
+        resetLayout.dataset.canvasBound = '1'
+        resetLayout.addEventListener('click', canvasResetLayout)
+      }
+    }
+
+    return { sync: canvasSyncAppearance, bind: bindAppearanceControls }
+  }
+  // Owns canvas surface geometry and pointer/keyboard layout interactions.
+  function createSkinSurfaceLayoutController({
+    window, configController, getSurfaceHost, getSurface, getViewport, stateApi,
+    persistRect, setSiteStatusExpanded, syncSiteSidebar, nextZIndex, closeSurface,
+  }) {
+    const { Element, HTMLElement } = window
+    const { CANVAS_DEFAULT_SURFACES, resolveSurfaceMode, clampSurfaceRect } = stateApi
+    let canvasDragState = null
+    let canvasDragRaf = 0
+
+    function canvasSurfaceRect(surface) {
+      if (!(surface instanceof Element)) return { x: 0, y: 0, width: 320, height: 240 }
+      const rect = surface.getBoundingClientRect?.()
+      const parse = (value, fallback) => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback
+      return {
+        x: parse(rect?.left, parseFloat(surface.style.left) || 0),
+        y: parse(rect?.top, parseFloat(surface.style.top) || 0),
+        width: parse(rect?.width, parseFloat(surface.style.width) || 420),
+        height: parse(rect?.height, parseFloat(surface.style.height) || 560),
+      }
+    }
+
+    function canvasApplySurfaceModes() {
+      if (!(getSurfaceHost() instanceof Element)) return
+      for (const id of ['ai-card', 'site-card', 'evidence-card']) {
+        const surface = getSurface(id)
+        if (!(surface instanceof Element)) continue
+        const mode = resolveSurfaceMode(configController.widthClass, id)
+        surface.dataset.surfaceMode = mode
+        const resizeHandle = surface.querySelector('[data-canvas-resize-handle]')
+        if (resizeHandle instanceof HTMLElement) resizeHandle.hidden = mode === 'rail'
+        const stored = configController.effective?.layout?.[configController.widthClass]?.[id]
+        if (mode === 'floating') {
+          const viewport = getViewport()
+          const defaultKey = id === 'ai-card' ? 'aiCard' : id === 'site-card' ? 'siteCard' : 'evidenceCard'
+          const configured = configController.effective?.surfaceDefaults?.[defaultKey] || CANVAS_DEFAULT_SURFACES[defaultKey] || {}
+          const minimum = id === 'ai-card' ? { width: 320, height: 260 } : { width: 240, height: 160 }
+          const fallback = {
+            x: Math.max(0, viewport.width - Math.max(minimum.width, Number(configured.width) || 420) - 24),
+            y: 88,
+            width: Number(configured.width) || 420,
+            height: Number(configured.height) || 560,
+          }
+          const rect = clampSurfaceRect(stored || fallback, viewport, minimum)
+          surface.style.left = `${rect.x}px`
+          surface.style.top = `${rect.y}px`
+          surface.style.width = String(rect.width) + 'px'
+          if (id === 'site-card' && !stored) surface.style.removeProperty('height')
+          else surface.style.height = String(rect.height) + 'px'
+          surface.style.right = 'auto'
+          surface.style.bottom = 'auto'
+        } else if (mode === 'rail') {
+          for (const prop of ['left', 'top', 'width', 'height', 'right', 'bottom']) surface.style.removeProperty(prop)
+          const statusOwnsSiteCard = id === 'site-card' && configController.widthClass === 'wide'
+          surface.hidden = statusOwnsSiteCard
+          surface.setAttribute('aria-hidden', String(statusOwnsSiteCard))
+          surface.setAttribute('data-canvas-surface-state', statusOwnsSiteCard ? 'closed' : 'open')
+        } else {
+          for (const prop of ['left', 'top', 'width', 'height', 'right', 'bottom']) surface.style.removeProperty(prop)
+        }
+      }
+      const statusHost = getSurface('site-status')?.querySelector('[data-canvas-site-status-host]')
+      if (statusHost instanceof Element && configController.widthClass !== 'wide') setSiteStatusExpanded(statusHost, false, false)
+      if (configController.widthClass === 'wide') syncSiteSidebar()
+    }
+
+    function canvasEndDrag(commit = true) {
+      const state = canvasDragState
+      if (!state) return
+      if (canvasDragRaf) {
+        const cancel = window.cancelAnimationFrame || window.clearTimeout
+        cancel(canvasDragRaf)
+        canvasDragRaf = 0
+      }
+      window.removeEventListener('pointermove', state.move)
+      window.removeEventListener('pointerup', state.up)
+      window.removeEventListener('pointercancel', state.cancel || state.up)
+      state.surface.removeAttribute('data-canvas-dragging')
+      const finalRect = clampSurfaceRect({
+        ...state.start,
+        x: state.start.x + (state.kind === 'resize' ? 0 : state.dx),
+        y: state.start.y + (state.kind === 'resize' ? 0 : state.dy),
+        width: state.start.width + (state.kind === 'resize' ? state.dx : 0),
+        height: state.start.height + (state.kind === 'resize' ? state.dy : 0),
+      }, getViewport(), { width: 320, height: 220 })
+      state.surface.style.transform = ''
+      if (commit) {
+        state.surface.style.left = `${finalRect.x}px`
+        state.surface.style.top = `${finalRect.y}px`
+        if (state.kind === 'resize') {
+          state.surface.style.width = `${finalRect.width}px`
+          state.surface.style.height = `${finalRect.height}px`
+        }
+        persistRect(state.id, finalRect)
+      } else {
+        state.surface.style.left = `${state.start.x}px`
+        state.surface.style.top = `${state.start.y}px`
+        if (state.kind === 'resize') {
+          if (state.styleWidth) state.surface.style.width = state.styleWidth
+          else state.surface.style.removeProperty('width')
+          if (state.styleHeight) state.surface.style.height = state.styleHeight
+          else state.surface.style.removeProperty('height')
+        }
+      }
+      state.surface.releasePointerCapture?.(state.pointerId)
+      canvasDragState = null
+    }
+
+    function canvasBeginDrag(event, surface) {
+      if (!(surface instanceof Element) || surface.dataset.surfaceMode !== 'floating') return
+      if (event.button != null && event.button !== 0) return
+      if (event.target?.closest?.('[data-canvas-close],button,input,textarea,select,a')) return
+      const start = canvasSurfaceRect(surface)
+      const pointerId = event.pointerId
+      const state = { id: surface.getAttribute('data-surface') || '', surface, start, dx: 0, dy: 0, pointerId, move: null, up: null }
+      state.move = (moveEvent) => {
+        if (pointerId != null && moveEvent.pointerId != null && moveEvent.pointerId !== pointerId) return
+        state.dx = Number(moveEvent.clientX || 0) - Number(event.clientX || 0)
+        state.dy = Number(moveEvent.clientY || 0) - Number(event.clientY || 0)
+        if (canvasDragRaf) return
+        const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
+        canvasDragRaf = raf(() => {
+          canvasDragRaf = 0
+          if (state.kind === 'resize') {
+            surface.style.width = `${Math.max(1, Math.round(state.start.width + state.dx))}px`
+            surface.style.height = `${Math.max(1, Math.round(state.start.height + state.dy))}px`
+          } else {
+            surface.style.transform = `translate3d(${Math.round(state.dx)}px,${Math.round(state.dy)}px,0)`
+          }
+        })
+      }
+      state.up = () => canvasEndDrag(true)
+      state.cancel = () => canvasEndDrag(false)
+      canvasDragState = state
+      surface.dataset.canvasDragging = 'true'
+      surface.setPointerCapture?.(pointerId)
+      window.addEventListener('pointermove', state.move)
+      window.addEventListener('pointerup', state.up, { once: true })
+      window.addEventListener('pointercancel', state.cancel, { once: true })
+      event.preventDefault?.()
+    }
+
+    function canvasBeginResize(event, surface) {
+      if (!(surface instanceof Element) || surface.dataset.surfaceMode !== 'floating') return
+      if (event.button != null && event.button !== 0) return
+      const start = canvasSurfaceRect(surface)
+      const pointerId = event.pointerId
+      const state = { id: surface.getAttribute('data-surface') || '', surface, start, styleWidth: surface.style.width, styleHeight: surface.style.height, dx: 0, dy: 0, pointerId, kind: 'resize', move: null, up: null }
+      state.move = (moveEvent) => {
+        if (pointerId != null && moveEvent.pointerId != null && moveEvent.pointerId !== pointerId) return
+        state.dx = Number(moveEvent.clientX || 0) - Number(event.clientX || 0)
+        state.dy = Number(moveEvent.clientY || 0) - Number(event.clientY || 0)
+        if (canvasDragRaf) return
+        const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
+        canvasDragRaf = raf(() => {
+          canvasDragRaf = 0
+          surface.style.width = `${Math.max(1, Math.round(state.start.width + state.dx))}px`
+          surface.style.height = `${Math.max(1, Math.round(state.start.height + state.dy))}px`
+        })
+      }
+      state.up = () => canvasEndDrag(true)
+      state.cancel = () => canvasEndDrag(false)
+      canvasDragState = state
+      surface.dataset.canvasDragging = 'true'
+      surface.setPointerCapture?.(pointerId)
+      window.addEventListener('pointermove', state.move)
+      window.addEventListener('pointerup', state.up, { once: true })
+      window.addEventListener('pointercancel', state.cancel, { once: true })
+      event.preventDefault?.()
+    }
+
+    function canvasKeyboardMove(event, surface) {
+      if (!(surface instanceof Element) || surface.dataset.surfaceMode !== 'floating') return
+      const id = surface.getAttribute('data-surface') || ''
+      const current = canvasSurfaceRect(surface)
+      const step = event.shiftKey ? 16 : 8
+      let next = { ...current }
+      if (event.shiftKey && event.key === 'ArrowLeft') next.width -= step
+      else if (event.shiftKey && event.key === 'ArrowRight') next.width += step
+      else if (event.shiftKey && event.key === 'ArrowUp') next.height -= step
+      else if (event.shiftKey && event.key === 'ArrowDown') next.height += step
+      else if (event.key === 'ArrowLeft') next.x -= step
+      else if (event.key === 'ArrowRight') next.x += step
+      else if (event.key === 'ArrowUp') next.y -= step
+      else if (event.key === 'ArrowDown') next.y += step
+      else if (event.key === 'Home') {
+        surface.style.zIndex = String(8010 + nextZIndex())
+        event.preventDefault()
+        return
+      }
+      else if (event.key === 'End') {
+        surface.style.zIndex = '8000'
+        event.preventDefault()
+        return
+      }
+      else if (event.key === 'Escape') { closeSurface(id); return }
+      else return
+      event.preventDefault()
+      const clean = clampSurfaceRect(next, getViewport(), { width: 320, height: 220 })
+      surface.style.left = `${clean.x}px`
+      surface.style.top = `${clean.y}px`
+      persistRect(id, clean)
+    }
+
+    return {
+      applyModes: canvasApplySurfaceModes, endDrag: canvasEndDrag,
+      beginDrag: canvasBeginDrag, beginResize: canvasBeginResize, keyboardMove: canvasKeyboardMove,
+      get dragging() { return !!canvasDragState },
+    }
+  }
+  // Owns canvas scroll targets, frame scheduling, and window listener lifecycle.
+  function createSkinCanvasScrollController({
+    window, document, getSurface, getViewport, isAsideWide, getContentScroller,
+    syncScrollBridge, updateProfileScroll, applyPageClass, applySurfaceModes,
+  }) {
+    const { Element } = window
+    let canvasScrollBound = false
+    let canvasScrollLast = 0
+    let canvasScrollRaf = 0
+    let canvasScrollHandler = null
+    let canvasResizeHandler = null
+    let canvasScrollTarget = null
+
+    function canvasScrollSync() {
+      canvasScrollRaf = 0
+      const y = canvasScrollY()
+      const status = getSurface('top-status')
+      if (!status) return
+      const previous = canvasScrollLast
+      const down = y > previous + 2
+      const up = y < previous - 2
+      canvasScrollLast = y
+      if (down || up) status.dataset.compact = down && y > 48 ? 'true' : 'false'
+      updateProfileScroll(y, previous)
+    }
+
+    function canvasHomeScrollRoot() {
+      const root = document.documentElement
+      const canvasMode = root.classList.contains('lsb-canvas-mode')
+      if (!root.classList.contains('lsb-skin-shell-on')) return null
+      if (!root.classList.contains('lsb-skin-shell-home')) return null
+      if (canvasMode) {
+        if (!root.classList.contains('lsb-canvas-page-home')) return null
+        if (getViewport().width < 700) return null
+      } else if (!isAsideWide()) {
+        return null
+      }
+      const panel = canvasMode
+        ? document.querySelector('.lsb-canvas-content-root > .home-shell .main-panel')
+        : document.querySelector('body > main.wrap .home-shell .main-panel')
+      return panel instanceof Element ? panel : null
+    }
+
+    function canvasScrollRoot() {
+      return canvasHomeScrollRoot() || (getContentScroller() instanceof Element ? getContentScroller() : null)
+    }
+
+    function canvasSyncScrollTarget() {
+      const next = canvasScrollRoot()
+      syncScrollBridge(next)
+      if (next === canvasScrollTarget) return
+      const previousTarget = canvasScrollTarget
+      const carryX = !(previousTarget instanceof Element) && next instanceof Element
+        ? Number(window.scrollX || document.documentElement?.scrollLeft || 0)
+        : 0
+      const carryY = !(previousTarget instanceof Element) && next instanceof Element
+        ? Number(window.scrollY || document.documentElement?.scrollTop || 0)
+        : 0
+      if (previousTarget instanceof Element && canvasScrollHandler) {
+        previousTarget.removeEventListener('scroll', canvasScrollHandler)
+      }
+      canvasScrollTarget = next
+      if (canvasScrollTarget instanceof Element) {
+        if (carryX > 0 && Number(canvasScrollTarget.scrollLeft || 0) === 0) canvasScrollTarget.scrollLeft = carryX
+        if (carryY > 0 && Number(canvasScrollTarget.scrollTop || 0) === 0) canvasScrollTarget.scrollTop = carryY
+        if (canvasScrollHandler) canvasScrollTarget.addEventListener('scroll', canvasScrollHandler, { passive: true })
+      }
+      canvasScrollLast = canvasScrollY()
+    }
+
+    function canvasScrollY() {
+      if (canvasScrollTarget instanceof Element) return Number(canvasScrollTarget.scrollTop || 0)
+      return Number(window.scrollY || document.documentElement?.scrollTop || 0)
+    }
+
+    function canvasScheduleScroll() {
+      if (canvasScrollRaf) return
+      const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
+      canvasScrollRaf = raf(canvasScrollSync)
+    }
+
+    function canvasBindWindow() {
+      if (canvasScrollBound) return
+      canvasScrollBound = true
+      canvasScrollHandler = canvasScheduleScroll
+      canvasResizeHandler = () => {
+        applyPageClass()
+        applySurfaceModes()
+        canvasScheduleScroll()
+      }
+      window.addEventListener('scroll', canvasScrollHandler, { passive: true })
+      window.addEventListener('resize', canvasResizeHandler)
+      canvasSyncScrollTarget()
+      canvasScrollLast = canvasScrollY()
+      updateProfileScroll(canvasScrollLast, canvasScrollLast)
+    }
+
+    function canvasUnbindWindow() {
+      if (!canvasScrollBound) return
+      canvasScrollBound = false
+      if (canvasScrollHandler) window.removeEventListener('scroll', canvasScrollHandler)
+      if (canvasResizeHandler) window.removeEventListener('resize', canvasResizeHandler)
+      canvasScrollTarget?.removeEventListener('scroll', canvasScrollHandler)
+      canvasScrollHandler = null
+      canvasResizeHandler = null
+      canvasScrollTarget = null
+      if (canvasScrollRaf) {
+        const cancel = window.cancelAnimationFrame || window.clearTimeout
+        cancel(canvasScrollRaf)
+        canvasScrollRaf = 0
+      }
+    }
+
+    return {
+      homeRoot: canvasHomeScrollRoot, syncTarget: canvasSyncScrollTarget,
+      schedule: canvasScheduleScroll, bind: canvasBindWindow, unbind: canvasUnbindWindow,
+      get bound() { return canvasScrollBound },
+      get target() { return canvasScrollTarget },
+    }
+  }
+  // Owns the existing shared-window compatibility layout and interaction state.
+  function createSkinWindowController({
+    window, document, ui, store, configController, contentController, layoutApi, styleApi,
+    getLocation, getAsideContext, getAsidePreferredId, getAsideActiveId, setAsideActive, findOutlet, clone,
+  }) {
+    const { Element } = window
+    let shellWindowLayout = null
+    let shellWindowRegistry = []
+    let shellLayoutKey = ''
+    let shellLayoutSaveTimer = 0
+    let windowInteractionBound = false
+    let windowInteractionState = null
+    let windowInteractionRaf = 0
+    let responsiveBound = false
+    let responsiveHandler = null
+    let narrowActiveWindow = 'content'
+    const externalWindowViews = new Map()
+    const LAYOUT_MIGRATION_KEY = 'layoutMigrationVersion'
+    const LAYOUT_MIGRATION_VERSION = 1
+    const LAYOUT_SAVE_DEBOUNCE = 150
+    const BUILTIN_WINDOWS = Object.freeze([
+      { id: 'nav', label: '导航', order: 10, min: { width: 200, height: 160 }, defaultRect: { width: 240, height: 640 } },
+      { id: 'content', label: '正文', order: 20, min: { width: 320, height: 240 }, defaultRect: { width: 720, height: 640 } },
+      { id: 'site', label: '站点', order: 30, min: { width: 240, height: 160 }, defaultRect: { width: 280, height: 640 } },
+    ])
+
     function shellWindowEnabled() {
       return false
     }
@@ -10493,7 +13071,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
 
     function cssPixels(name, fallback) {
       try {
-        const value = getComputedStyle(document.documentElement).getPropertyValue(name)
+        const value = window.getComputedStyle(document.documentElement).getPropertyValue(name)
         const parsed = Number.parseFloat(value)
         return Number.isFinite(parsed) ? parsed : fallback
       } catch {
@@ -10502,9 +13080,9 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function shellLayoutStorageKey(viewport = shellViewport(shellWorkspace())) {
-      if (!shellLayoutApi) return ''
-      const bucket = shellLayoutApi.widthBucket(viewport.width)
-      return shellLayoutApi.layoutStorageKey(location.origin, bucket)
+      if (!layoutApi) return ''
+      const bucket = layoutApi.widthBucket(viewport.width)
+      return layoutApi.layoutStorageKey(getLocation().origin, bucket)
     }
 
     function readLegacyShellLayout() {
@@ -10512,12 +13090,12 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         header: cssPixels('--lsb-shell-header', 48),
         rail: cssPixels('--lsb-shell-rail', 240),
         aside: cssPixels('--lsb-shell-aside', 280),
-        asideActiveId: asidePreferredId,
+        asideActiveId: getAsidePreferredId(),
       }
     }
 
     function saveShellLayout({ immediate = false } = {}) {
-      if (!shellWindowLayout || !shellLayoutKey || !shellLayoutApi) return null
+      if (!shellWindowLayout || !shellLayoutKey || !layoutApi) return null
       if (!immediate) {
         window.clearTimeout(shellLayoutSaveTimer)
         shellLayoutSaveTimer = window.setTimeout(() => {
@@ -10529,32 +13107,32 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       window.clearTimeout(shellLayoutSaveTimer)
       shellLayoutSaveTimer = 0
       const viewport = shellViewport(shellWorkspace())
-      const clean = shellLayoutApi.sanitizeShellLayout(shellWindowLayout, {
+      const clean = layoutApi.sanitizeShellLayout(shellWindowLayout, {
         ...viewport,
         registry: shellWindowRegistry,
       })
       clean.updatedAt = Date.now()
       shellWindowLayout = clean
       try {
-        api.store.set(shellLayoutKey, structuredCloneSafe(clean))
+        store.set(shellLayoutKey, clone(clean))
       } catch {
         /* 存储不可用时继续保留内存布局，不能阻塞壳。 */
       }
-      return structuredCloneSafe(clean)
+      return clone(clean)
     }
 
     function loadShellLayout(viewport = shellViewport(shellWorkspace())) {
-      if (!shellLayoutApi) return null
+      if (!layoutApi) return null
       const key = shellLayoutStorageKey(viewport)
       shellLayoutKey = key
       let stored = null
       try {
-        stored = api.store.get(key, null)
+        stored = store.get(key, null)
       } catch {
         stored = null
       }
       if (stored && typeof stored === 'object' && stored.windows && typeof stored.windows === 'object') {
-        const clean = shellLayoutApi.sanitizeShellLayout(stored, {
+        const clean = layoutApi.sanitizeShellLayout(stored, {
           ...viewport,
           registry: shellWindowRegistry,
         })
@@ -10562,23 +13140,23 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       }
 
       let migrationVersion = 0
-      try { migrationVersion = Number(api.store.get(LAYOUT_MIGRATION_KEY, 0)) || 0 } catch { migrationVersion = 0 }
+      try { migrationVersion = Number(store.get(LAYOUT_MIGRATION_KEY, 0)) || 0 } catch { migrationVersion = 0 }
       if (!stored && migrationVersion < LAYOUT_MIGRATION_VERSION) {
-        const migrated = shellLayoutApi.migrateLegacyShellLayout({
+        const migrated = layoutApi.migrateLegacyShellLayout({
           viewport,
           legacy: readLegacyShellLayout(),
           registry: shellWindowRegistry,
         })
         migrated.updatedAt = Date.now()
-        try { api.store.set(LAYOUT_MIGRATION_KEY, LAYOUT_MIGRATION_VERSION) } catch { /* optional marker */ }
+        try { store.set(LAYOUT_MIGRATION_KEY, LAYOUT_MIGRATION_VERSION) } catch { /* optional marker */ }
         return migrated
       }
-      return shellLayoutApi.defaultShellLayout({ ...viewport, registry: shellWindowRegistry })
+      return layoutApi.defaultShellLayout({ ...viewport, registry: shellWindowRegistry })
     }
 
     function ensureRegisteredShellLayout(layout, viewport) {
-      if (!layout || !shellLayoutApi) return layout
-      const defaults = shellLayoutApi.defaultShellLayout({ ...viewport, registry: shellWindowRegistry })
+      if (!layout || !layoutApi) return layout
+      const defaults = layoutApi.defaultShellLayout({ ...viewport, registry: shellWindowRegistry })
       for (const [id, state] of Object.entries(defaults.windows || {})) {
         if (!layout.windows?.[id]) layout.windows[id] = state
         if (!layout.zOrder?.includes(id)) layout.zOrder.push(id)
@@ -10686,14 +13264,14 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       host.dataset.lsbShellActive = state.visible === false ? 'false' : 'true'
       host.dataset.lsbShellWindowId = id
       host.dataset.lsbShellCollapsed = state.collapsed === true ? 'true' : 'false'
-      const localGlass = !!shellStyleApi?.sanitizeTokenValue?.('glassOpacity', state.overrides?.glassOpacity)
-        || !!shellStyleApi?.sanitizeTokenValue?.('glassBlur', state.overrides?.glassBlur)
-      host.dataset.lsbShellGlass = cfg.glass || localGlass ? 'true' : 'false'
+      const localGlass = !!styleApi?.sanitizeTokenValue?.('glassOpacity', state.overrides?.glassOpacity)
+        || !!styleApi?.sanitizeTokenValue?.('glassBlur', state.overrides?.glassBlur)
+      host.dataset.lsbShellGlass = configController.config.glass || localGlass ? 'true' : 'false'
       const oldOverrideProps = host.__lsbShellOverrideProps || new Set()
       for (const prop of oldOverrideProps) host.style.removeProperty(prop)
       const nextOverrideProps = new Set()
-      if (shellStyleApi && state.overrides && typeof state.overrides === 'object') {
-        const overrideCss = shellStyleApi.tokenCss(state.overrides)
+      if (styleApi && state.overrides && typeof state.overrides === 'object') {
+        const overrideCss = styleApi.tokenCss(state.overrides)
         for (const declaration of overrideCss.split(';')) {
           const index = declaration.indexOf(':')
           if (index <= 0) continue
@@ -10717,8 +13295,8 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
 
     function collectShellWindowRegistry(el = document.getElementById('lsb-shell')) {
       const externalViews = syncExternalShellWindows(el)
-      const external = typeof api.ui.shellWindows === 'function'
-        ? api.ui.shellWindows(asideContext())
+      const external = typeof ui.shellWindows === 'function'
+        ? ui.shellWindows(getAsideContext())
         : []
       const records = [...BUILTIN_WINDOWS]
       for (const item of externalViews) {
@@ -10752,14 +13330,14 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       if (!layout) return
       for (const [id, state] of Object.entries(layout.windows || {})) applyShellWindowState(id, state)
       const workspace = shellWorkspace()
-      if (workspace) workspace.dataset.lsbShellBucket = shellLayoutApi.widthBucket(shellViewport(workspace).width)
+      if (workspace) workspace.dataset.lsbShellBucket = layoutApi.widthBucket(shellViewport(workspace).width)
     }
 
     function syncExternalShellWindows(el = document.getElementById('lsb-shell')) {
       const workspace = shellWorkspace(el)
       if (!(workspace instanceof Element)) return []
-      const context = asideContext()
-      const asideRecords = api.ui.shellAsideViews(context)
+      const context = getAsideContext()
+      const asideRecords = ui.shellAsideViews(context)
         .filter((view) => view.windowId && view.windowId !== 'site')
         .map((view) => ({
           id: String(view.windowId),
@@ -10769,7 +13347,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
           defaultRect: view.defaultRect || { width: 376, height: 600 },
           view,
         }))
-      const registered = typeof api.ui.shellWindows === 'function' ? api.ui.shellWindows(context) : []
+      const registered = typeof ui.shellWindows === 'function' ? ui.shellWindows(context) : []
       const records = [...asideRecords, ...registered.map((view) => ({
         id: String(view.windowId || view.id),
         label: view.label || view.id,
@@ -10804,7 +13382,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
           current.body = body
         }
         host.dataset.lsbShellExternal = 'true'
-        host.dataset.lsbShellOpen = record.view?.windowId ? (record.view.id === asideActiveId ? 'true' : 'false') : 'true'
+        host.dataset.lsbShellOpen = record.view?.windowId ? (record.view.id === getAsideActiveId() ? 'true' : 'false') : 'true'
         next.set(record.id, current)
       }
       for (const [id, current] of externalWindowViews) {
@@ -10838,19 +13416,19 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function arrangeShellWindows() {
-      if (!shellWindowLayout || !shellLayoutApi) return null
+      if (!shellWindowLayout || !layoutApi) return null
       const workspace = shellWorkspace()
-      shellWindowLayout = shellLayoutApi.arrangeShellWindows(shellWindowLayout, shellWindowRegistry, shellViewport(workspace))
+      shellWindowLayout = layoutApi.arrangeShellWindows(shellWindowLayout, shellWindowRegistry, shellViewport(workspace))
       applyShellWindowLayout(shellWindowLayout)
       saveShellLayout({ immediate: true })
-      return structuredCloneSafe(shellWindowLayout)
+      return clone(shellWindowLayout)
     }
 
     function resetShellWindow(id) {
-      if (!shellWindowLayout || !shellLayoutApi) return null
+      if (!shellWindowLayout || !layoutApi) return null
       const wanted = String(id || '')
       const workspace = shellWorkspace()
-      const defaults = shellLayoutApi.defaultShellLayout({ ...shellViewport(workspace), registry: shellWindowRegistry })
+      const defaults = layoutApi.defaultShellLayout({ ...shellViewport(workspace), registry: shellWindowRegistry })
       if (wanted && shellWindowLayout.windows[wanted] && defaults.windows[wanted]) {
         shellWindowLayout.windows[wanted] = defaults.windows[wanted]
       } else if (!wanted) {
@@ -10858,7 +13436,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       }
       applyShellWindowLayout(shellWindowLayout)
       saveShellLayout({ immediate: true })
-      return structuredCloneSafe(shellWindowLayout)
+      return clone(shellWindowLayout)
     }
 
     function openWindowInspector(id) {
@@ -10879,7 +13457,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       title.style.cssText = 'font-size:16px;margin:0 0 12px;'
       panel.append(title)
       const fields = new Map()
-      const styleModel = shellStyleApi?.moduleInspectorModel?.(shellWindowLayout, wanted) || { values: {}, inherited: {} }
+      const styleModel = styleApi?.moduleInspectorModel?.(shellWindowLayout, wanted) || { values: {}, inherited: {} }
       const overrideNames = ['fontFamily', 'baseFontSize', 'glassOpacity', 'glassBlur']
       const addField = (name, labelText, type = 'text', value = '', step = '') => {
         const label = document.createElement('label')
@@ -10968,7 +13546,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         }
         next.overrides = overrides
         shellWindowLayout.windows[wanted] = next
-        shellWindowLayout = shellLayoutApi.sanitizeShellLayout(shellWindowLayout, {
+        shellWindowLayout = layoutApi.sanitizeShellLayout(shellWindowLayout, {
           ...shellViewport(shellWorkspace()),
           registry: shellWindowRegistry,
         })
@@ -10982,7 +13560,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function windowBounds() {
-      return shellLayoutApi
+      return layoutApi
         ? { x: 0, y: 0, ...shellViewport(shellWorkspace()) }
         : { x: 0, y: 0, width: Number(window.innerWidth || 1), height: Number(window.innerHeight || 1) }
     }
@@ -11021,7 +13599,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         }
         if (edge.includes('s')) next.height += dy
       }
-      return shellLayoutApi.snapRect(next, {
+      return layoutApi.snapRect(next, {
         bounds: windowBounds(),
         others: windowOthers(state.id),
         min: windowMin(state.id),
@@ -11149,7 +13727,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         if (event.key === 'ArrowUp') next.y -= step
         if (event.key === 'ArrowDown') next.y += step
       }
-      const clean = shellLayoutApi.snapRect(next, {
+      const clean = layoutApi.snapRect(next, {
         bounds: windowBounds(),
         others: windowOthers(id),
         min: windowMin(id),
@@ -11166,7 +13744,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       const workspace = shellWorkspace(el)
       const viewport = shellViewport(workspace)
       const width = viewport.width
-      const bucket = shellLayoutApi.widthBucket(width)
+      const bucket = layoutApi.widthBucket(width)
       const key = shellLayoutStorageKey(viewport)
       if (shellWindowLayout && shellLayoutKey && key !== shellLayoutKey) {
         saveShellLayout({ immediate: true })
@@ -11174,7 +13752,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         shellWindowLayout = ensureRegisteredShellLayout(shellWindowLayout, viewport)
         applyShellWindowLayout(shellWindowLayout)
       } else if (shellWindowLayout) {
-        shellWindowLayout = shellLayoutApi.sanitizeShellLayout(shellWindowLayout, {
+        shellWindowLayout = layoutApi.sanitizeShellLayout(shellWindowLayout, {
           ...viewport,
           registry: shellWindowRegistry,
         })
@@ -11194,7 +13772,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
           button.addEventListener('click', () => {
             narrowActiveWindow = item.id
             const external = externalWindowViews.get(item.id)
-            if (external?.view?.id) asideSetActive(external.view.id, el.querySelector('#lsb-shell-aside'), true)
+            if (external?.view?.id) setAsideActive(external.view.id, el.querySelector('#lsb-shell-aside'), true)
             focusShellWindow(item.id)
             syncResponsiveMode(el)
           })
@@ -11258,70 +13836,11 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       }
     }
 
-    function isNativeSidebarNode(node) {
-      return node instanceof Element
-        && node.matches('aside.sidebar')
-        && node.id !== 'mobile-menu-drawer'
-        && !node.classList.contains('mobile-menu-drawer')
-    }
-
-    function detachNativeSidebars(outlet) {
-      if (!(outlet instanceof Element)) return
-      for (const side of [...outlet.querySelectorAll('aside.sidebar')].filter(isNativeSidebarNode)) {
-        if (!nativeSidebarHomes.has(side)) {
-          nativeSidebarHomes.set(side, { parent: side.parentNode, next: side.nextSibling })
-        }
-        if (side.parentNode !== document.body) document.body.append(side)
-      }
-      for (const rail of nativeLeftRails(outlet)) {
-        if (!nativeSidebarHomes.has(rail)) {
-          nativeSidebarHomes.set(rail, { parent: rail.parentNode, next: rail.nextSibling })
-        }
-        rail.classList.add('lsb-native-left-hidden')
-        if (rail.parentNode !== document.body) document.body.append(rail)
-      }
-    }
-
-    function restoreDetachedNativeSidebars() {
-      for (const [side, home] of nativeSidebarHomes) {
-        const parent = home?.parent
-        if (parent instanceof Node && parent.isConnected && side.parentNode !== parent) {
-          try {
-            parent.insertBefore(side, home.next && home.next.parentNode === parent ? home.next : null)
-          } catch {
-            try { parent.append(side) } catch { /* stale route node */ }
-          }
-        }
-      }
-      nativeSidebarHomes.clear()
-    }
-
-    function syncShellScrollBridge(root = null) {
-      const next = root instanceof Element ? root : null
-      if (scrollBridge?.root === next) return
-      scrollBridge?.dispose?.()
-      scrollBridge = null
-      if (!next || typeof api.ui.shellScrollBridge !== 'function') return
-      try {
-        scrollBridge = api.ui.shellScrollBridge({ windowRef: window, root: next })
-      } catch {
-        scrollBridge = null
-      }
-    }
-
     function mountContentWindow(el = document.getElementById('lsb-shell')) {
       const content = shellHost('content', el)
       const body = content?.querySelector?.('[data-lsb-shell-window-body]')
       if (!(content instanceof Element) || !(body instanceof Element)) return
-      const outlet = findRouteOutlet()
-      if (!(outlet instanceof Element)) return
-      if (contentOutlet && contentOutlet !== outlet) restoreDetachedNativeSidebars()
-      if (!contentHome) contentHome = { parent: outlet.parentNode, next: outlet.nextSibling }
-      contentOutlet = outlet
-      detachNativeSidebars(outlet)
-      if (outlet.parentNode !== body) body.append(outlet)
-      contentScroller = body
-      syncShellScrollBridge(body)
+      contentController.mount(findOutlet(), body)
     }
 
     function mountShellWindows(el = document.getElementById('lsb-shell')) {
@@ -11339,7 +13858,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       const viewport = shellViewport(workspace)
       const key = shellLayoutStorageKey(viewport)
       if (shellWindowLayout && shellLayoutKey === key) {
-        shellWindowLayout = shellLayoutApi.sanitizeShellLayout(shellWindowLayout, { ...viewport, registry: shellWindowRegistry })
+        shellWindowLayout = layoutApi.sanitizeShellLayout(shellWindowLayout, { ...viewport, registry: shellWindowRegistry })
       } else {
         if (shellWindowLayout && shellLayoutKey && shellLayoutKey !== key) saveShellLayout({ immediate: true })
         shellWindowLayout = loadShellLayout(viewport)
@@ -11356,35 +13875,238 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       saveShellLayout({ immediate: true })
       window.clearTimeout(shellLayoutSaveTimer)
       shellLayoutSaveTimer = 0
-      restoreDetachedNativeSidebars()
-      const outlet = contentOutlet
-      if (outlet && contentHome?.parent) {
-        try {
-          contentHome.parent.insertBefore(outlet, contentHome.next && contentHome.next.parentNode === contentHome.parent ? contentHome.next : null)
-        } catch {
-          document.body.append(outlet)
-        }
-      }
-      contentHome = null
-      contentOutlet = null
-      contentScroller = null
-      syncShellScrollBridge()
+      contentController.release()
       shellWindowLayout = null
       shellWindowRegistry = []
       shellLayoutKey = ''
     }
 
-    /* ── M17 单一阅读画布 ─────────────────────────────────────────────── */
-    function canvasPageType() {
-      const type = String(api.page?.type || '')
-      if (['home', 'forum', 'topic', 'user', 'settings'].includes(type)) return type
-      const path = pagePath()
-      if (path === '/' || path === '/index.php') return 'home'
-      if (/^\/forum\/\d+/.test(path) || /^\/category\/\d+/.test(path)) return 'forum'
-      if (/^\/topic\/\d+/.test(path)) return 'topic'
-      if (/^\/user(?:\/|$)/.test(path)) return 'user'
-      if (/settings|preferences|config/i.test(path)) return 'settings'
-      return 'page'
+    return {
+      enabled: shellWindowEnabled, workspace: shellWorkspace, viewport: shellViewport, host: shellHost,
+      focus: focusShellWindow, arrange: arrangeShellWindows, reset: resetShellWindow,
+      unbind: unbindWindowInteractions, mount: mountShellWindows, unmount: unmountShellWindows,
+      get layout() { return shellWindowLayout },
+      get registry() { return shellWindowRegistry },
+      get externalViews() { return externalWindowViews },
+    }
+  }
+  // Owns the canvas host, panel presentation and delegated interactions.
+  // Dependencies are invoked lazily; setup retains global lifecycle orchestration.
+  function createSkinCanvasHostController({
+    window, document, configController, aiMarkup: CANVAS_AI_MARKUP, getPage,
+    pluginCatalog, siteCardsController, hooks,
+  }) {
+    const { Element, HTMLElement, CustomEvent, Event, MutationObserver, history, queueMicrotask } = window
+    const {
+      canvasPageType,
+      locationText,
+      navigationEntries,
+      findRouteOutlet,
+      nativeSidebars,
+      markNative,
+      renderCanvasTopLinks,
+      restoreCanvasTopLinks,
+      canvasMountProfile,
+      canvasRestoreProfile,
+      canvasSearchSetOpen,
+      adoptSearch,
+      restoreSearch,
+      adoptThemeToggle,
+      canvasCloseContextPill,
+      canvasNativeAction,
+      canvasBindSelection,
+      canvasUnbindSelection,
+      canvasEndDrag,
+      canvasBeginDrag,
+      canvasBeginResize,
+      canvasKeyboardMove,
+      canvasApplySurfaceModes,
+      canvasSyncAppearance,
+      bindAppearance,
+      canvasBindWindow,
+      canvasUnbindWindow,
+      canvasScheduleScroll,
+      canvasSyncScrollTarget,
+      isCanvasScrollBound,
+      isSurfaceDragging,
+    } = hooks
+    let canvasShell = null
+    let canvasSurfaceHost = null
+    let canvasActiveSheet = ''
+    let canvasFocusReturn = null
+    let canvasSearchOutsideHandler = null
+    let canvasZIndex = 0
+    let canvasSiteStatusHost = null
+    let canvasSiteStatusLocked = false
+    let canvasSidebarObserver = null
+
+    function renderPluginFeatureEntries() {
+      const host = canvasSurface('plugin-features-sheet')?.querySelector('[data-plugin-feature-list]')
+      if (!(host instanceof Element)) return
+      host.replaceChildren()
+      const entries = pluginCatalog.features()
+      if (!entries.length) {
+        const empty = document.createElement('p')
+        empty.className = 'lsb-empty'
+        empty.textContent = '目前没有可用的插件功能。'
+        host.append(empty)
+        return
+      }
+      for (const entry of entries) {
+        const row = document.createElement('div')
+        row.className = 'lsb-plugin-entry'
+        row.setAttribute('data-plugin-feature-entry', entry.plugin)
+        const action = document.createElement('button')
+        action.type = 'button'
+        action.className = 'lsb-plugin-entry-main'
+        action.setAttribute('data-plugin-feature-action', entry.plugin)
+        action.textContent = entry.label
+        row.append(action)
+        if (entry.hasSettings) {
+          const settings = document.createElement('button')
+          settings.type = 'button'
+          settings.className = 'lsb-plugin-entry-settings'
+          settings.setAttribute('data-plugin-settings-open', entry.plugin)
+          settings.setAttribute('aria-label', `打开${entry.label}设置`)
+          settings.title = `${entry.label}设置`
+          settings.textContent = '⚙'
+          row.append(settings)
+        }
+        host.append(row)
+      }
+    }
+
+    function pluginStateLabel(state) {
+      if (state === 'disabled') return '已停用'
+      if (state === 'skipped') return '当前页面未启用'
+      if (state === 'error') return '异常'
+      if (state === 'registered') return '等待启用'
+      return ''
+    }
+
+    function renderPluginSettingsEntries() {
+      const host = canvasSurface('plugin-settings-sheet')?.querySelector('[data-plugin-settings-list]')
+      if (!(host instanceof Element)) return
+      host.replaceChildren()
+      const entries = pluginCatalog.settings()
+      if (!entries.length) {
+        const empty = document.createElement('p')
+        empty.className = 'lsb-empty'
+        empty.textContent = '没有声明配置项的插件。'
+        host.append(empty)
+        return
+      }
+      for (const entry of entries) {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'lsb-plugin-settings-entry'
+        button.setAttribute('data-plugin-settings-entry', entry.id)
+        const name = document.createElement('span')
+        name.textContent = entry.name || entry.id
+        button.append(name)
+        const state = pluginStateLabel(entry.state)
+        if (state) {
+          const status = document.createElement('small')
+          status.textContent = state
+          button.append(status)
+        }
+        host.append(button)
+      }
+    }
+
+    function canvasRestoreSiteSidebar(options) {
+      siteCardsController.restore(options)
+      canvasSiteStatusHost = null
+      canvasSiteStatusLocked = false
+    }
+
+    function canvasSiteStatusBody() {
+      return canvasSurface('site-status')?.querySelector('[data-canvas-site-status-body]') || null
+    }
+
+    function canvasSiteStatusSetExpanded(host, expanded, locked = canvasSiteStatusLocked) {
+      if (!(host instanceof Element)) return
+      const next = !!expanded
+      canvasSiteStatusLocked = !!locked
+      host.dataset.expanded = String(next)
+      host.dataset.locked = String(canvasSiteStatusLocked)
+      const button = host.querySelector('[data-canvas-site-status-expand]')
+      const label = host.querySelector('[data-canvas-site-status-label]')
+      if (label instanceof HTMLElement) label.setAttribute('aria-expanded', String(next))
+      if (button instanceof HTMLElement) {
+        button.setAttribute('aria-expanded', String(next))
+        button.textContent = next ? '⌃' : '⌄'
+        button.setAttribute('title', next ? '收起站点信息' : '展开站点信息')
+        button.setAttribute('aria-label', next ? '收起站点信息' : '展开站点信息')
+      }
+    }
+
+    function canvasSyncPersistentSiteCards(surface = canvasSurface('site-card')) {
+      const statusSurface = canvasSurface('site-status')
+      const statusHost = statusSurface?.querySelector('[data-canvas-site-status-host]')
+      const useStatusHost = configController.widthClass === 'wide' && statusHost instanceof Element
+      const host = useStatusHost ? canvasSiteStatusBody() : surface?.querySelector?.('[data-canvas-site-sidebar]')
+      if (!(host instanceof Element)) return
+      canvasSiteStatusHost = useStatusHost ? statusHost : null
+      siteCardsController.sync(host, { persistentOnly: true })
+    }
+
+    function canvasSyncSiteSidebar(surface = canvasSurface('site-card')) {
+      const statusSurface = canvasSurface('site-status')
+      const statusHost = statusSurface?.querySelector('[data-canvas-site-status-host]')
+      const useStatusHost = configController.widthClass === 'wide' && statusHost instanceof Element
+      const host = useStatusHost ? canvasSiteStatusBody() : surface?.querySelector?.('[data-canvas-site-sidebar]')
+      if (!(host instanceof Element)) return
+      canvasSiteStatusHost = useStatusHost ? statusHost : null
+      if (statusSurface instanceof HTMLElement) statusSurface.hidden = !useStatusHost
+      if (statusHost instanceof HTMLElement) {
+        statusHost.hidden = !useStatusHost
+        if (!useStatusHost) canvasSiteStatusSetExpanded(statusHost, false, false)
+      }
+      siteCardsController.sync(host)
+    }
+
+    function canvasBindSiteStatus(host) {
+      if (!(host instanceof Element) || host.dataset.canvasSiteStatusBound === '1') return
+      host.dataset.canvasSiteStatusBound = '1'
+      canvasSiteStatusSetExpanded(host, false, false)
+    }
+
+    function canvasOpenSiteStatus(trigger = null) {
+      const host = canvasSurface('site-status')?.querySelector('[data-canvas-site-status-host]')
+      if (!(host instanceof Element)) return null
+      if (canvasActiveSheet && canvasActiveSheet !== 'site-card') canvasCloseSurface(canvasActiveSheet, false)
+      canvasFocusReturn = trigger instanceof Element
+        ? trigger
+        : (document.activeElement instanceof Element ? document.activeElement : null)
+      canvasSyncSiteSidebar()
+      host.hidden = false
+      canvasSiteStatusSetExpanded(host, true, true)
+      canvasActiveSheet = 'site-card'
+      canvasSetBackdrop(false)
+      canvasZIndex += 1
+      host.style.zIndex = String(8010 + canvasZIndex)
+      return host
+    }
+
+    function canvasWatchSidebar() {
+      canvasSidebarObserver?.disconnect?.()
+      canvasSidebarObserver = null
+      const sides = nativeSidebars()
+      if (!sides.length || typeof MutationObserver !== 'function') return
+      canvasSidebarObserver = new MutationObserver(() => {
+        if (!configController.config.shell) return
+        canvasMountProfile(findRouteOutlet())
+        const site = canvasSurface('site-card')
+        canvasSyncPersistentSiteCards(site)
+        if (canvasActiveSheet === 'site-card' || site?.dataset.surfaceMode === 'rail') canvasSyncSiteSidebar(site)
+      })
+      for (const side of sides) canvasSidebarObserver.observe(side, { childList: true, subtree: true })
+    }
+
+    function canvasStopSidebarWatch() {
+      canvasSidebarObserver?.disconnect?.()
+      canvasSidebarObserver = null
     }
 
     function canvasApplyPageClass() {
@@ -11394,10 +14116,8 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       root.classList.add(`lsb-canvas-page-${pageType}`)
       const outlet = findRouteOutlet()
       outlet?.classList.toggle('lsb-canvas-content-root', true)
-      canvasSiteKey = siteKeyFromLocation(location)
-      canvasWidthClass = widthClass(canvasViewport().width)
-      if (canvasState) canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
-      if (canvasScrollBound) canvasSyncScrollTarget()
+      configController.refreshContext()
+      if (isCanvasScrollBound()) canvasSyncScrollTarget()
     }
 
     function canvasSurface(id) {
@@ -11420,7 +14140,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function canvasCloseSurface(id = canvasActiveSheet, restore = true) {
-      if (id === 'site-card' && canvasWidthClass === 'wide') {
+      if (id === 'site-card' && configController.widthClass === 'wide') {
         const host = canvasSurface('site-status')?.querySelector('[data-canvas-site-status-host]')
         canvasSiteStatusSetExpanded(host, false, false)
         if (canvasActiveSheet === id) canvasActiveSheet = ''
@@ -11452,165 +14172,18 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function openPluginFeature(pluginId) {
-      const entry = collectPluginFeatureEntries().find((item) => item.plugin === pluginId)
       closePluginMenuSurfaces()
-      if (!entry) {
-        api.ui.toast('这个插件功能当前不可用', { type: 'info' })
-        return
-      }
-      if (entry.panel) {
-        api.ui.openPanel(entry.panel)
-        return
-      }
-      try {
-        Promise.resolve(api.request(entry.rpc)).catch(() => {
-          api.ui.toast('插件功能打开失败', { type: 'error' })
-        })
-      } catch {
-        api.ui.toast('插件功能打开失败', { type: 'error' })
-      }
+      void pluginCatalog.openFeature(pluginId)
     }
 
     function openPluginSettings(pluginId) {
-      const available = collectPluginSettingsEntries().some((item) => item.id === pluginId)
       closePluginMenuSurfaces()
-      if (!available) {
-        api.ui.toast('这个插件没有可用的设置表单', { type: 'info' })
-        return
-      }
-      try {
-        api.ui.openPluginSettings(pluginId)
-      } catch {
-        api.ui.toast('插件设置当前不可用', { type: 'error' })
-      }
-    }
-
-    function canvasCloseContextPill(restore = false) {
-      const pill = canvasSurface('context-pill')
-      if (pill) {
-        pill.setAttribute('data-canvas-surface-state', 'closing')
-        pill.hidden = true
-        pill.setAttribute('aria-hidden', 'true')
-        pill.setAttribute('data-canvas-surface-state', 'closed')
-      }
-      canvasSelectionPost = null
-      canvasSelectionText = ''
-      if (canvasSelectionDismissTimer) {
-        window.clearTimeout(canvasSelectionDismissTimer)
-        canvasSelectionDismissTimer = 0
-      }
-      if (restore && canvasFocusReturn?.isConnected) canvasFocusReturn.focus?.()
-    }
-
-    function canvasNativeAction(action) {
-      const post = canvasSelectionPost
-      const text = canvasSelectionText
-      if (!(post instanceof Element)) return
-      const clickFirst = (selectors) => {
-        for (const selector of selectors) {
-          const target = post.querySelector(selector) || document.querySelector(selector)
-          if (target instanceof HTMLElement || target instanceof SVGElement) {
-            target.click?.()
-            target.focus?.()
-            return true
-          }
-        }
-        return false
-      }
-      if (action === 'reply') {
-        clickFirst(['.reply-box', '.post-reply', '[data-reply-action]'])
-          || clickFirst(['.reply-panel textarea[name="body"]', '.reply-panel textarea', 'textarea[name="body"]', '.btn-post[href="#reply"]'])
-      } else if (action === 'quote') {
-        clickFirst(['.quote-reply', '[data-quote-action]', 'a[href="#reply"]'])
-      } else if (action === 'favorite') {
-        clickFirst(['.favorite-action', '[data-favorite-action]', '.topic-favorites-action .fav-btn', '.topic-favorites-action button'])
-      } else if (action === 'copy' && text) {
-        try {
-          const clipboard = navigator.clipboard
-          if (clipboard?.writeText) void clipboard.writeText(text)
-          else {
-            const area = document.createElement('textarea')
-            area.value = text
-            area.setAttribute('aria-hidden', 'true')
-            area.style.cssText = 'position:fixed;left:-9999px;top:0'
-            document.body.append(area)
-            area.select()
-            document.execCommand?.('copy')
-            area.remove()
-          }
-          api.ui.toast?.('已复制选中文本', { type: 'success' })
-        } catch {
-          api.ui.toast?.('复制失败，请手动选择文本', { type: 'error' })
-        }
-      }
-    }
-
-    function canvasShowContextPill(post, range) {
-      const pill = canvasSurface('context-pill')
-      if (!(pill instanceof Element) || !(post instanceof Element)) return
-      const text = String(window.getSelection?.()?.toString?.() || '').trim()
-      if (!text) return canvasCloseContextPill()
-      const rect = range?.getBoundingClientRect?.() || post.getBoundingClientRect?.()
-      canvasSelectionPost = post
-      canvasSelectionText = text.slice(0, 2000)
-      pill.hidden = false
-      pill.setAttribute('aria-hidden', 'false')
-      canvasZIndex += 1
-      pill.style.zIndex = String(8020 + canvasZIndex)
-      const viewport = canvasViewport()
-      const width = Math.min(260, Math.max(180, pill.getBoundingClientRect?.().width || 220))
-      const height = Math.max(36, pill.getBoundingClientRect?.().height || 42)
-      const x = Math.min(Math.max(8, Number(rect?.left || 0)), Math.max(8, viewport.width - width - 8))
-      const y = Math.min(Math.max(8, Number(rect?.bottom || 0) + 8), Math.max(8, viewport.height - height - 8))
-      pill.style.left = `${Math.round(x)}px`
-      pill.style.top = `${Math.round(y)}px`
-      pill.style.right = 'auto'
-      pill.style.bottom = 'auto'
-      if (canvasSelectionDismissTimer) window.clearTimeout(canvasSelectionDismissTimer)
-      canvasSelectionDismissTimer = window.setTimeout(() => {
-        canvasSelectionDismissTimer = 0
-        if (!pill.matches(':focus-within')) canvasCloseContextPill()
-      }, 8000)
-    }
-
-    function canvasSelectionSync() {
-      if (!canvasSurfaceHost || canvasActiveSheet === 'context-pill') return
-      const selection = window.getSelection?.()
-      const text = String(selection?.toString?.() || '').trim()
-      const node = selection?.anchorNode
-      const post = node?.nodeType === 1 ? node.closest?.('.post-entry, .post-item') : node?.parentElement?.closest?.('.post-entry, .post-item')
-      if (!text || !(post instanceof Element) || !document.documentElement.contains(post)) {
-        if (!canvasSurface('context-pill')?.matches(':focus-within')) canvasCloseContextPill()
-        return
-      }
-      canvasShowContextPill(post, selection.getRangeAt?.(0))
-    }
-
-    function canvasBindSelection() {
-      if (canvasSelectionBound) return
-      canvasSelectionBound = true
-      canvasSelectionHandler = () => {
-        const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
-        raf(canvasSelectionSync)
-      }
-      document.addEventListener('selectionchange', canvasSelectionHandler, { passive: true })
-      document.addEventListener('pointerup', canvasSelectionHandler, { passive: true })
-    }
-
-    function canvasUnbindSelection() {
-      if (!canvasSelectionBound) return
-      canvasSelectionBound = false
-      if (canvasSelectionHandler) {
-        document.removeEventListener('selectionchange', canvasSelectionHandler)
-        document.removeEventListener('pointerup', canvasSelectionHandler)
-      }
-      canvasSelectionHandler = null
-      canvasCloseContextPill()
+      pluginCatalog.openSettings(pluginId)
     }
 
     function canvasOpenSurface(id, trigger = null) {
       const wanted = String(id || '')
-      if (wanted === 'site-card' && canvasWidthClass === 'wide') return canvasOpenSiteStatus(trigger)
+      if (wanted === 'site-card' && configController.widthClass === 'wide') return canvasOpenSiteStatus(trigger)
       const surface = canvasSurface(wanted)
       if (!(surface instanceof Element)) return null
       if (wanted === 'plugin-features-sheet') renderPluginFeatureEntries()
@@ -11642,21 +14215,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       const list = surface.querySelector('[data-canvas-navigation-list]')
       if (!(list instanceof Element)) return
       list.replaceChildren()
-      const currentHref = `${location.pathname}${location.search}${location.hash}`
-      const favorite = document.querySelector('a[href*="tab=favorites"], a[href*="favorites"]')
-      const search = document.querySelector('form.search-form')
-      const entries = [
-        { href: '/', label: '全部主题', group: '站点' },
-        { href: api.routes.homeSorted('post'), label: '新帖子', group: '站点' },
-        ...(currentHref !== '/' ? [{ href: currentHref, label: '当前页面', group: '最近访问' }] : []),
-        ...(favorite?.getAttribute('href') ? [{ href: favorite.getAttribute('href'), label: '我的收藏', group: '收藏' }] : []),
-        ...(search?.getAttribute('action') ? [{ href: search.getAttribute('action'), label: '站内搜索', group: '搜索' }] : [{ href: '/search', label: '站内搜索', group: '搜索' }]),
-        ...collectBoards().slice(0, 80).map((item) => ({ href: item.href, label: item.label, group: '版块' })),
-      ]
-      const seen = new Set()
-      for (const item of entries) {
-        if (!item?.href || !item.label || seen.has(item.href)) continue
-        seen.add(item.href)
+      for (const item of navigationEntries()) {
         const link = document.createElement('a')
         link.href = item.href
         link.textContent = item.label
@@ -11687,341 +14246,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       renderCanvasTopLinks()
       const currentPage = canvasPageType()
       canvasSurfaceHost?.setAttribute('data-canvas-page', currentPage)
-    }
-
-    function canvasSurfaceRect(surface) {
-      if (!(surface instanceof Element)) return { x: 0, y: 0, width: 320, height: 240 }
-      const rect = surface.getBoundingClientRect?.()
-      const parse = (value, fallback) => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback
-      return {
-        x: parse(rect?.left, parseFloat(surface.style.left) || 0),
-        y: parse(rect?.top, parseFloat(surface.style.top) || 0),
-        width: parse(rect?.width, parseFloat(surface.style.width) || 420),
-        height: parse(rect?.height, parseFloat(surface.style.height) || 560),
-      }
-    }
-
-    function canvasPersistSurfaceRect(id, rect) {
-      if (!canvasState || !canvasSiteKey || !CANVAS_WIDTH_CLASSES.includes(canvasWidthClass)) return
-      const site = canvasState.sites[canvasSiteKey] || {}
-      const layout = site.layout && typeof site.layout === 'object' ? site.layout : {}
-      const bucket = layout[canvasWidthClass] && typeof layout[canvasWidthClass] === 'object' ? layout[canvasWidthClass] : {}
-      canvasState.sites[canvasSiteKey] = canvasMerge(site, { layout: { [canvasWidthClass]: { ...bucket, [id]: canvasCopy(rect) } } })
-      canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
-      saveCanvasState()
-    }
-
-    function canvasApplySurfaceModes() {
-      if (!(canvasSurfaceHost instanceof Element)) return
-      for (const id of ['ai-card', 'site-card', 'evidence-card']) {
-        const surface = canvasSurface(id)
-        if (!(surface instanceof Element)) continue
-        const mode = resolveSurfaceMode(canvasWidthClass, id)
-        surface.dataset.surfaceMode = mode
-        const resizeHandle = surface.querySelector('[data-canvas-resize-handle]')
-        if (resizeHandle instanceof HTMLElement) resizeHandle.hidden = mode === 'rail'
-        const stored = canvasEffective?.layout?.[canvasWidthClass]?.[id]
-        if (mode === 'floating') {
-          const viewport = canvasViewport()
-          const defaultKey = id === 'ai-card' ? 'aiCard' : id === 'site-card' ? 'siteCard' : 'evidenceCard'
-          const configured = canvasEffective?.surfaceDefaults?.[defaultKey] || CANVAS_DEFAULT_SURFACES[defaultKey] || {}
-          const minimum = id === 'ai-card' ? { width: 320, height: 260 } : { width: 240, height: 160 }
-          const fallback = {
-            x: Math.max(0, viewport.width - Math.max(minimum.width, Number(configured.width) || 420) - 24),
-            y: 88,
-            width: Number(configured.width) || 420,
-            height: Number(configured.height) || 560,
-          }
-          const rect = clampSurfaceRect(stored || fallback, viewport, minimum)
-          surface.style.left = `${rect.x}px`
-          surface.style.top = `${rect.y}px`
-          surface.style.width = String(rect.width) + 'px'
-          if (id === 'site-card' && !stored) surface.style.removeProperty('height')
-          else surface.style.height = String(rect.height) + 'px'
-          surface.style.right = 'auto'
-          surface.style.bottom = 'auto'
-        } else if (mode === 'rail') {
-          for (const prop of ['left', 'top', 'width', 'height', 'right', 'bottom']) surface.style.removeProperty(prop)
-          const statusOwnsSiteCard = id === 'site-card' && canvasWidthClass === 'wide'
-          surface.hidden = statusOwnsSiteCard
-          surface.setAttribute('aria-hidden', String(statusOwnsSiteCard))
-          surface.setAttribute('data-canvas-surface-state', statusOwnsSiteCard ? 'closed' : 'open')
-        } else {
-          for (const prop of ['left', 'top', 'width', 'height', 'right', 'bottom']) surface.style.removeProperty(prop)
-        }
-      }
-      const statusHost = canvasSurface('site-status')?.querySelector('[data-canvas-site-status-host]')
-      if (statusHost instanceof Element && canvasWidthClass !== 'wide') canvasSiteStatusSetExpanded(statusHost, false, false)
-      if (canvasWidthClass === 'wide') canvasSyncSiteSidebar()
-    }
-
-    function canvasEndDrag(commit = true) {
-      const state = canvasDragState
-      if (!state) return
-      if (canvasDragRaf) {
-        const cancel = window.cancelAnimationFrame || window.clearTimeout
-        cancel(canvasDragRaf)
-        canvasDragRaf = 0
-      }
-      window.removeEventListener('pointermove', state.move)
-      window.removeEventListener('pointerup', state.up)
-      window.removeEventListener('pointercancel', state.cancel || state.up)
-      state.surface.removeAttribute('data-canvas-dragging')
-      const finalRect = clampSurfaceRect({
-        ...state.start,
-        x: state.start.x + (state.kind === 'resize' ? 0 : state.dx),
-        y: state.start.y + (state.kind === 'resize' ? 0 : state.dy),
-        width: state.start.width + (state.kind === 'resize' ? state.dx : 0),
-        height: state.start.height + (state.kind === 'resize' ? state.dy : 0),
-      }, canvasViewport(), { width: 320, height: 220 })
-      state.surface.style.transform = ''
-      if (commit) {
-        state.surface.style.left = `${finalRect.x}px`
-        state.surface.style.top = `${finalRect.y}px`
-        if (state.kind === 'resize') {
-          state.surface.style.width = `${finalRect.width}px`
-          state.surface.style.height = `${finalRect.height}px`
-        }
-        canvasPersistSurfaceRect(state.id, finalRect)
-      } else {
-        state.surface.style.left = `${state.start.x}px`
-        state.surface.style.top = `${state.start.y}px`
-        if (state.kind === 'resize') {
-          if (state.styleWidth) state.surface.style.width = state.styleWidth
-          else state.surface.style.removeProperty('width')
-          if (state.styleHeight) state.surface.style.height = state.styleHeight
-          else state.surface.style.removeProperty('height')
-        }
-      }
-      state.surface.releasePointerCapture?.(state.pointerId)
-      canvasDragState = null
-    }
-
-    function canvasBeginDrag(event, surface) {
-      if (!(surface instanceof Element) || surface.dataset.surfaceMode !== 'floating') return
-      if (event.button != null && event.button !== 0) return
-      if (event.target?.closest?.('[data-canvas-close],button,input,textarea,select,a')) return
-      const start = canvasSurfaceRect(surface)
-      const pointerId = event.pointerId
-      const state = { id: surface.getAttribute('data-surface') || '', surface, start, dx: 0, dy: 0, pointerId, move: null, up: null }
-      state.move = (moveEvent) => {
-        if (pointerId != null && moveEvent.pointerId != null && moveEvent.pointerId !== pointerId) return
-        state.dx = Number(moveEvent.clientX || 0) - Number(event.clientX || 0)
-        state.dy = Number(moveEvent.clientY || 0) - Number(event.clientY || 0)
-        if (canvasDragRaf) return
-        const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
-        canvasDragRaf = raf(() => {
-          canvasDragRaf = 0
-          if (state.kind === 'resize') {
-            surface.style.width = `${Math.max(1, Math.round(state.start.width + state.dx))}px`
-            surface.style.height = `${Math.max(1, Math.round(state.start.height + state.dy))}px`
-          } else {
-            surface.style.transform = `translate3d(${Math.round(state.dx)}px,${Math.round(state.dy)}px,0)`
-          }
-        })
-      }
-      state.up = () => canvasEndDrag(true)
-      state.cancel = () => canvasEndDrag(false)
-      canvasDragState = state
-      surface.dataset.canvasDragging = 'true'
-      surface.setPointerCapture?.(pointerId)
-      window.addEventListener('pointermove', state.move)
-      window.addEventListener('pointerup', state.up, { once: true })
-      window.addEventListener('pointercancel', state.cancel, { once: true })
-      event.preventDefault?.()
-    }
-
-    function canvasBeginResize(event, surface) {
-      if (!(surface instanceof Element) || surface.dataset.surfaceMode !== 'floating') return
-      if (event.button != null && event.button !== 0) return
-      const start = canvasSurfaceRect(surface)
-      const pointerId = event.pointerId
-      const state = { id: surface.getAttribute('data-surface') || '', surface, start, styleWidth: surface.style.width, styleHeight: surface.style.height, dx: 0, dy: 0, pointerId, kind: 'resize', move: null, up: null }
-      state.move = (moveEvent) => {
-        if (pointerId != null && moveEvent.pointerId != null && moveEvent.pointerId !== pointerId) return
-        state.dx = Number(moveEvent.clientX || 0) - Number(event.clientX || 0)
-        state.dy = Number(moveEvent.clientY || 0) - Number(event.clientY || 0)
-        if (canvasDragRaf) return
-        const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
-        canvasDragRaf = raf(() => {
-          canvasDragRaf = 0
-          surface.style.width = `${Math.max(1, Math.round(state.start.width + state.dx))}px`
-          surface.style.height = `${Math.max(1, Math.round(state.start.height + state.dy))}px`
-        })
-      }
-      state.up = () => canvasEndDrag(true)
-      state.cancel = () => canvasEndDrag(false)
-      canvasDragState = state
-      surface.dataset.canvasDragging = 'true'
-      surface.setPointerCapture?.(pointerId)
-      window.addEventListener('pointermove', state.move)
-      window.addEventListener('pointerup', state.up, { once: true })
-      window.addEventListener('pointercancel', state.cancel, { once: true })
-      event.preventDefault?.()
-    }
-
-    function canvasKeyboardMove(event, surface) {
-      if (!(surface instanceof Element) || surface.dataset.surfaceMode !== 'floating') return
-      const id = surface.getAttribute('data-surface') || ''
-      const current = canvasSurfaceRect(surface)
-      const step = event.shiftKey ? 16 : 8
-      let next = { ...current }
-      if (event.shiftKey && event.key === 'ArrowLeft') next.width -= step
-      else if (event.shiftKey && event.key === 'ArrowRight') next.width += step
-      else if (event.shiftKey && event.key === 'ArrowUp') next.height -= step
-      else if (event.shiftKey && event.key === 'ArrowDown') next.height += step
-      else if (event.key === 'ArrowLeft') next.x -= step
-      else if (event.key === 'ArrowRight') next.x += step
-      else if (event.key === 'ArrowUp') next.y -= step
-      else if (event.key === 'ArrowDown') next.y += step
-      else if (event.key === 'Home') {
-        canvasZIndex += 1
-        surface.style.zIndex = String(8010 + canvasZIndex)
-        event.preventDefault()
-        return
-      }
-      else if (event.key === 'End') {
-        surface.style.zIndex = '8000'
-        event.preventDefault()
-        return
-      }
-      else if (event.key === 'Escape') { canvasCloseSurface(id); return }
-      else return
-      event.preventDefault()
-      const clean = clampSurfaceRect(next, canvasViewport(), { width: 320, height: 220 })
-      surface.style.left = `${clean.x}px`
-      surface.style.top = `${clean.y}px`
-      canvasPersistSurfaceRect(id, clean)
-    }
-
-    function canvasScrollSync() {
-      canvasScrollRaf = 0
-      const y = canvasScrollY()
-      const status = canvasSurface('top-status')
-      if (!status) return
-      const previous = canvasScrollLast
-      const down = y > previous + 2
-      const up = y < previous - 2
-      canvasScrollLast = y
-      if (down || up) status.dataset.compact = down && y > 48 ? 'true' : 'false'
-      canvasUpdateProfileScroll(y, previous)
-    }
-
-    function canvasHomeScrollRoot() {
-      const root = document.documentElement
-      const canvasMode = root.classList.contains('lsb-canvas-mode')
-      if (!root.classList.contains('lsb-skin-shell-on')) return null
-      if (!root.classList.contains('lsb-skin-shell-home')) return null
-      if (canvasMode) {
-        if (!root.classList.contains('lsb-canvas-page-home')) return null
-        if (canvasViewport().width < 700) return null
-      } else if (!asideWide()) {
-        return null
-      }
-      const panel = canvasMode
-        ? document.querySelector('.lsb-canvas-content-root > .home-shell .main-panel')
-        : document.querySelector('body > main.wrap .home-shell .main-panel')
-      return panel instanceof Element ? panel : null
-    }
-
-    function canvasScrollRoot() {
-      return canvasHomeScrollRoot() || (contentScroller instanceof Element ? contentScroller : null)
-    }
-
-    function canvasSyncScrollTarget() {
-      const next = canvasScrollRoot()
-      syncShellScrollBridge(next)
-      if (next === canvasScrollTarget) return
-      const previousTarget = canvasScrollTarget
-      const carryX = !(previousTarget instanceof Element) && next instanceof Element
-        ? Number(window.scrollX || document.documentElement?.scrollLeft || 0)
-        : 0
-      const carryY = !(previousTarget instanceof Element) && next instanceof Element
-        ? Number(window.scrollY || document.documentElement?.scrollTop || 0)
-        : 0
-      if (previousTarget instanceof Element && canvasScrollHandler) {
-        previousTarget.removeEventListener('scroll', canvasScrollHandler)
-      }
-      canvasScrollTarget = next
-      if (canvasScrollTarget instanceof Element) {
-        if (carryX > 0 && Number(canvasScrollTarget.scrollLeft || 0) === 0) canvasScrollTarget.scrollLeft = carryX
-        if (carryY > 0 && Number(canvasScrollTarget.scrollTop || 0) === 0) canvasScrollTarget.scrollTop = carryY
-        if (canvasScrollHandler) canvasScrollTarget.addEventListener('scroll', canvasScrollHandler, { passive: true })
-      }
-      canvasScrollLast = canvasScrollY()
-    }
-
-    function canvasScrollY() {
-      if (canvasScrollTarget instanceof Element) return Number(canvasScrollTarget.scrollTop || 0)
-      return Number(window.scrollY || document.documentElement?.scrollTop || 0)
-    }
-
-    function canvasUpdateProfileScroll(y, previous) {
-      const host = document.querySelector('[data-lsb-canvas-profile]')
-      if (!(host instanceof Element) || api.page?.type !== 'user') return
-      // 资料卡已经收窄到原生选项的内容宽度，完整链接始终可见，不再因滚动折叠。
-      canvasProfileExpanded = false
-      canvasProfileScrollMode = 'full'
-      host.dataset.scrollMode = canvasProfileScrollMode
-      host.dataset.expanded = String(canvasProfileExpanded)
-    }
-
-    function canvasScheduleScroll() {
-      if (canvasScrollRaf) return
-      const raf = window.requestAnimationFrame || ((fn) => window.setTimeout(fn, 0))
-      canvasScrollRaf = raf(canvasScrollSync)
-    }
-
-    function canvasBindWindow() {
-      if (canvasScrollBound) return
-      canvasScrollBound = true
-      canvasScrollHandler = canvasScheduleScroll
-      canvasResizeHandler = () => {
-        canvasWidthClass = widthClass(canvasViewport().width)
-        canvasApplyPageClass()
-        canvasApplySurfaceModes()
-        canvasScheduleScroll()
-      }
-      window.addEventListener('scroll', canvasScrollHandler, { passive: true })
-      window.addEventListener('resize', canvasResizeHandler)
-      canvasSyncScrollTarget()
-      canvasScrollLast = canvasScrollY()
-      canvasUpdateProfileScroll(canvasScrollLast, canvasScrollLast)
-    }
-
-    function canvasUnbindWindow() {
-      if (!canvasScrollBound) return
-      canvasScrollBound = false
-      if (canvasScrollHandler) window.removeEventListener('scroll', canvasScrollHandler)
-      if (canvasResizeHandler) window.removeEventListener('resize', canvasResizeHandler)
-      canvasScrollTarget?.removeEventListener('scroll', canvasScrollHandler)
-      canvasScrollHandler = null
-      canvasResizeHandler = null
-      canvasScrollTarget = null
-      if (canvasScrollRaf) {
-        const cancel = window.cancelAnimationFrame || window.clearTimeout
-        cancel(canvasScrollRaf)
-        canvasScrollRaf = 0
-      }
-    }
-
-    function canvasSearchSetOpen(host, open, restoreFocus = false) {
-      if (!(host instanceof Element)) return false
-      const trigger = host.querySelector('[data-canvas-search-trigger]')
-      const panel = host.querySelector('[data-canvas-search-panel]')
-      if (!(trigger instanceof HTMLElement) || !(panel instanceof HTMLElement)) return false
-      const next = !!open && !!panel.querySelector('form, .search-page-link')
-      host.dataset.searchOpen = String(next)
-      panel.hidden = !next
-      trigger.setAttribute('aria-expanded', String(next))
-      trigger.setAttribute('aria-label', next ? '关闭站点搜索' : '打开站点搜索')
-      if (next) {
-        const input = panel.querySelector('input[type="search"], input[name="q"]')
-        input?.focus?.()
-      } else if (restoreFocus) {
-        trigger.focus?.()
-      }
-      return next
     }
 
     function canvasUnbindEvents() {
@@ -12133,7 +14357,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
             return
           }
         }
-        if (event.key === 'Escape' && canvasDragState) {
+        if (event.key === 'Escape' && isSurfaceDragging()) {
           event.preventDefault()
           canvasEndDrag(false)
           return
@@ -12277,207 +14501,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       return el
     }
 
-    function canvasSyncAppearance(feedback = '') {
-      if (!(canvasSurfaceHost instanceof Element)) return
-      const appearance = canvasEffective?.appearance || {}
-      const status = canvasSurface('appearance-sheet')?.querySelector('[data-canvas-appearance-status]')
-      const presetLabels = {
-        'native-site': 'D 原生站点',
-        'balanced-glass': 'A 平衡玻璃',
-        'immersive-video': 'B 沉浸视频',
-        'static-readable': 'C 静态可读',
-      }
-      if (status) status.textContent = feedback || `当前预设：${presetLabels[canvasEffective?.preset] || presetLabels['balanced-glass']}`
-      for (const button of canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-preset]') || []) {
-        button.setAttribute('aria-pressed', button.getAttribute('data-canvas-preset') === (canvasEffective?.preset || 'balanced-glass') ? 'true' : 'false')
-      }
-      const backgroundMode = String(appearance.background || 'static') === 'image'
-        ? 'image'
-        : String(appearance.background || 'static') === 'video' ? 'video' : 'original'
-      for (const button of canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-background]') || []) {
-        button.setAttribute('aria-pressed', button.getAttribute('data-canvas-background') === backgroundMode ? 'true' : 'false')
-      }
-      for (const input of canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-appearance]') || []) {
-        const key = input.getAttribute('data-canvas-appearance')
-        if (!key || document.activeElement === input) continue
-        if (appearance[key] != null) input.value = String(appearance[key])
-      }
-      const siteSummary = canvasSurface('site-card')?.querySelector('[data-canvas-site-summary]')
-      if (siteSummary) siteSummary.textContent = `${canvasSiteKey.replace(/^https?:\/\//, '')} · ${locationText()}`
-      canvasShell?.style.setProperty('--lsb-canvas-current-opacity', String(appearance.opacity ?? .72))
-    }
-
-    function canvasCommitAppearanceControls() {
-      const controls = canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-appearance]') || []
-      const values = [...controls].map((input) => [input.getAttribute('data-canvas-appearance'), input.value])
-      for (const [key, value] of values) {
-        const input = [...controls].find((node) => node.getAttribute('data-canvas-appearance') === key)
-        if (!key || String(canvasEffective?.appearance?.[key] ?? '') === String(value ?? '')) continue
-        canvasSetAppearance(key, value, { defer: true })
-      }
-      saveCanvasState()
-      applyShellTokens()
-      canvasSyncAppearance()
-      syncShellMedia()
-    }
-
-    function canvasSaveAppearance() {
-      if (!canvasState) return
-      canvasCommitAppearanceControls()
-      canvasSyncAppearance('\u5916\u89c2\u5df2\u4fdd\u5b58')
-    }
-
-    function canvasSetAppearance(name, value, options = {}) {
-      const key = String(name || '')
-      if (!CANVAS_DEFAULT_APPEARANCE.hasOwnProperty(key) || !canvasState) return
-      let next = value
-      if (['opacity', 'blur', 'fontSize', 'radius'].includes(key)) {
-        const n = Number(value)
-        if (!Number.isFinite(n)) return
-        const bounds = { opacity: [.35, 1], blur: [0, 32], fontSize: [12, 32], radius: [8, 32] }[key]
-        next = Math.min(bounds[1], Math.max(bounds[0], n))
-      }
-      if (['textColor', 'panelColor', 'accentColor'].includes(key)) {
-        const text = String(value || '').trim()
-        if (!text) next = ''
-        else {
-          const valid = shellStyleApi?.sanitizeTokenValue?.(key, text)
-          if (!valid) return
-          next = text
-        }
-      }
-      if (key === 'fontFamily') {
-        if (!value) next = ''
-        else {
-          const valid = shellStyleApi?.sanitizeTokenValue?.('fontFamily', value)
-          if (!valid) return
-          next = String(value)
-        }
-      }
-      if (['backgroundVideoUrl', 'backgroundImageUrl', 'fontUrl'].includes(key)) {
-        if (value && !api.ui.shellMedia?.isHttpsUrl?.(value)) return
-        next = String(value || '').trim()
-      }
-      const site = canvasState.sites[canvasSiteKey] || {}
-      const appearancePatch = { [key]: next }
-      if (key === 'backgroundVideoUrl' && next) {
-        appearancePatch.background = 'video'
-        appearancePatch.backgroundImageUrl = ''
-        appearancePatch.backgroundImageLocalKey = ''
-      }
-      if (key === 'backgroundImageUrl' && next) {
-        appearancePatch.background = 'image'
-        appearancePatch.backgroundVideoUrl = ''
-        appearancePatch.backgroundVideoLocalKey = ''
-      }
-      if (key === 'backgroundVideoUrl' && !next) appearancePatch.background = 'static'
-      if (key === 'backgroundImageUrl' && !next) appearancePatch.background = 'static'
-      canvasState.sites[canvasSiteKey] = canvasMerge(site, { appearance: appearancePatch })
-      canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
-      if (options.defer) return
-      saveCanvasState()
-      applyShellTokens()
-      canvasSyncAppearance()
-      syncShellMedia()
-    }
-
-    function canvasSetBackgroundMode(mode) {
-      if (!canvasState) return
-      const nextMode = ['image', 'video'].includes(String(mode)) ? String(mode) : 'static'
-      const site = canvasState.sites[canvasSiteKey] || {}
-      const appearancePatch = {
-        background: nextMode,
-        ...(nextMode === 'static' || nextMode === 'video' ? { backgroundImageUrl: '', backgroundImageLocalKey: '' } : {}),
-        ...(nextMode === 'static' || nextMode === 'image' ? { backgroundVideoUrl: '', backgroundVideoLocalKey: '' } : {}),
-      }
-      canvasState.sites[canvasSiteKey] = canvasMerge(site, { appearance: appearancePatch })
-      canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
-      saveCanvasState()
-      canvasSyncAppearance()
-      syncShellMedia()
-    }
-
-    async function canvasSaveMediaFile(kind, file) {
-      if (!file || !api.ui.shellMedia?.validateMediaFile) return
-      const check = api.ui.shellMedia.validateMediaFile(file, { kind })
-      if (!check.ok) {
-        api.ui.toast?.(kind === 'video' ? '视频文件超过 50MB 或类型不受支持' : kind === 'image' ? '图片文件超过 20MB 或类型不受支持' : '字体文件超过 10MB 或类型不受支持', { type: 'error' })
-        return
-      }
-      try {
-        const db = await ensureMediaDb()
-        if (!db || !api.ui.shellMedia.writeMedia) throw new Error('media-store-unavailable')
-        const key = mediaOriginKey(kind)
-        await api.ui.shellMedia.writeMedia({ db, kind, key, value: file })
-        const field = kind === 'video' ? 'backgroundVideoLocalKey' : kind === 'image' ? 'backgroundImageLocalKey' : 'fontLocalKey'
-        const site = canvasState?.sites?.[canvasSiteKey] || {}
-        const appearancePatch = {
-          [field]: key,
-          ...(kind === 'video' ? { background: 'video', backgroundVideoUrl: '', backgroundImageUrl: '', backgroundImageLocalKey: '' } : {}),
-          ...(kind === 'image' ? { background: 'image', backgroundImageUrl: '', backgroundVideoUrl: '', backgroundVideoLocalKey: '' } : {}),
-        }
-        canvasState.sites[canvasSiteKey] = canvasMerge(site, { appearance: appearancePatch })
-        canvasEffective = mergeCanvasState(canvasState, canvasState.sites[canvasSiteKey])
-        saveCanvasState()
-        canvasSyncAppearance()
-        syncShellMedia()
-        api.ui.toast?.('本地资源已保存并应用', { type: 'success' })
-      } catch {
-        api.ui.toast?.('本地资源保存失败，已保留当前外观', { type: 'error' })
-      }
-    }
-
-    function canvasChoosePreset(preset) {
-      if (!canvasState || !['native-site', 'balanced-glass', 'immersive-video', 'static-readable'].includes(preset)) return
-      const values = {
-        'native-site': { opacity: 1, blur: 0, background: 'static', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', fontFamily: '', fontUrl: '', fontLocalKey: '', fontSize: 14, textColor: '', panelColor: '', accentColor: '', radius: 16, motion: 'auto', transparency: 'reduced' },
-        'balanced-glass': { opacity: .72, blur: 18, background: 'static', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', textColor: '', panelColor: '', accentColor: '', motion: 'auto', transparency: 'auto' },
-        'immersive-video': { opacity: .56, blur: 22, background: 'video', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', textColor: '', panelColor: '', accentColor: '', motion: 'auto', transparency: 'auto' },
-        'static-readable': { opacity: .94, blur: 0, background: 'static', backgroundVideoUrl: '', backgroundVideoLocalKey: '', backgroundImageUrl: '', backgroundImageLocalKey: '', textColor: '', panelColor: '', accentColor: '', motion: 'reduced', transparency: 'reduced' },
-      }[preset]
-      const site = canvasState.sites?.[canvasSiteKey]
-      if (site?.appearance) {
-        const next = { ...site }
-        delete next.appearance
-        canvasState.sites[canvasSiteKey] = next
-      }
-      canvasState.global = canvasMerge(canvasState.global, { preset, appearance: values })
-      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
-      saveCanvasState()
-      applyShellTokens()
-      canvasSyncAppearance()
-      syncShellMedia()
-    }
-
-    function canvasResetAppearance() {
-      if (!canvasState) return
-      const site = canvasState.sites[canvasSiteKey]
-      if (site?.appearance) {
-        const next = { ...site }
-        delete next.appearance
-        canvasState.sites[canvasSiteKey] = next
-      }
-      canvasState.global = canvasMerge(canvasState.global, { preset: 'balanced-glass', appearance: canvasCopy(CANVAS_DEFAULT_APPEARANCE) })
-      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
-      saveCanvasState()
-      applyShellTokens()
-      canvasSyncAppearance()
-      syncShellMedia()
-    }
-
-    function canvasResetLayout() {
-      if (!canvasState) return
-      const site = canvasState.sites[canvasSiteKey]
-      if (site?.layout) {
-        const next = { ...site }
-        delete next.layout
-        canvasState.sites[canvasSiteKey] = next
-      }
-      canvasEffective = mergeCanvasState(canvasState, canvasState.sites?.[canvasSiteKey] || {})
-      saveCanvasState()
-      canvasApplySurfaceModes()
-    }
-
     function mountCanvas() {
       const outlet = findRouteOutlet()
       if (!(outlet instanceof Element)) return null
@@ -12498,55 +14521,11 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       canvasSyncText()
       canvasSyncAppearance()
       canvasApplySurfaceModes()
-      if (canvasWidthClass === 'wide' || canvasActiveSheet === 'site-card') canvasSyncSiteSidebar()
+      if (configController.widthClass === 'wide' || canvasActiveSheet === 'site-card') canvasSyncSiteSidebar()
       else canvasSyncPersistentSiteCards()
       canvasBindWindow()
       canvasScheduleScroll()
-      const presets = canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-preset]') || []
-      for (const button of presets) {
-        if (button.dataset.canvasBound === '1') continue
-        button.dataset.canvasBound = '1'
-        button.addEventListener('click', () => canvasChoosePreset(button.getAttribute('data-canvas-preset')))
-      }
-      const backgroundButtons = canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-background]') || []
-      for (const button of backgroundButtons) {
-        if (button.dataset.canvasBound === '1') continue
-        button.dataset.canvasBound = '1'
-        button.addEventListener('click', () => canvasSetBackgroundMode(button.getAttribute('data-canvas-background')))
-      }
-      const controls = canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-appearance]') || []
-      for (const input of controls) {
-        if (input.dataset.canvasBound === '1') continue
-        input.dataset.canvasBound = '1'
-        const update = () => {
-          canvasSetAppearance(input.getAttribute('data-canvas-appearance'), input.value)
-        }
-        input.addEventListener(input.type === 'range' ? 'input' : 'change', update)
-      }
-      const mediaInputs = canvasSurface('appearance-sheet')?.querySelectorAll('[data-canvas-media-file]') || []
-      for (const input of mediaInputs) {
-        if (input.dataset.canvasBound === '1') continue
-        input.dataset.canvasBound = '1'
-        input.addEventListener('change', () => {
-          const file = input.files?.[0]
-          void canvasSaveMediaFile(input.getAttribute('data-canvas-media-file'), file).finally(() => { input.value = '' })
-        })
-      }
-      const resetAppearance = canvasSurface('appearance-sheet')?.querySelector('[data-canvas-reset-appearance]')
-      const resetLayout = canvasSurface('appearance-sheet')?.querySelector('[data-canvas-reset-layout]')
-      const saveAppearance = canvasSurface('appearance-sheet')?.querySelector('[data-canvas-save-appearance]')
-      if (saveAppearance && saveAppearance.dataset.canvasBound !== '1') {
-        saveAppearance.dataset.canvasBound = '1'
-        saveAppearance.addEventListener('click', canvasSaveAppearance)
-      }
-      if (resetAppearance && resetAppearance.dataset.canvasBound !== '1') {
-        resetAppearance.dataset.canvasBound = '1'
-        resetAppearance.addEventListener('click', canvasResetAppearance)
-      }
-      if (resetLayout && resetLayout.dataset.canvasBound !== '1') {
-        resetLayout.dataset.canvasBound = '1'
-        resetLayout.addEventListener('click', canvasResetLayout)
-      }
+      bindAppearance()
       document.documentElement.classList.remove('lsb-canvas-boot')
       document.getElementById('lsb-shell-boot-frame')?.remove()
       return el
@@ -12571,6 +14550,854 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       document.querySelector('.lsb-canvas-content-root')?.classList.remove('lsb-canvas-content-root')
       for (const name of ['canvas-mode', 'lsb-canvas-page-home', 'lsb-canvas-page-forum', 'lsb-canvas-page-topic', 'lsb-canvas-page-user', 'lsb-canvas-page-settings', 'lsb-canvas-page-page']) document.documentElement.classList.remove(name)
     }
+
+    return {
+      mount: mountCanvas,
+      unmount: unmountCanvas,
+      surface: canvasSurface,
+      applyPageClass: canvasApplyPageClass,
+      syncText: canvasSyncText,
+      closeSurface: canvasCloseSurface,
+      openPluginFeature: openPluginFeature,
+      restoreSiteSidebar: canvasRestoreSiteSidebar,
+      syncSiteSidebar: canvasSyncSiteSidebar,
+      syncPersistentSiteCards: canvasSyncPersistentSiteCards,
+      setSiteStatusExpanded: canvasSiteStatusSetExpanded,
+      stopSidebarWatch: canvasStopSidebarWatch,
+      watchSidebar: canvasWatchSidebar,
+      nextZIndex: () => ++canvasZIndex,
+      restoreFocus: () => { if (canvasFocusReturn?.isConnected) canvasFocusReturn.focus?.() },
+      get shell() { return canvasShell },
+      get surfaceHost() { return canvasSurfaceHost },
+      get activeSheet() { return canvasActiveSheet },
+    }
+  }
+  // Coordinates shell refresh, mode transitions and existing resource cleanup.
+  // Construction is inert; setup keeps registration ownership and its original order.
+  function createSkinRuntimeController({
+    window, document, configController, timelineController, mediaController,
+    onlineController, viewCacheController, spaController, canvasHostController,
+    shellTokenProps, getSettingsController, challengeAttr, isChallengeDocument, hooks,
+  }) {
+    const { Element, MutationObserver } = window
+    const { effectiveUiMode, read: readCanvasState } = configController
+    const { bind: bindSpa, unbind: unbindSpa, clear: clearSpaTransaction, clearChrome: clearSpaRouteChromeHold } = spaController
+    const {
+      asideWide,
+      restyle,
+      markNative,
+      currentScrollX,
+      currentScrollY,
+      scrollCurrentRootTo,
+      clearNativeRouteEnhancements,
+      unbindWindow,
+      unbindWindowInteractions,
+      unbindAsideResize,
+      stopOnlineWatch,
+      stopExtrasWatch,
+      destroyAsideViews,
+      unmountCanvas,
+      unmountShellWindows,
+      restoreAsideCards,
+      restoreAsidePersistentCards,
+      restoreUserCard,
+      restoreTopExtras,
+      restoreThemeToggle,
+      restoreSearch,
+      unbindHomeInfiniteScroll,
+      refreshNativeRouteEnhancements,
+      bindAsideResize,
+      mountCanvas,
+      fillShell,
+      syncHomeInfiniteScroll,
+      syncShellMedia,
+      adoptSearch,
+      shellSearchHost,
+      adoptThemeToggle,
+      adoptUserCard,
+      findRouteOutlet,
+      canvasMountProfile,
+      canvasSurface,
+      canvasSyncSiteSidebar,
+    } = hooks
+    let mountedUiMode = null
+    let pendingUiModeScroll = null
+    let cloudflareChallengeObserver = null
+    let uiModeResizeBound = false
+    let uiModeWideSnapshot = null
+    let refreshTimer = 0
+
+    function onUiModeResize() {
+      const wide = asideWide()
+      if (wide === uiModeWideSnapshot) return
+      uiModeWideSnapshot = wide
+      scheduleRefresh(false)
+    }
+
+    function bindUiModeResize() {
+      if (uiModeResizeBound) return
+      uiModeResizeBound = true
+      uiModeWideSnapshot = asideWide()
+      window.addEventListener('resize', onUiModeResize)
+    }
+
+    function unbindUiModeResize() {
+      if (!uiModeResizeBound) return
+      window.removeEventListener('resize', onUiModeResize)
+      uiModeResizeBound = false
+      uiModeWideSnapshot = null
+    }
+
+    function bindCloudflareChallengeWatch() {
+      if (cloudflareChallengeObserver || typeof MutationObserver !== 'function') return
+      const root = document.documentElement
+      if (!root) return
+      cloudflareChallengeObserver = new MutationObserver(() => scheduleRefresh(false))
+      cloudflareChallengeObserver.observe(root, {
+        attributes: true,
+        attributeFilter: [challengeAttr],
+      })
+    }
+
+    function unbindCloudflareChallengeWatch() {
+      cloudflareChallengeObserver?.disconnect?.()
+      cloudflareChallengeObserver = null
+    }
+
+    function unmountShellLayer({ preserveBootStyle = false } = {}) {
+      clearSpaTransaction()
+      clearNativeRouteEnhancements()
+      timelineController.cancelPending()
+      clearSpaRouteChromeHold()
+      delete document.documentElement.dataset.lsbRoutePhase
+      unbindWindow()
+      unbindWindowInteractions()
+      unbindAsideResize()
+      stopOnlineWatch()
+      stopExtrasWatch()
+      destroyAsideViews()
+      unmountCanvas()
+      unmountShellWindows()
+      mediaController.reset()
+      restoreAsideCards()
+      restoreAsidePersistentCards()
+      restoreUserCard()
+      restoreTopExtras()
+      restoreThemeToggle()
+      restoreSearch()
+      document.getElementById('lsb-shell')?.remove()
+      markNative(false)
+
+      const root = document.documentElement
+      root.removeAttribute('data-lsb-shell-mode')
+      root.classList.remove(
+        'lsb-skin-shell-on', 'lsb-skin-shell-home', 'lsb-skin-shell-topic', 'lsb-skin-shell-user', 'lsb-skin-shell-windowed',
+        'lsb-skin-glass-on', 'lsb-skin-video-on', 'lsb-skin-image-on', 'lsb-canvas-mode',
+        'lsb-canvas-reduced-motion', 'lsb-canvas-reduced-transparency',
+        'lsb-canvas-boot', 'lsb-shell-boot',
+      )
+      for (const name of ['home', 'forum', 'topic', 'user', 'settings', 'page']) root.classList.remove(`lsb-canvas-page-${name}`)
+      for (const prop of shellTokenProps) root.style.removeProperty(prop)
+      shellTokenProps.clear()
+      root.style.removeProperty('--lsb-shell-font-family')
+      if (!preserveBootStyle) document.getElementById('lsb-shell-boot-style')?.remove()
+      document.getElementById('lsb-shell-boot-frame')?.remove()
+      mountedUiMode = null
+    }
+
+    function teardownShell() {
+      window.clearTimeout(refreshTimer)
+      refreshTimer = 0
+      unbindUiModeResize()
+      unbindCloudflareChallengeWatch()
+      unbindSpa()
+      unbindHomeInfiniteScroll()
+      onlineController.stop()
+      unmountShellLayer()
+      viewCacheController.clear()
+      spaController.resetView()
+    }
+
+    function refreshShell() {
+      refreshTimer = 0
+      if (!configController.config.shell) {
+        const scrollPosition = pendingUiModeScroll
+        pendingUiModeScroll = null
+        teardownShell()
+        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
+        return
+      }
+
+      bindCloudflareChallengeWatch()
+      if (isChallengeDocument(document)) {
+        const scrollPosition = pendingUiModeScroll
+        pendingUiModeScroll = null
+        unbindUiModeResize()
+        unbindSpa()
+        unbindHomeInfiniteScroll()
+        onlineController.stop()
+        unmountShellLayer({ preserveBootStyle: true })
+        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
+        return
+      }
+
+      bindUiModeResize()
+      const mode = effectiveUiMode()
+      const targetMode = mode === 'ios27' || asideWide() ? mode : null
+      const modeChanged = mountedUiMode !== targetMode
+      const scrollPosition = pendingUiModeScroll || (modeChanged
+        ? { x: currentScrollX(), y: currentScrollY() }
+        : null)
+      pendingUiModeScroll = null
+      const hadLayer = mountedUiMode !== null || !!document.getElementById('lsb-shell')
+      if (modeChanged && hadLayer) unmountShellLayer()
+
+      if (!targetMode) {
+        unbindHomeInfiniteScroll()
+        restyle()
+        refreshNativeRouteEnhancements()
+        bindSpa()
+        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
+        return
+      }
+
+      restyle()
+      markNative(true)
+      bindAsideResize()
+      try {
+        const mounted = targetMode === 'ios27' ? mountCanvas() : fillShell()
+        if (!(mounted instanceof Element)) throw new Error(`${targetMode} shell did not mount`)
+        mountedUiMode = targetMode
+        // Canvas mounting also needs to bind the initial homepage scroll root;
+        // waiting for a later route refresh leaves the first page inert.
+        syncHomeInfiniteScroll()
+        refreshNativeRouteEnhancements()
+        bindSpa()
+        syncShellMedia()
+        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
+      } catch (error) {
+        unbindHomeInfiniteScroll()
+        unmountShellLayer()
+        bindSpa()
+        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
+        if (typeof console !== 'undefined' && typeof console.warn === 'function') {
+          console.warn('[LSB skin] shell mount failed; restored native page', error)
+        }
+      }
+    }
+
+    function scheduleRefresh(fromRoute) {
+      if (fromRoute && spaController.filled) return
+      window.clearTimeout(refreshTimer)
+      refreshTimer = window.setTimeout(refreshShell, 50)
+    }
+
+    function applyAll() {
+      restyle()
+      refreshShell()
+    }
+
+    function onConfigChanged() {
+      const previousMode = effectiveUiMode()
+      const previousShell = configController.config.shell
+      const scrollPosition = { x: currentScrollX(), y: currentScrollY() }
+      configController.reload()
+      if (effectiveUiMode() !== previousMode || configController.config.shell !== previousShell) pendingUiModeScroll = scrollPosition
+      readCanvasState()
+      applyAll()
+      getSettingsController().syncMenu()
+    }
+
+    function onNativeNode() {
+      if (!configController.config.shell) return
+      adoptSearch(shellSearchHost())
+      adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
+      adoptUserCard(document.querySelector('[data-lsb-shell-me]'))
+      if (mountedUiMode === 'ios27') {
+        const outlet = findRouteOutlet()
+        canvasMountProfile(outlet)
+        const site = canvasSurface('site-card')
+        if (canvasHostController.activeSheet === 'site-card' || site?.dataset.surfaceMode === 'rail') canvasSyncSiteSidebar(site)
+      }
+    }
+
+    function dispose() {
+      mediaController.dispose()
+      getSettingsController().clearMenu()
+      teardownShell()
+      const root = document.documentElement
+      for (const c of [...root.classList].filter((x) => x.startsWith('lsb-skin-'))) root.classList.remove(c)
+      document.getElementById('lsb-skin-style')?.remove()
+    }
+
+    function cancelRefresh() {
+      window.clearTimeout(refreshTimer)
+      refreshTimer = 0
+    }
+
+    return { applyAll, scheduleRefresh, cancelRefresh, onConfigChanged, onNativeNode, dispose }
+  }
+
+  const CLOUDFLARE_CHALLENGE_ATTR = 'data-lsb-cloudflare-challenge'
+  const SPA_ROUTE_PENDING_CLASS = 'lsb-canvas-route-pending'
+  const SPA_ROUTE_COMMITTED_EVENT = 'lsb:route-committed'
+  const CLOUDFLARE_CHALLENGE_MARKERS = '#challenge-stage, #challenge-form, #challenge-running, #cf-challenge-running, .cf-browser-verification, [data-cf-challenge]'
+  const CLOUDFLARE_CHALLENGE_TITLE_COPY = /(?:just a moment|attention required|checking your browser|checking if (?:the )?site connection is secure)/i
+  const CLOUDFLARE_CHALLENGE_BODY_COPY = /(?:checking your browser|verify (?:that )?you are human|enable javascript and cookies to continue|performing (?:a )?security (?:check|verification)|complete (?:the )?security check|请完成.{0,12}验证|请进行.{0,12}验证|正在验证|人机验证)/i
+  const CLOUDFLARE_CHALLENGE_COPY_SELECTOR = 'h1, h2, h3, p, [role="heading"], #challenge-error-text, #challenge-body-text, [data-cf-challenge-message]'
+  const CANVAS_AI_MARKUP = { capsule: '', tool: '', query: '', card: '' }
+
+  function isCloudflareChallengeDocument(doc) {
+    if (!doc?.querySelector) return false
+    if (doc.documentElement?.getAttribute(CLOUDFLARE_CHALLENGE_ATTR) === 'true') return true
+    if (!doc.querySelector(CLOUDFLARE_CHALLENGE_MARKERS)) return false
+    if (CLOUDFLARE_CHALLENGE_TITLE_COPY.test(String(doc.title || ''))) return true
+    const view = doc.defaultView
+    for (const node of doc.querySelectorAll(CLOUDFLARE_CHALLENGE_COPY_SELECTOR)) {
+      if (!CLOUDFLARE_CHALLENGE_BODY_COPY.test(node.textContent || '')) continue
+      let visible = true
+      for (let current = node; current?.nodeType === 1; current = current.parentElement) {
+        if (current.hidden || current.getAttribute('aria-hidden') === 'true') {
+          visible = false
+          break
+        }
+        const style = view?.getComputedStyle?.(current)
+        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse' || style.opacity === '0')) {
+          visible = false
+          break
+        }
+        if (current === doc.body || !current.parentElement) break
+      }
+      if (visible) return true
+    }
+    return false
+  }
+
+  // 状态、资源、原生节点、SPA、首页加载、正文增强、设置、顶栏、时间轴、文本选择、外观交互、浮层布局、画布滚动、共享窗口、画布宿主与入口生命周期由显式模块提供；模板保留模块装配、公共注册和必要的视图/路由适配。
+  // 后续拆分顺序与编辑方式见 plugins/skin/README.md。
+  function setup(api) {
+    const configController = createSkinConfigController({
+      getConfig: () => api.config(), saveConfig: (patch) => api.saveConfig(patch), store: api.store,
+      getLocation: () => location, getViewport: canvasViewport,
+      stateApi: { CANVAS_STATE_KEY, CANVAS_STATE_VERSION, CANVAS_WIDTH_CLASSES, CANVAS_DEFAULT_APPEARANCE, defaultCanvasState, migrateLegacySkinState, canvasMerge, canvasCopy, mergeCanvasState, siteKeyFromLocation, widthClass },
+      sanitizeTokenValue: (name, value) => api.ui.shellStyle?.sanitizeTokenValue?.(name, value),
+      isHttpsUrl: (value) => api.ui.shellMedia?.isHttpsUrl?.(value),
+    })
+    const { effectiveUiMode, read: readCanvasState, save: saveCanvasState,
+      persistSurfaceRect: canvasPersistSurfaceRect } = configController
+    const { collectBoards, pagePath, locationText, isActiveHref, canvasPageType, navigationEntries } = createSkinNavigation({
+      document,
+      getPage: () => api.page,
+      getForums: () => api.forums,
+      getLocation: () => location,
+      parseTopic: (doc) => api.parse.topic(doc),
+      store: api.store,
+      homeSorted: (sort) => api.routes.homeSorted(sort),
+    })
+
+    // ── A: 配置与画布状态（effectiveUiMode/canvasViewport/readSaveCanvasState） ──
+    function canvasViewport() {
+      return {
+        width: Math.max(1, Number(window.innerWidth || document.documentElement?.clientWidth || 1)),
+        height: Math.max(1, Number(window.innerHeight || document.documentElement?.clientHeight || 1)),
+      }
+    }
+
+    function canvasDebugSnapshot() {
+      const host = document.getElementById('lsb-shell-surfaces')
+      return {
+        enabled: configController.state?.enabled !== false && configController.config.shell !== false,
+        version: CANVAS_STATE_VERSION,
+        siteKey: configController.siteKey,
+        widthClass: configController.widthClass,
+        preset: configController.effective?.preset || 'balanced-glass',
+        legacyLayoutSnapshot: canvasCopy(configController.state?.legacyLayoutSnapshot || null),
+        surfaces: [...(host?.querySelectorAll?.('[data-surface]') || [])]
+          .filter((node) => !node.hidden && !['top-status', 'tool-capsule'].includes(node.getAttribute('data-surface')))
+          .map((node) => String(node.getAttribute('data-surface') || ''))
+          .filter(Boolean),
+        user: {
+          enabled: canvasPageType() === 'user',
+          selfProfile: {
+            mounted: !!document.querySelector('[data-canvas-profile-host] .lsb-canvas-self-user-card'),
+            expanded: document.querySelector('[data-canvas-profile-host]')?.dataset.expanded === 'true',
+            locked: document.querySelector('[data-canvas-profile-host]')?.dataset.locked === 'true',
+          },
+          profile: {
+            scrollMode: document.querySelector('[data-lsb-canvas-profile]')?.dataset.scrollMode || 'full',
+            expanded: document.querySelector('[data-lsb-canvas-profile]')?.dataset.expanded === 'true',
+            mounted: !!document.querySelector('[data-lsb-canvas-profile] .sidebar-card.user-card'),
+          },
+          listMounted: !!document.querySelector('[data-lsb-canvas-list]'),
+          topLinks: [...(host?.querySelectorAll?.('[data-canvas-status-links] a, [data-canvas-pinned-links] a') || [])].map((node) => String(node.textContent || '').trim()).filter(Boolean),
+          gap: 12,
+        },
+      }
+    }
+
+    readCanvasState()
+    const shellLayoutApi = api.ui.shellLayout || null
+    const shellStyleApi = api.ui.shellStyle || null
+    const hasWindowApi = typeof api.ui.shellWindowController === 'function'
+    const contentController = createSkinContentController({
+      window, document,
+      isChallengeDocument: isCloudflareChallengeDocument,
+      findLeftRails: nativeLeftRails,
+      createScrollBridge: api.ui.shellScrollBridge,
+    })
+    const {
+      findOutlet: findRouteOutlet,
+      restoreSidebars: restoreDetachedNativeSidebars,
+      syncScrollBridge: syncShellScrollBridge,
+    } = contentController
+    const historyController = createSkinHistoryController({
+      window, document,
+      getScrollRoot: currentScrollRoot,
+      readScroll: () => ({ x: currentScrollX(), y: currentScrollY() }),
+      scrollTo: scrollCurrentRootTo,
+    })
+    const { apply: applyHistory } = historyController
+    const windowController = createSkinWindowController({
+      window, document, ui: api.ui, store: api.store, configController, contentController,
+      layoutApi: shellLayoutApi, styleApi: shellStyleApi, getLocation: () => location,
+      getAsideContext: asideContext, getAsidePreferredId: () => asideViewsController.preferredId,
+      getAsideActiveId: () => asideViewsController.activeId,
+      setAsideActive: (id, host, persist) => asideSetActive(id, host, persist),
+      findOutlet: findRouteOutlet, clone: structuredCloneSafe,
+    })
+    const { enabled: shellWindowEnabled, workspace: shellWorkspace, viewport: shellViewport,
+      host: shellHost, focus: focusShellWindow, arrange: arrangeShellWindows, reset: resetShellWindow,
+      unbind: unbindWindowInteractions, mount: mountShellWindows, unmount: unmountShellWindows } = windowController
+    const shellTokenProps = new Set()
+    const canvasHostController = createSkinCanvasHostController({
+      window, document, configController, aiMarkup: CANVAS_AI_MARKUP, getPage: () => api.page,
+      pluginCatalog: {
+        features: () => pluginCatalog.features(), settings: () => pluginCatalog.settings(),
+        openFeature: (id) => pluginCatalog.openFeature(id), openSettings: (id) => pluginCatalog.openSettings(id),
+      },
+      siteCardsController: {
+        sync: (host, options) => siteCardsController.sync(host, options),
+        restore: (options) => siteCardsController.restore(options),
+      },
+      hooks: {
+        canvasPageType: () => canvasPageType(),
+        locationText: () => locationText(),
+        navigationEntries: () => navigationEntries(),
+        findRouteOutlet: () => findRouteOutlet(),
+        nativeSidebars: () => nativeSidebars(),
+        markNative: (on) => markNative(on),
+        renderCanvasTopLinks: () => renderCanvasTopLinks(),
+        restoreCanvasTopLinks: () => restoreCanvasTopLinks(),
+        canvasMountProfile: (outlet) => canvasMountProfile(outlet),
+        canvasRestoreProfile: () => canvasRestoreProfile(),
+        canvasSearchSetOpen: (host, open, restore) => canvasSearchSetOpen(host, open, restore),
+        adoptSearch: (host) => adoptSearch(host),
+        restoreSearch: () => restoreSearch(),
+        adoptThemeToggle: (host) => adoptThemeToggle(host),
+        canvasCloseContextPill: (restore) => canvasCloseContextPill(restore),
+        canvasNativeAction: (action) => canvasNativeAction(action),
+        canvasBindSelection: () => canvasBindSelection(),
+        canvasUnbindSelection: () => canvasUnbindSelection(),
+        canvasEndDrag: (commit) => canvasEndDrag(commit),
+        canvasBeginDrag: (event, surface) => canvasBeginDrag(event, surface),
+        canvasBeginResize: (event, surface) => canvasBeginResize(event, surface),
+        canvasKeyboardMove: (event, surface) => canvasKeyboardMove(event, surface),
+        canvasApplySurfaceModes: () => canvasApplySurfaceModes(),
+        canvasSyncAppearance: () => canvasSyncAppearance(),
+        bindAppearance: () => appearanceController.bind(),
+        canvasBindWindow: () => canvasBindWindow(),
+        canvasUnbindWindow: () => canvasUnbindWindow(),
+        canvasScheduleScroll: () => canvasScheduleScroll(),
+        canvasSyncScrollTarget: () => canvasSyncScrollTarget(),
+        isCanvasScrollBound: () => canvasScrollController.bound,
+        isSurfaceDragging: () => surfaceLayoutController.dragging,
+      },
+    })
+    const {
+      mount: mountCanvas,
+      unmount: unmountCanvas,
+      surface: canvasSurface,
+      applyPageClass: canvasApplyPageClass,
+      syncText: canvasSyncText,
+      closeSurface: canvasCloseSurface,
+      openPluginFeature: openPluginFeature,
+      restoreSiteSidebar: canvasRestoreSiteSidebar,
+      syncSiteSidebar: canvasSyncSiteSidebar,
+      syncPersistentSiteCards: canvasSyncPersistentSiteCards,
+      setSiteStatusExpanded: canvasSiteStatusSetExpanded,
+      stopSidebarWatch: canvasStopSidebarWatch,
+      watchSidebar: canvasWatchSidebar,
+    } = canvasHostController
+    const canvasScrollController = createSkinCanvasScrollController({
+      window, document, getSurface: canvasSurface, getViewport: canvasViewport,
+      isAsideWide: asideWide, getContentScroller: () => contentController.scroller,
+      syncScrollBridge: syncShellScrollBridge,
+      updateProfileScroll: (y, previous) => canvasUpdateProfileScroll(y, previous),
+      applyPageClass: canvasApplyPageClass, applySurfaceModes: () => canvasApplySurfaceModes(),
+    })
+    const { homeRoot: canvasHomeScrollRoot, syncTarget: canvasSyncScrollTarget,
+      schedule: canvasScheduleScroll, bind: canvasBindWindow, unbind: canvasUnbindWindow } = canvasScrollController
+    // 公共控制器注销由基座 API 的 own() 管理，运行时只释放皮肤持有的资源。
+    const offWindowController = hasWindowApi
+      ? api.ui.shellWindowController((action, value) => {
+        if (action === 'focus') return focusShellWindow(value)
+        if (action === 'arrange') return arrangeShellWindows()
+        if (action === 'reset') return resetShellWindow(value)
+        if (action === 'layout') return windowController.layout ? structuredCloneSafe(windowController.layout) : null
+        return null
+      })
+      : () => {}
+    const offScrollRoot = typeof api.ui.shellScrollRootController === 'function'
+      ? api.ui.shellScrollRootController(() => contentController.scroller)
+      : () => {}
+    const offAsideController = typeof api.ui.shellAsideController === 'function'
+      ? api.ui.shellAsideController((id) => {
+        const aside = document.querySelector('#lsb-shell-aside')
+        return asideSetActive(id, aside, true)
+      })
+      : () => {}
+    const {
+      host: shellSearchHost,
+      adopt: adoptSearch,
+      restore: restoreSearch,
+      setOpen: canvasSearchSetOpen,
+    } = createSkinSearchController({ document })
+    const onlineController = createSkinOnlineController({
+      window,
+      document,
+      request: (path, options) => api.net.raw(path, options),
+      isEnabled: () => configController.config.shell,
+      isChallengeDocument: isCloudflareChallengeDocument,
+    })
+    const asideCardsController = createSkinAsideCardsController({
+      window, document, store: api.store, getSidebars: nativeSidebars,
+      getPage: () => api.page, isSelfUserCard: (card) => profileController.isSelfUserCard(card),
+      isEnabled: () => configController.config.shell, syncOnlineDots: () => onlineController.syncDots(),
+    })
+    const { adopt: adoptAsideCards, restore: restoreAsideCards, restorePersistent: restoreAsidePersistentCards,
+      pruneDetached: pruneDetachedAsideCards, watch: watchOnlineCard, stop: stopOnlineWatch } = asideCardsController
+    const asideViewsController = createSkinAsideViewsController({
+      window, document, store: api.store, getContext: asideContext,
+      getViews: (context) => api.ui.shellAsideViews(context), isEnabled: () => configController.config.shell,
+      onSelect: (id, selectedView) => {
+        const windowId = selectedView?.windowId || 'site'
+        if (windowId !== 'site' && windowController.layout?.windows?.[windowId]) focusShellWindow(windowId)
+        for (const current of windowController.externalViews.values()) {
+          if (current.view?.windowId) current.host.dataset.lsbShellOpen = current.view.id === id ? 'true' : 'false'
+        }
+      },
+    })
+    const { setActive: asideSetActive, sync: syncAsideViews, destroy: destroyAsideViews,
+      bindResize: bindAsideResize, unbindResize: unbindAsideResize } = asideViewsController
+    const spaDocumentController = createSkinSpaDocumentController({
+      window, document, getConfig: () => configController.config, findRouteOutlet, nativeLeftRails, applyHistory,
+      lifecycle: { canvasStopSidebarWatch, canvasRestoreSiteSidebar, restoreDetachedNativeSidebars, markNative,
+        canvasRestoreProfile: () => canvasRestoreProfile(),
+        canvasStagePersistentSiteCardOrigins: (root) => canvasStagePersistentSiteCardOrigins(root),
+        canvasRebindPersistentSiteCardOrigins: (root) => canvasRebindPersistentSiteCardOrigins(root),
+        syncOnlineBoot: (pageDoc) => onlineController.syncBoot(pageDoc) },
+    })
+    const { topicUrl: topicSpaUrl, accepts: isSpaUrl, cacheKey: viewCacheKey,
+      containsTopicPostContent, snapshotOutletAttrs, captureHead: captureRouteHead,
+      parse: parseOutletFrag } = spaDocumentController
+    const { refresh: refreshNativeRouteEnhancements, clear: clearNativeRouteEnhancements } = createSkinNativeEnhancementsController({
+      window, document, topicUrl: topicSpaUrl, startOnline: () => onlineController.start(),
+    })
+    const { sync: syncHomeInfiniteScroll, unbind: unbindHomeInfiniteScroll } = createSkinHomeInfiniteController({
+      window, document, getConfig: () => configController.config,
+      request: (path, options) => api.net.raw(path, options), cacheKey: viewCacheKey,
+      containsTopicPostContent, getScrollRoot: canvasHomeScrollRoot,
+    })
+    const viewCacheController = createSkinViewCache({
+      window, document, request: (path, options) => api.net.raw(path, options),
+      getContext: () => ({ enabled: spaController.bound && configController.config.shell, viewKey: spaController.viewKey, href: location.href }),
+      parse: parseOutletFrag, isTopic: topicSpaUrl, cacheKey: viewCacheKey,
+    })
+    const { remember: rememberView } = viewCacheController
+    const spaController = createSkinSpaController({
+      window, document, getConfig: () => configController.config,
+      request: (path, options) => api.net.raw(path, options), routeDocument: spaDocumentController,
+      viewCacheController, historyController, pendingClass: SPA_ROUTE_PENDING_CLASS,
+      hooks: { findRouteOutlet, stashView, markNative, applyMarkers, fillShell, refreshRouteEnhancements,
+        syncShellRoute, scrollToTopicTarget, refreshNativeRouteEnhancements, unbindHomeInfiniteScroll, syncHomeInfiniteScroll,
+        cancelRefresh: () => runtimeController.cancelRefresh() },
+      perf: { enabled: () => api.hasHandler('perf-probe:record'), now: () => performance.now(),
+        span: perfSpan, spanAsync: perfSpanAsync, emit: perfEmit,
+        emitGlobal: (name, detail) => api.emitGlobal(name, detail) },
+    })
+    const { bind: bindSpa, unbind: unbindSpa, clear: clearSpaTransaction,
+      clearChrome: clearSpaRouteChromeHold } = spaController
+
+    /* ── 共存检测：色彩主题已由其它脚本负责，本模块只做排版层，天然无冲突。
+       若未来加入色彩子项，须在此让位。 ── */
+    const themesPresent = !!document.querySelector('style[data-themes-plugin]')
+
+    // ── B: 工具与样式适配（esc/structuredCloneSafe/applyShellTokens） ──
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
+      )
+    }
+
+    function structuredCloneSafe(value) {
+      try {
+        if (typeof structuredClone === 'function') return structuredClone(value)
+      } catch {
+        /* fall through to JSON for the small layout record */
+      }
+      try {
+        return JSON.parse(JSON.stringify(value))
+      } catch {
+        return value
+      }
+    }
+
+    /** 状态类挂 <html> 上：CSS 特异性干净，测试也容易断言 */
+    // · B4 applyShellTokens: 玻璃/字号/字体令牌注入 ──
+    function applyShellTokens() {
+      const root = document.documentElement
+      const appearance = configController.effective?.appearance || {}
+      const canvasOn = !!configController.config.shell && effectiveUiMode() === 'ios27'
+      const shellOn = shellUiActive()
+      root.classList.toggle('lsb-canvas-reduced-motion', canvasOn && appearance.motion === 'reduced')
+      root.classList.toggle('lsb-canvas-reduced-transparency', canvasOn && appearance.transparency === 'reduced')
+      if (!shellStyleApi) return
+      if (!shellOn) {
+        for (const prop of shellTokenProps) root.style.removeProperty(prop)
+        shellTokenProps.clear()
+        root.classList.remove('lsb-skin-glass-on', 'lsb-canvas-reduced-motion', 'lsb-canvas-reduced-transparency')
+        return
+      }
+      const tokens = shellStyleApi.mergeShellTokens(configController.tokenValues(), {})
+      const cssText = shellStyleApi.tokenCss(tokens)
+      const nextProps = new Set()
+      for (const declaration of cssText.split(';')) {
+        const index = declaration.indexOf(':')
+        if (index <= 0) continue
+        const prop = declaration.slice(0, index).trim()
+        const value = declaration.slice(index + 1).trim()
+        if (!prop.startsWith('--lsb-shell-') || !value) continue
+        root.style.setProperty(prop, value)
+        nextProps.add(prop)
+      }
+      for (const prop of shellTokenProps) if (!nextProps.has(prop)) root.style.removeProperty(prop)
+      shellTokenProps.clear()
+      for (const prop of nextProps) shellTokenProps.add(prop)
+      const radius = canvasFinite(appearance.radius, 16)
+      root.style.setProperty('--lsb-shell-radius', `${Math.max(8, Math.min(32, radius))}px`)
+      shellTokenProps.add('--lsb-shell-radius')
+      root.classList.toggle('lsb-skin-glass-on', shellOn)
+    }
+
+    // ── C: 媒体适配与路由状态 ──
+    const mediaController = createSkinMediaController({
+      window,
+      document,
+      media: api.ui.shellMedia,
+      style: shellStyleApi,
+      getContext: () => {
+        const canvasMode = canvasHostController.shell instanceof Element && canvasHostController.shell.getAttribute('data-lsb-canvas-shell') === 'true'
+        return { config: configController.config, appearance: configController.effective?.appearance || {}, workspace: canvasMode ? document.body : shellWorkspace(), canvasMode }
+      },
+      toast: (message, options) => api.ui.toast?.(message, options),
+    })
+
+    function syncShellMedia() {
+      void mediaController.sync()
+    }
+
+    // ── D: 原生结构接管（applyMarkers/restyle/nativeHeaders） ──
+    // · D1 applyMarkers: 逐容器打点与兴趣节点标记 ──
+    function applyMarkers() {
+      const root = document.documentElement
+      const shellOn = shellUiActive()
+      const canvasOn = !!configController.config.shell && effectiveUiMode() === 'ios27'
+      const shellHome = shellOn && (pagePath() === '/' || pagePath() === '/index.php')
+      root.classList.toggle('lsb-skin-type-on', !!configController.config.typography)
+      root.classList.toggle('lsb-skin-density-compact', configController.config.density === '紧凑')
+      root.classList.toggle('lsb-skin-code-on', !!configController.config.codeblock)
+      root.classList.toggle('lsb-skin-floors-on', !!configController.config.floors)
+      root.classList.toggle('lsb-skin-measure-on', !!configController.config.measure)
+      root.classList.toggle('lsb-skin-shell-on', shellOn)
+      root.classList.toggle('lsb-skin-shell-home', shellHome)
+      root.classList.toggle('lsb-canvas-mode', canvasOn)
+      root.classList.toggle('lsb-skin-shell-topic', shellOn && api.page?.type === 'topic')
+      root.classList.toggle('lsb-skin-shell-user', shellOn && api.page?.type === 'user')
+      /* 旧模式始终为固定三栏；窗口化布局已不再是可选模式。 */
+      root.classList.remove('lsb-skin-shell-windowed')
+      root.removeAttribute('data-lsb-shell-mode')
+    }
+
+    // · D2 restyle: 按兴趣重写布局骨架（topic/suite 归一） ──
+    function restyle() {
+      applyMarkers()
+      applyShellTokens()
+      const id = 'lsb-skin-style'
+      let el = document.getElementById(id)
+      if (!el) {
+        el = document.createElement('style')
+        el.id = id
+        document.head.appendChild(el)
+      }
+      el.textContent = skinCss(configController.config, { shellActive: shellUiActive(), uiMode: effectiveUiMode() })
+    }
+
+    // · D3 nativeHeaders/Sidebars: 原生头部/侧栏收敛 ──
+    function nativeHeaders() {
+      const headers = new Set(document.querySelectorAll('body > .top, body > header, body > .site-header, body > [data-site-header]'))
+      for (const menu of document.querySelectorAll('[data-slot~="top.menu_links"]')) {
+        if (menu.closest('#mobile-menu, #mobile-menu-drawer, .mobile-menu-drawer')) continue
+        let header = menu
+        while (header.parentElement && header.parentElement !== document.body) header = header.parentElement
+        if (header.parentElement === document.body) headers.add(header)
+      }
+      return [...headers]
+    }
+
+    function nativeSidebars() {
+      return [...new Set(document.querySelectorAll('aside.sidebar, [data-slot~="sidebar.stack"]'))].filter(
+        (el) => el.id !== 'mobile-menu-drawer' && !el.classList.contains('mobile-menu-drawer'),
+      )
+    }
+
+    function nativeLeftRails(scope = document) {
+      return [...(scope?.querySelectorAll?.('.forum-enhancements-left-fixed') || [])]
+    }
+
+    function markNative(on) {
+      for (const el of nativeHeaders()) el.classList.toggle('lsb-native-header-hidden', on)
+      for (const el of nativeSidebars()) el.classList.toggle('lsb-native-sidebar-hidden', on)
+      for (const el of nativeLeftRails()) el.classList.toggle('lsb-native-left-hidden', on)
+      for (const el of document.querySelectorAll('.sidebar-card.user-card')) el.toggleAttribute('data-lsb-shell-me', on)
+    }
+
+    // ── E: 侧栏与氢壳视图（asideWide/asideSetActive/syncAsideViews） ──
+    // · E1 asideWide: 侧栏宽度与可见性判定 ──
+    function asideWide() {
+      try {
+        if (typeof window.matchMedia === 'function') return !!window.matchMedia('(min-width: 1100px)').matches
+      } catch {
+        /* jsdom and older embedded browsers may not implement matchMedia */
+      }
+      const width = Number(window.innerWidth || document.documentElement?.clientWidth || 0)
+      return width >= 1100
+    }
+
+    function shellUiActive() {
+      return !!configController.config.shell && (effectiveUiMode() === 'ios27' || asideWide())
+    }
+
+    function asideContext() {
+      return {
+        page: api.page,
+        route: api.page,
+        snapshot: api.snapshot,
+        wide: asideWide(),
+      }
+    }
+
+    // ── F: 插件特性与工具菜单 ──
+    const pluginCatalog = createSkinPluginCatalog({
+      getInfo: () => (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).LSB?.info?.(),
+      ui: api.ui,
+      request: (name) => api.request(name),
+    })
+
+    // ── G: 原生节点接管与还原 ──
+    const profileController = createSkinProfileController({
+      window, document,
+      getPage: () => api.page, getMe: () => api.me, getSidebars: nativeSidebars,
+      getSelfHost: () => canvasHostController.surfaceHost?.querySelector('[data-canvas-profile-host]'),
+      getViewport: canvasViewport,
+    })
+    const { adoptUserCard, restoreUserCard, isSelfUserCard, mount: canvasMountProfile, restore: canvasRestoreProfile, updateScroll: canvasUpdateProfileScroll } = profileController
+    const siteCardsController = createSkinSiteCardsController({ document, getSidebars: nativeSidebars })
+    const { stageOrigins: canvasStagePersistentSiteCardOrigins, rebindOrigins: canvasRebindPersistentSiteCardOrigins } = siteCardsController
+
+    const {
+      renderCanvasTopLinks, restoreCanvasTopLinks, adoptTopExtras, restoreTopExtras,
+      adoptThemeToggle, restoreThemeToggle, watchTopExtras, stopExtrasWatch,
+    } = createSkinTopbarController({
+      window, document, store: api.store, isEnabled: () => configController.config.shell,
+      getWidthClass: () => configController.widthClass, getTopStatus: () => canvasSurface('top-status'),
+    })
+
+    function renderLinks(links) {
+      return links
+        .map((link) => {
+          const feature = link.plugin ? ` data-lsb-plugin-feature="${esc(link.plugin)}"` : ''
+          if (link.rpc) {
+            return `<button type="button" class="lsb-shell-link" data-lsb-rpc="${esc(link.rpc)}"${feature}><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
+          }
+          if (link.panel) {
+            return `<button type="button" class="lsb-shell-link" data-lsb-panel="${esc(link.panel)}"${feature}><span class="lsb-shell-link-label">${esc(link.label)}</span></button>`
+          }
+          const active = isActiveHref(link.href) ? ' is-active' : ''
+          const count = Number.isFinite(link.count)
+            ? `<span class="lsb-shell-count">${esc(String(link.count))}</span>`
+            : ''
+          return `<a class="lsb-shell-link${active}" href="${esc(link.href)}"><span class="lsb-shell-link-label">${esc(link.label)}</span>${count}</a>`
+        })
+        .join('')
+    }
+
+    function paintActive(host) {
+      if (!(host instanceof Element)) return
+      for (const a of host.querySelectorAll('a.lsb-shell-link')) {
+        a.classList.toggle('is-active', isActiveHref(a.getAttribute('href')))
+      }
+    }
+
+    function setSection(host, title, links) {
+      if (!(host instanceof Element)) return
+      const sig = title + JSON.stringify(links)
+      if (host.dataset.sig === sig) {
+        paintActive(host)
+        return
+      }
+      host.dataset.sig = sig
+      if (!links.length) {
+        host.innerHTML = ''
+        return
+      }
+      const heading = title ? `<h2>${esc(title)}</h2>` : ''
+      host.innerHTML = `<section class="lsb-shell-nav-section">${heading}<div class="lsb-shell-nav">${renderLinks(links)}</div></section>`
+    }
+
+    const timelineController = createSkinTimelineController({
+      window, document, getPage: () => api.page, getPostSelector: () => api.sel?.topicPosts,
+      isEnabled: () => configController.config.shell,
+      hasPerfProbe: () => api.hasHandler('perf-probe:record'), emitPerf: perfEmit,
+    })
+    const { ensure: ensureTimeline, schedule: scheduleTimeline, bind: bindWindow, unbind: unbindWindow } = timelineController
+
+    /* ── M17 单一阅读画布 ─────────────────────────────────────────────── */
+    const { close: canvasCloseContextPill, act: canvasNativeAction,
+      bind: canvasBindSelection, unbind: canvasUnbindSelection } = createSkinSelectionController({
+      window, document, ui: api.ui,
+      getPill: () => canvasSurface('context-pill'), getSurfaceHost: () => canvasHostController.surfaceHost,
+      getActiveSheet: () => canvasHostController.activeSheet, getViewport: canvasViewport,
+      nextZIndex: () => canvasHostController.nextZIndex(),
+      restoreFocus: () => canvasHostController.restoreFocus(),
+    })
+
+    const surfaceLayoutController = createSkinSurfaceLayoutController({
+      window, configController,
+      getSurfaceHost: () => canvasHostController.surfaceHost, getSurface: canvasSurface, getViewport: canvasViewport,
+      stateApi: { CANVAS_DEFAULT_SURFACES, resolveSurfaceMode, clampSurfaceRect },
+      persistRect: canvasPersistSurfaceRect, setSiteStatusExpanded: canvasSiteStatusSetExpanded,
+      syncSiteSidebar: canvasSyncSiteSidebar, nextZIndex: () => canvasHostController.nextZIndex(), closeSurface: canvasCloseSurface,
+    })
+    const { applyModes: canvasApplySurfaceModes, endDrag: canvasEndDrag,
+      beginDrag: canvasBeginDrag, beginResize: canvasBeginResize, keyboardMove: canvasKeyboardMove } = surfaceLayoutController
+
+    const appearanceController = createSkinAppearanceController({
+      window, document, ui: api.ui, configController, mediaController,
+      getSurfaceHost: () => canvasHostController.surfaceHost, getSurface: canvasSurface, getShell: () => canvasHostController.shell,
+      locationText, saveState: saveCanvasState, applyTokens: applyShellTokens,
+      syncMedia: syncShellMedia, applySurfaceModes: canvasApplySurfaceModes,
+    })
+    const { sync: canvasSyncAppearance } = appearanceController
 
     function stripShellWindowChrome(el) {
       if (!(el instanceof Element)) return
@@ -12637,6 +15464,12 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       stripShellWindowChrome(el)
       el.querySelector('[data-lsb-shell-settings]').addEventListener('click', () => api.ui.openPanel('skin'))
       el.querySelector('#lsb-shell-rail').addEventListener('click', (e) => {
+        const featureBtn = e.target.closest('[data-lsb-plugin-feature]')
+        if (featureBtn) {
+          e.preventDefault()
+          openPluginFeature(featureBtn.getAttribute('data-lsb-plugin-feature'))
+          return
+        }
         const rpcBtn = e.target.closest('[data-lsb-rpc]')
         if (rpcBtn) {
           e.preventDefault()
@@ -12653,7 +15486,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function syncShellRoute(el = document.getElementById('lsb-shell')) {
-      if (cfg.shell && el?.getAttribute?.('data-lsb-canvas-shell') === 'true') {
+      if (configController.config.shell && el?.getAttribute?.('data-lsb-canvas-shell') === 'true') {
         canvasApplyPageClass()
         markNative(true)
         canvasSyncText()
@@ -12694,21 +15527,21 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         { href: '/', label: '全部主题' },
       ])
       setSection(el.querySelector('[data-lsb-shell-section="boards"]'), '版块', collectBoards())
-      setSection(el.querySelector('[data-lsb-shell-section="tools"]'), '工具', collectTools())
+      setSection(el.querySelector('[data-lsb-shell-section="tools"]'), '工具', pluginCatalog.tools())
       syncShellRoute(el)
-      syncShellScrollBridge(canvasHomeScrollRoot() || contentScroller)
+      syncShellScrollBridge(canvasHomeScrollRoot() || contentController.scroller)
       syncHomeInfiniteScroll()
       syncShellMedia()
       return el
     }
 
     function refreshRouteEnhancements(serial) {
-      if (serial !== spaSerial) return false
+      if (!spaController.isCurrent(serial)) return false
       applyMarkers()
       fillShell()
       refreshNativeRouteEnhancements()
-      scheduleOnlineUserRefresh(0, true, true)
-      if (serial !== spaSerial) return false
+      onlineController.scheduleRefresh(0, true, true)
+      if (!spaController.isCurrent(serial)) return false
       try {
         const EventCtor = window.CustomEvent || CustomEvent
         document.dispatchEvent(new EventCtor(SPA_ROUTE_COMMITTED_EVENT, {
@@ -12717,819 +15550,8 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       } catch {
         /* A native enhancement hook is optional and must not block routing. */
       }
-      spaFilledSerial = serial
+      spaController.markFilled(serial)
       return true
-    }
-
-    function isHomeInfPath(urlLike = location.href) {
-      try {
-        const url = new URL(urlLike, location.href)
-        const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
-        if (path !== '/' && path !== '/index.php') return false
-        if (url.searchParams.get('q')) return false
-        return true
-      } catch {
-        return false
-      }
-    }
-
-    function homeInfEnabled() {
-      if ((document.cookie.match(/(?:^|; )sb_infinite_scroll_enabled=([^;]*)/) || [])[1] === '0') return false
-      const config = window.__sbInfiniteScrollConfig || window.__infiniteScrollConfig || {}
-      return config.enabled !== false
-    }
-
-    function homeInfTopicKey(item) {
-      const title = item?.querySelector?.('.post-title')
-      const href = title?.getAttribute('href') || ''
-      if (href) return href.replace(/([?&])replyid=[^&]*/g, '').replace(/([?&])p=[^&]*/g, '')
-      return `${(title?.textContent || '').trim()}|${(item?.textContent || '').trim().slice(0, 80)}`
-    }
-
-    function homeInfHasNext(root) {
-      const pag = root?.querySelector?.('.pagination-bar') || root
-      if (!pag?.querySelectorAll) return false
-      for (const a of pag.querySelectorAll('a')) {
-        if ((a.textContent || '').trim() === '下一页') return true
-      }
-      const page = homeInf?.page || 1
-      for (const el of pag.querySelectorAll('a, span')) {
-        const num = parseInt(el.textContent, 10)
-        if (num > page) return true
-      }
-      return false
-    }
-
-    function rememberHomeInfState(state) {
-      if (!state?.list) return
-      homeInfRecords.set(state.list, {
-        page: state.page,
-        loaded: state.loaded,
-        seen: state.seen,
-        hasMore: state.hasMore,
-      })
-    }
-
-    function unbindHomeInfiniteScroll() {
-      if (!homeInf) return
-      const state = homeInf
-      rememberHomeInfState(state)
-      for (const target of state.scrollTargets || [window]) target.removeEventListener?.('scroll', state.onScroll)
-      if (state.scrollTimer) {
-        window.clearTimeout(state.scrollTimer)
-        state.scrollTimer = 0
-      }
-      state.status?.remove()
-      state.controller?.abort()
-      homeInf = null
-    }
-
-    function homeInfStateActive(state) {
-      if (!state || homeInf !== state || !isHomeInfPath()) return false
-      let routeKey
-      try {
-        routeKey = viewCacheKey(location.href)
-      } catch {
-        return false
-      }
-      return (
-        state.routeKey === routeKey
-        && state.list?.isConnected
-        && state.list === document.querySelector('.main-panel > ul.post-list')
-        && state.pagination?.isConnected
-        && state.pagination === document.querySelector('.pagination-bar')
-      )
-    }
-
-    function hideHomePagination(pagination) {
-      if (!(pagination instanceof Element)) return
-      pagination.classList.add('sb-infinite-scroll-pagination-hidden')
-      pagination.setAttribute('aria-hidden', 'true')
-      pagination.setAttribute('data-lsb-shell-inf', '1')
-    }
-
-    function setHomeInfStatus(kind, text) {
-      if (!homeInf?.pagination?.parentNode) return
-      homeInf.status?.remove()
-      if (!kind) {
-        homeInf.status = null
-        return
-      }
-      const el = document.createElement('div')
-      el.className = kind === 'end' ? 'infinite-scroll-end' : 'infinite-scroll-loader'
-      el.setAttribute('data-lsb-inf-status', kind)
-      el.textContent = text
-      homeInf.pagination.parentNode.insertBefore(el, homeInf.pagination)
-      homeInf.status = el
-    }
-
-    async function loadHomeInfPage() {
-      const state = homeInf
-      if (!homeInfStateActive(state) || state.loading || !state.hasMore) return
-      state.loading = true
-      setHomeInfStatus('loading', '加载中...')
-      let next = state.page + 1
-      while (state.loaded[next]) next += 1
-      const url = new URL(location.href)
-      url.searchParams.set('p', String(next))
-      try {
-        const res = await api.net.raw(`${url.pathname}${url.search}`, {
-          queue: false,
-          timeout: 15000,
-          retry: 0,
-          ...(state.controller?.signal ? { signal: state.controller.signal } : {}),
-        })
-        if (!homeInfStateActive(state)) return
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const doc = new DOMParser().parseFromString(res.text, 'text/html')
-        const remoteList = doc.querySelector('.main-panel > ul.post-list, ul.post-list')
-        const items = remoteList
-          ? [...remoteList.children].filter((item) => item.matches?.('.post-item') && !item.classList.contains('post-entry'))
-          : []
-        if (!items.length) {
-          state.hasMore = false
-          rememberHomeInfState(state)
-          setHomeInfStatus('end', '没有更多内容了')
-          return
-        }
-        const fresh = []
-        for (const item of items) {
-          const key = homeInfTopicKey(item)
-          if (key && state.seen[key]) continue
-          if (key) state.seen[key] = true
-          fresh.push(document.importNode(item, true))
-        }
-        if (fresh.length) state.list.append(...fresh)
-        const pagHtml = doc.querySelector('.pagination-bar')?.innerHTML
-        if (pagHtml) state.pagination.innerHTML = pagHtml
-        hideHomePagination(state.pagination)
-        state.loaded[next] = true
-        state.page = Math.max(state.page, next)
-        if (!homeInfHasNext(doc)) {
-          state.hasMore = false
-          setHomeInfStatus('end', '没有更多内容了')
-        } else {
-          setHomeInfStatus(null)
-        }
-        rememberHomeInfState(state)
-        document.dispatchEvent(new CustomEvent('sb:topic-list-updated', {
-          detail: { list: state.list, items: fresh, page: next, source: 'lsb_shell' },
-        }))
-      } catch {
-        if (homeInf !== state) return
-        setHomeInfStatus('end', '加载失败，继续滚动或点分页重试')
-      } finally {
-        if (homeInf === state) state.loading = false
-      }
-    }
-
-    function bindHomeInfiniteScroll(list, pagination) {
-      const prior = homeInfRecords.get(list)
-      const seen = prior?.seen || {}
-      if (!prior) {
-        for (const item of list.children) {
-          if (item.matches?.('.post-item')) {
-            const key = homeInfTopicKey(item)
-            if (key) seen[key] = true
-          }
-        }
-      }
-      const pageFromUrl = parseInt(new URL(location.href).searchParams.get('p'), 10) || 1
-      const loaded = prior?.loaded || {}
-      loaded[pageFromUrl] = true
-      const page = Math.max(pageFromUrl, Number(prior?.page) || pageFromUrl)
-      const scrollRoot = canvasHomeScrollRoot()
-      const scrollTargets = scrollRoot ? [scrollRoot, window] : [window]
-      const onScroll = () => {
-        if (!homeInfStateActive(homeInf) || homeInf.loading || !homeInf.hasMore) return
-        if (homeInf.scrollTimer) return
-        homeInf.scrollTimer = window.setTimeout(() => {
-          if (homeInf) homeInf.scrollTimer = 0
-          if (!homeInfStateActive(homeInf) || homeInf.list !== list) return
-          const rect = list.getBoundingClientRect()
-          const root = homeInf.scrollRoot instanceof Element ? homeInf.scrollRoot : null
-          const rootRect = root?.getBoundingClientRect?.()
-          const viewportBottom = root
-            ? (Number(rootRect?.bottom) || Number(rootRect?.top || 0) + Number(root.clientHeight || 0))
-            : (window.innerHeight || 0)
-          const distance = rect.bottom - viewportBottom
-          if (distance <= 100) void loadHomeInfPage()
-        }, 80)
-      }
-      hideHomePagination(pagination)
-      homeInf = {
-        list,
-        pagination,
-        routeKey: viewCacheKey(location.href),
-        seen,
-        loaded,
-        page,
-        loading: false,
-        hasMore: prior ? prior.hasMore : homeInfHasNext(document),
-        onScroll,
-        scrollRoot,
-        scrollTargets,
-        scrollTimer: 0,
-        status: null,
-        controller: typeof AbortController === 'function' ? new AbortController() : null,
-      }
-      rememberHomeInfState(homeInf)
-      if (!homeInf.hasMore) {
-        setHomeInfStatus('end', '没有更多内容了')
-        return
-      }
-      for (const target of scrollTargets) target.addEventListener?.('scroll', onScroll, { passive: true })
-    }
-
-    function syncHomeInfiniteScroll() {
-      if (!cfg.shell || !isHomeInfPath() || !homeInfEnabled()) {
-        unbindHomeInfiniteScroll()
-        return
-      }
-      const list = document.querySelector('.main-panel > ul.post-list')
-      const pagination = document.querySelector('.pagination-bar')
-      if (!list || !pagination || containsTopicPostContent(list)) {
-        unbindHomeInfiniteScroll()
-        return
-      }
-      const routeKey = viewCacheKey(location.href)
-      const scrollRoot = canvasHomeScrollRoot()
-      if (
-        homeInf?.list === list
-        && homeInf.pagination === pagination
-        && homeInf.routeKey === routeKey
-        && homeInf.scrollRoot === scrollRoot
-      ) return
-      unbindHomeInfiniteScroll()
-      if (
-        pagination.classList.contains('sb-infinite-scroll-pagination-hidden')
-        && !pagination.hasAttribute('data-lsb-shell-inf')
-        && !(scrollRoot instanceof Element)
-      ) return
-      bindHomeInfiniteScroll(list, pagination)
-    }
-
-    const NATIVE_THREAD_VISIBLE_LIMIT = 5
-
-    function nativeThreadFloor(value) {
-      const text = String(value || '')
-      return /^[1-9]\d*$/.test(text) ? text : ''
-    }
-
-    function nativeThreadParentFromContent(row, replyRows) {
-      for (const link of row.querySelectorAll('.post-content a[href]')) {
-        try {
-          const url = new URL(link.href, location.href)
-          const floor = nativeThreadFloor(url.searchParams.get('floor'))
-          if (floor) return floor
-          const replyId = nativeThreadFloor(url.searchParams.get('replyid') || url.searchParams.get('reply_id'))
-          const parentFloor = replyId ? nativeThreadFloor(replyRows.get(replyId)?.dataset.floor) : ''
-          if (parentFloor) return parentFloor
-        } catch {
-          /* A malformed quote link cannot determine a parent. */
-        }
-      }
-      return nativeThreadFloor(String(row.querySelector('.post-content')?.textContent || '').match(/@[^\s#]+\s+#([1-9]\d*)\b/u)?.[1])
-    }
-
-    function nativeThreadParentFromForm(form) {
-      if (!(form instanceof HTMLFormElement)) return ''
-      const explicit = form.dataset.quoteThreadsParentFloor
-        || form.querySelector('[name="quote_threads_parent_floor"], [name="parent_floor"], [data-quote-threads-parent-floor]')?.value
-      const explicitFloor = nativeThreadFloor(explicit)
-      if (explicitFloor) return explicitFloor
-      const body = form.querySelector('textarea[name="body"], textarea[name="content"], [contenteditable="true"]')
-      const text = 'value' in (body || {}) ? body.value : body?.textContent
-      return nativeThreadFloor(String(text || '').match(/@[^ #]+ +#([1-9][0-9]*)/u)?.[1])
-    }
-
-    function nativeThreadReplyId(row) {
-      return String(row?.id || '').match(/^post-([1-9][0-9]*)$/)?.[1] || ''
-    }
-
-    function addNativeThreadReference(row, parentFloor) {
-      const floor = nativeThreadFloor(parentFloor)
-      if (!(row instanceof Element) || !floor) return
-      const meta = row.querySelector('.post-meta')
-      if (!(meta instanceof Element)) return
-      let reference = meta.querySelector(':scope > .quote-threads-reference')
-      if (!reference) {
-        reference = document.createElement('span')
-        reference.className = 'quote-threads-reference'
-        meta.prepend(reference)
-      }
-      reference.textContent = `回复 #${floor}`
-      reference.dataset.quoteThreadsParentFloor = floor
-    }
-
-    function normalizeNativeThreadLinks(rows, byFloor) {
-      const currentTopic = topicSpaUrl(location.href)
-      if (!currentTopic) return
-      const normalize = (link, ownReplyId = '') => {
-        if (!(link instanceof HTMLAnchorElement)) return
-        let url
-        try {
-          url = new URL(link.getAttribute('href') || link.href, location.href)
-        } catch {
-          return
-        }
-        if (url.origin !== currentTopic.origin || url.pathname !== currentTopic.pathname) return
-        const floor = nativeThreadFloor(url.searchParams.get('floor'))
-        const replyId = ownReplyId || (floor ? nativeThreadReplyId(byFloor.get(floor)) : '')
-        if (!replyId) return
-        url.searchParams.delete('floor')
-        url.searchParams.delete('p')
-        url.searchParams.delete('reply_id')
-        url.searchParams.set('replyid', replyId)
-        link.setAttribute('href', url.href)
-      }
-      for (const row of rows) {
-        const ownReplyId = nativeThreadReplyId(row)
-        for (const link of row.querySelectorAll('a[href]')) normalize(link, link.classList.contains('post-floor') ? ownReplyId : '')
-      }
-    }
-
-    function handleNativeReplySubmit(event) {
-      const form = event.target instanceof HTMLFormElement
-        ? event.target
-        : event.target?.closest?.('form.ajax-reply-form')
-      if (!(form instanceof HTMLFormElement)) return
-      const parentFloor = nativeThreadParentFromForm(form)
-      if (parentFloor) nativeReplyParentByForm.set(form, parentFloor)
-    }
-
-    function handleNativeReplySaved(event) {
-      const detail = event.detail && typeof event.detail === 'object' ? event.detail : {}
-      const form = detail.form instanceof HTMLFormElement ? detail.form : null
-      const replyCandidate = detail.reply || detail.post || detail.element || event.target
-      const reply = replyCandidate instanceof Element
-        ? (replyCandidate.matches('li.post-item.post-entry') ? replyCandidate : replyCandidate.closest('li.post-item.post-entry'))
-        : null
-      if (!reply) return
-      const parentFloor = nativeThreadFloor(nativeReplyParentByForm.get(form))
-        || nativeThreadFloor(reply.dataset.quoteThreadsParentFloor)
-        || nativeThreadParentFromContent(reply, new Map())
-      if (parentFloor) reply.dataset.quoteThreadsParentFloor = parentFloor
-      const list = reply.closest('ul.post-list.topic-post-list') || nativeThreadList
-      if (list) rebuildNativeThreadTree(list)
-    }
-
-    function bindNativeThreadLifecycle() {
-      if (nativeThreadLifecycleBound) return
-      nativeThreadLifecycleBound = true
-      document.addEventListener('submit', handleNativeReplySubmit, true)
-      document.addEventListener('bbs1:reply-saved', handleNativeReplySaved)
-    }
-
-    function unbindNativeThreadLifecycle() {
-      if (!nativeThreadLifecycleBound) return
-      nativeThreadLifecycleBound = false
-      document.removeEventListener('submit', handleNativeReplySubmit, true)
-      document.removeEventListener('bbs1:reply-saved', handleNativeReplySaved)
-    }
-
-    function renderNativeThreadCollapse(list, root, rootRow, branch) {
-      if (!(rootRow instanceof Element) || branch.length <= NATIVE_THREAD_VISIBLE_LIMIT) return
-      const containsTarget = branch.some((row) => (
-        row.classList.contains('post-highlight')
-        || (new URL(location.href).searchParams.get('replyid') && row.id === `post-${new URL(location.href).searchParams.get('replyid')}`)
-        || (new URL(location.href).searchParams.get('floor') && row.dataset.floor === new URL(location.href).searchParams.get('floor'))
-      ))
-      if (containsTarget && rootRow.dataset.quoteThreadsTargetRevealed !== '1') {
-        rootRow.dataset.quoteThreadsExpanded = '1'
-        rootRow.dataset.quoteThreadsTargetRevealed = '1'
-      }
-      const expanded = rootRow.dataset.quoteThreadsExpanded === '1'
-      branch.forEach((row, index) => {
-        row.classList.toggle('quote-threads-is-collapsed', !expanded && index >= NATIVE_THREAD_VISIBLE_LIMIT)
-      })
-      if (!expanded) {
-        branch[branch.length - 1].classList.remove('quote-threads-thread-end')
-        branch[NATIVE_THREAD_VISIBLE_LIMIT - 1].classList.add('quote-threads-thread-end')
-      }
-      const toggleRow = document.createElement('li')
-      toggleRow.className = 'quote-threads-toggle-row'
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.className = 'quote-threads-toggle'
-      button.dataset.quoteThreadsToggle = root
-      button.dataset.expanded = expanded ? '1' : '0'
-      button.setAttribute('aria-expanded', expanded ? 'true' : 'false')
-      button.textContent = expanded ? '收起讨论串' : `展开剩余 ${branch.length - NATIVE_THREAD_VISIBLE_LIMIT} 条回复`
-      toggleRow.append(button)
-      ;(expanded ? branch[branch.length - 1] : branch[NATIVE_THREAD_VISIBLE_LIMIT - 1]).after(toggleRow)
-    }
-
-    function rebuildNativeThreadTree(list) {
-      if (!(list instanceof Element)) return
-      list.querySelectorAll(':scope > .quote-threads-toggle-row').forEach((row) => row.remove())
-      const rows = [...list.querySelectorAll(':scope > li.post-item.post-entry')]
-      list.dataset.quoteThreadsCollapseReady = '1'
-      if (rows.length < 2) return
-
-      const byFloor = new Map()
-      const replyRows = new Map()
-      const parents = new Map()
-      const roots = new Map()
-      const branches = new Map()
-      const branchRoots = []
-
-      rows.forEach((row) => {
-        row.dataset.quoteThreadsProcessed = '1'
-        row.querySelectorAll('.quote-threads-reference').forEach((reference) => reference.remove())
-        const floor = nativeThreadFloor(row.dataset.floor)
-        if (floor) byFloor.set(floor, row)
-        const replyId = String(row.id || '').match(/^post-([1-9][0-9]*)$/)?.[1] || ''
-        if (replyId) replyRows.set(replyId, row)
-        row.classList.remove(
-          'quote-threads-child',
-          'quote-threads-cross-page',
-          'quote-threads-thread-item',
-          'quote-threads-thread-end',
-          'quote-threads-is-collapsed',
-        )
-      })
-
-      rows.forEach((row) => {
-        const floor = nativeThreadFloor(row.dataset.floor)
-        let parentFloor = nativeThreadFloor(row.dataset.quoteThreadsParentFloor)
-        if (!parentFloor) {
-          parentFloor = nativeThreadParentFromContent(row, replyRows)
-          if (parentFloor) row.dataset.quoteThreadsParentFloor = parentFloor
-        }
-        if (!floor || !parentFloor || parentFloor === floor) return
-        addNativeThreadReference(row, parentFloor)
-        if (byFloor.has(parentFloor)) parents.set(floor, parentFloor)
-        else row.classList.add('quote-threads-cross-page')
-      })
-      normalizeNativeThreadLinks(rows, byFloor)
-
-      const rootFloor = (floor) => {
-        if (roots.has(floor)) return roots.get(floor)
-        const trail = []
-        const seen = new Set()
-        let current = floor
-        let root = floor
-        while (true) {
-          if (roots.has(current)) {
-            root = roots.get(current)
-            break
-          }
-          if (seen.has(current)) break
-          seen.add(current)
-          trail.push(current)
-          const parentFloor = parents.get(current)
-          if (!parentFloor) {
-            root = current
-            break
-          }
-          current = parentFloor
-        }
-        trail.forEach((value) => roots.set(value, root))
-        return root
-      }
-
-      rows.forEach((row, index) => {
-        const floor = nativeThreadFloor(row.dataset.floor)
-        const root = floor ? rootFloor(floor) : `@${index}`
-        if (!branches.has(root)) {
-          branches.set(root, [])
-          branchRoots.push(root)
-        }
-        branches.get(root).push(row)
-      })
-
-      const orderedRows = []
-      const collapsibleBranches = []
-      for (const root of branchRoots) {
-        const rootRow = byFloor.get(root)
-        const storedBranch = branches.get(root)
-        const branch = rootRow && storedBranch.length > 1
-          ? [rootRow, ...storedBranch.filter((row) => row !== rootRow)]
-          : storedBranch
-        if (rootRow && branch.length > 1) {
-          branch.forEach((row) => {
-            row.classList.add('quote-threads-thread-item')
-            if (row !== rootRow) row.classList.add('quote-threads-child')
-          })
-          branch[branch.length - 1].classList.add('quote-threads-thread-end')
-          collapsibleBranches.push([root, rootRow, branch])
-        } else if (branch.length === 1 && branch[0].classList.contains('quote-threads-cross-page')) {
-          branch[0].classList.add('quote-threads-thread-item', 'quote-threads-child', 'quote-threads-thread-end')
-        }
-        branch.forEach((row) => orderedRows.push(row))
-      }
-
-      if (!rows.every((row, index) => row === orderedRows[index])) {
-        const fragment = document.createDocumentFragment()
-        orderedRows.forEach((row) => fragment.append(row))
-        list.append(fragment)
-      }
-      collapsibleBranches.forEach(([root, rootRow, branch]) => renderNativeThreadCollapse(list, root, rootRow, branch))
-    }
-
-    function clearNativeThreadObserver() {
-      nativeThreadObserver?.disconnect?.()
-      nativeThreadObserver = null
-      nativeThreadList = null
-      if (nativeThreadApplyTimer) {
-        window.clearTimeout(nativeThreadApplyTimer)
-        nativeThreadApplyTimer = 0
-      }
-    }
-
-    function observeNativeThreadTree(list) {
-      if (!(list instanceof Element)) {
-        clearNativeThreadObserver()
-        return
-      }
-      bindNativeThreadLifecycle()
-      if (nativeThreadList === list && nativeThreadObserver) {
-        rebuildNativeThreadTree(list)
-        return
-      }
-      clearNativeThreadObserver()
-      nativeThreadList = list
-      if (list.dataset.lsbNativeThreadBound !== '1') {
-        list.dataset.lsbNativeThreadBound = '1'
-        list.addEventListener('click', (event) => {
-          const button = event.target?.closest?.('[data-quote-threads-toggle]')
-          if (!(button instanceof HTMLButtonElement)) return
-          const root = nativeThreadFloor(button.dataset.quoteThreadsToggle)
-          const rootRow = [...list.querySelectorAll(':scope > li.post-item.post-entry')]
-            .find((row) => nativeThreadFloor(row.dataset.floor) === root)
-          if (!rootRow) return
-          rootRow.dataset.quoteThreadsExpanded = button.dataset.expanded === '1' ? '0' : '1'
-          rebuildNativeThreadTree(list)
-        })
-      }
-      rebuildNativeThreadTree(list)
-      if (typeof MutationObserver !== 'function') return
-      nativeThreadObserver = new MutationObserver((records) => {
-        const hasNewReply = records.some((record) => [...record.addedNodes].some((node) => (
-          node instanceof Element
-          && (node.matches('li.post-item.post-entry') || !!node.querySelector('li.post-item.post-entry'))
-          && [...(node.matches('li.post-item.post-entry') ? [node] : node.querySelectorAll('li.post-item.post-entry'))]
-            .some((reply) => reply.dataset.quoteThreadsProcessed !== '1')
-        )))
-        if (hasNewReply && !nativeThreadApplyTimer) {
-          nativeThreadApplyTimer = window.setTimeout(() => {
-            nativeThreadApplyTimer = 0
-            if (nativeThreadList === list && list.isConnected) rebuildNativeThreadTree(list)
-          }, 0)
-        }
-      })
-      nativeThreadObserver.observe(list, { childList: true, subtree: true })
-    }
-
-    function nativeCapVerificationSetStatus(root, message, error = false) {
-      const status = root?.querySelector?.('[data-cap-verification-status]')
-      if (!(status instanceof HTMLElement)) return
-      status.textContent = message
-      if (error) status.setAttribute('data-cap-error', '1')
-      else status.removeAttribute('data-cap-error')
-    }
-
-    function nativeCapVerificationLoad(root) {
-      const scriptUrl = root?.getAttribute?.('data-cap-widget-script') || ''
-      const wasmUrl = root?.getAttribute?.('data-cap-wasm-url') || ''
-      if (wasmUrl) window.CAP_CUSTOM_WASM_URL = wasmUrl
-      if (window.__capVerificationWidgetPromise) return Promise.resolve(window.__capVerificationWidgetPromise)
-      if (window.customElements?.get?.('cap-widget')) return Promise.resolve()
-      if (!scriptUrl) return Promise.resolve()
-      try {
-        const promise = import(scriptUrl)
-        window.__capVerificationWidgetPromise = promise
-        promise.catch((error) => { window.__capVerificationWidgetError = error })
-        return promise
-      } catch (error) {
-        return Promise.reject(error)
-      }
-    }
-
-    function prepareNativeCapVerification(root = document) {
-      const widgets = []
-      if (root?.matches?.('[data-cap-verification]')) widgets.push(root)
-      root?.querySelectorAll?.('[data-cap-verification]')?.forEach((widget) => widgets.push(widget))
-      for (const widget of widgets) {
-        if (widget.dataset.capVerificationBound !== '1') {
-          widget.dataset.capVerificationBound = '1'
-          const capWidget = widget.querySelector('cap-widget')
-          capWidget?.addEventListener?.('solve', () => {
-            nativeCapVerificationSetStatus(widget, '人机验证已完成，可以提交。')
-          })
-          capWidget?.addEventListener?.('error', () => {
-            nativeCapVerificationSetStatus(widget, '人机验证失败，请重新验证。', true)
-          })
-        }
-        nativeCapVerificationLoad(widget).then(() => {
-          if (!widget.isConnected) return
-          const form = widget.closest('form')
-          const token = form?.querySelector('input[name="cap_token"]')
-          if (!token || !String(token.value || '').trim()) {
-            nativeCapVerificationSetStatus(widget, '人机验证已加载，请完成验证。')
-          }
-        }).catch(() => {
-          nativeCapVerificationSetStatus(widget, '人机验证加载失败，请刷新页面后重试。', true)
-        })
-      }
-    }
-
-    function nativeCaptchaHex(buffer) {
-      return [...new Uint8Array(buffer)].map((value) => value.toString(16).padStart(2, '0')).join('')
-    }
-
-    async function solveNativeCaptcha(widget) {
-      if (!(widget instanceof Element) || !widget.isConnected) return false
-      const epoch = nativeCaptchaEpoch
-      const powInput = widget.querySelector('input[name="native_captcha_pow"]')
-      if (!powInput || powInput.value) return true
-      const status = widget.querySelector('[data-native-captcha-status]')
-      if (widget.dataset.powRequired === '0') {
-        if (status) status.textContent = '微信浏览器已免除浏览器校验'
-        return true
-      }
-      const generation = widget.dataset.powGeneration || ''
-      const prefix = widget.dataset.powPrefix || ''
-      const zeroes = Math.max(2, Math.min(5, Number(widget.dataset.powZeroes || 3)))
-      const cryptoApi = window.crypto
-      const TextEncoderCtor = window.TextEncoder || globalThis.TextEncoder
-      if (!cryptoApi?.subtle || typeof TextEncoderCtor !== 'function') {
-        if (status) status.textContent = '当前浏览器不支持浏览器校验，请换用新版浏览器'
-        return false
-      }
-      const target = '0'.repeat(zeroes)
-      const encoder = new TextEncoderCtor()
-      if (status) status.textContent = '校验准备中…'
-      for (let i = 0; i < 2000000; i += 1) {
-        const nonce = i.toString(16)
-        const digest = nativeCaptchaHex(await cryptoApi.subtle.digest('SHA-256', encoder.encode(`${prefix}:${nonce}`)))
-        if (epoch !== nativeCaptchaEpoch || !widget.isConnected) return false
-        if (digest.slice(0, zeroes) === target) {
-          if ((widget.dataset.powGeneration || '') !== generation) return false
-          powInput.value = nonce
-          if (status) status.textContent = '校验已就绪'
-          return true
-        }
-        if (i > 0 && i % 250 === 0) await new Promise((resolve) => window.setTimeout(resolve, 0))
-      }
-      if (status) status.textContent = '浏览器校验准备超时，请刷新页面后重试'
-      return false
-    }
-
-    function prepareNativeCaptcha(root = document) {
-      const widgets = []
-      if (root?.matches?.('[data-native-captcha]')) widgets.push(root)
-      root?.querySelectorAll?.('[data-native-captcha]')?.forEach((widget) => widgets.push(widget))
-      for (const widget of widgets) {
-        if (nativeCaptchaSolvers.has(widget)) continue
-        const task = solveNativeCaptcha(widget)
-        nativeCaptchaSolvers.set(widget, task)
-        task.then(
-          () => {
-            if (nativeCaptchaSolvers.get(widget) === task) nativeCaptchaSolvers.delete(widget)
-          },
-          () => {
-            if (nativeCaptchaSolvers.get(widget) === task) nativeCaptchaSolvers.delete(widget)
-          },
-        )
-      }
-    }
-
-    function clearNativeCaptchaObserver() {
-      nativeCaptchaEpoch += 1
-      nativeCaptchaObserver?.disconnect?.()
-      nativeCaptchaObserver = null
-      if (nativeCaptchaApplyTimer) {
-        window.clearTimeout(nativeCaptchaApplyTimer)
-        nativeCaptchaApplyTimer = 0
-      }
-    }
-
-    function bindNativeCaptchaObserver() {
-      if (nativeCaptchaObserver || typeof MutationObserver !== 'function' || !document.body) return
-      nativeCaptchaObserver = new MutationObserver((records) => {
-        const roots = []
-        for (const record of records) {
-          for (const node of record.addedNodes) {
-            if (!(node instanceof Element)) continue
-            const hasNativeCaptcha = node.matches('[data-native-captcha]') || !!node.querySelector('[data-native-captcha]')
-            const hasCapVerification = node.matches('[data-cap-verification]') || !!node.querySelector('[data-cap-verification]')
-            if (hasNativeCaptcha || hasCapVerification) roots.push(node)
-          }
-        }
-        if (!roots.length || nativeCaptchaApplyTimer) return
-        nativeCaptchaApplyTimer = window.setTimeout(() => {
-          nativeCaptchaApplyTimer = 0
-          roots.forEach((root) => {
-            prepareNativeCaptcha(root)
-            prepareNativeCapVerification(root)
-          })
-        }, 0)
-      })
-      nativeCaptchaObserver.observe(document.body, { childList: true, subtree: true })
-    }
-
-    function refreshNativeRouteEnhancements() {
-      observeNativeThreadTree(document.querySelector('ul.post-list.topic-post-list'))
-      prepareNativeCaptcha(document)
-      prepareNativeCapVerification(document)
-      bindNativeCaptchaObserver()
-      syncOnlineUserDots()
-      watchOnlineUserDots()
-      startOnlineUserRefresh()
-    }
-
-    function findRouteOutlet(scope = document) {
-      if (isCloudflareChallengeDocument(scope)) return null
-      const candidates = [
-        scope.querySelector?.('[data-slot~="page.before_render"]'),
-        scope.querySelector?.('main.wrap'),
-        scope.querySelector?.('main'),
-      ]
-      for (const el of candidates) {
-        if (!el || el.id === 'lsb-shell' || el.querySelector?.('#lsb-shell')) continue
-        return el
-      }
-      return null
-    }
-
-    function containsTopicPostContent(root) {
-      return !!root?.matches?.('ul.topic-post-list, li.post-entry')
-        || !!root?.querySelector?.('ul.topic-post-list, li.post-entry')
-    }
-
-    function hideNativeSidebars(root) {
-      if (!root?.querySelectorAll) return
-      for (const el of root.querySelectorAll('aside.sidebar, [data-slot~="sidebar.stack"]')) {
-        if (el.id === 'mobile-menu-drawer' || el.classList.contains('mobile-menu-drawer')) continue
-        el.classList.add('lsb-native-sidebar-hidden')
-      }
-      for (const el of nativeLeftRails(root)) el.classList.add('lsb-native-left-hidden')
-    }
-
-    function topicSpaUrl(urlLike) {
-      if (!cfg.shell || cfg.topicSpa !== true) return null
-      let url
-      try {
-        url = new URL(urlLike, location.href)
-      } catch {
-        return null
-      }
-      if (url.origin !== location.origin) return null
-      const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
-      const match = path.match(/^\/topic\/([1-9]\d*)\/?$/)
-      if (!match || !Number.isSafeInteger(Number(match[1]))) return null
-      return url
-    }
-
-    function isSpaUrl(urlLike) {
-      if (!cfg.shell) return false
-      let url
-      try {
-        url = new URL(urlLike, location.href)
-      } catch {
-        return false
-      }
-      if (url.origin !== location.origin) return false
-      const path = url.pathname.replace(/\/{2,}/g, '/') || '/'
-      // 帖子阅读路由只由 topicSpaUrl 判定；关闭试验开关时仍整页导航。
-      if (topicSpaUrl(url.href)) return true
-      if (/^\/topic(?:\/|$)/.test(path)) return false
-      // 淘帖详情仍靠站点脚本在整页生命周期里挂载；不能用软跳剥掉脚本。
-      if (/^\/topic_collection\/\d+\/?$/.test(path)) return false
-      return (
-        path === '/'
-        || path === '/index.php'
-        || path === '/topic_featured'
-        || path === '/hot_discussions'
-        || path === '/unread_topic_notice_footprint'
-        || path === '/topic_collections'
-        || path === '/topic_essence_review_list'
-        || /^\/forum\/\d+/.test(path)
-        || /^\/category\/\d+/.test(path)
-      )
-    }
-
-    function viewCacheKey(href) {
-      const u = new URL(href, location.href)
-      let path = u.pathname.replace(/\/{2,}/g, '/') || '/'
-      if (path === '/index.php') path = '/'
-      return path + u.search
-    }
-
-    function rememberView(key, entry) {
-      if (viewCache.has(key)) viewCache.delete(key)
-      viewCache.set(key, entry)
-      while (viewCache.size > VIEW_CACHE_MAX) {
-        const oldest = viewCache.keys().next().value
-        viewCache.delete(oldest)
-      }
-    }
-
-    function snapshotOutletAttrs(el) {
-      if (!(el instanceof Element)) return []
-      return [...el.attributes].map((a) => [a.name, a.value])
     }
 
     function stashView(key) {
@@ -13565,346 +15587,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         live: true,
         attrs: snapshotOutletAttrs(outlet),
       })
-    }
-
-    function takeView(key) {
-      if (topicSpaUrl(key)) return null
-      const entry = viewCache.get(key)
-      if (!entry) return null
-      viewCache.delete(key)
-      return entry
-    }
-
-    function applyView(entry, outlet) {
-      if (!outlet || !entry?.frag) return
-      canvasRestoreSiteSidebar()
-      canvasRestoreProfile()
-      restoreDetachedNativeSidebars()
-      if (entry.attrs) {
-        for (const name of [...outlet.getAttributeNames()]) outlet.removeAttribute(name)
-        for (const [name, value] of entry.attrs) {
-          if (name.startsWith('data-lsb-')) continue
-          outlet.setAttribute(name, value)
-        }
-      }
-      outlet.replaceChildren()
-      outlet.append(entry.frag)
-      canvasRebindPersistentSiteCardOrigins(outlet)
-      outlet.setAttribute('tabindex', '-1')
-      markRouteContentEnter(outlet)
-      if (entry.head) applyRouteHeadSnapshot(entry.head)
-      else if (entry.title) document.title = entry.title
-      outlet.removeAttribute('aria-busy')
-      markNative(true)
-    }
-
-    function parseOutletFrag(html) {
-      const pageDoc = new DOMParser().parseFromString(html, 'text/html')
-      const remote = findRouteOutlet(pageDoc)
-      if (!remote) return null
-      remote.querySelectorAll('script').forEach((node) => node.remove())
-      hideNativeSidebars(remote)
-      canvasStagePersistentSiteCardOrigins(remote)
-      const frag = document.createDocumentFragment()
-      for (const node of [...remote.childNodes]) frag.appendChild(document.importNode(node, true))
-      canvasRebindPersistentSiteCardOrigins(frag)
-      return { frag, title: pageDoc.title || '', head: routeHeadSnapshot(pageDoc), attrs: snapshotOutletAttrs(remote) }
-    }
-
-    function wantsHomeStashRefresh() {
-      return spaBound && cfg.shell && spaViewKey !== '/' && viewCache.has('/')
-    }
-
-    function stopHomeStashRefresh() {
-      if (homeStashTimer) {
-        window.clearTimeout(homeStashTimer)
-        homeStashTimer = 0
-      }
-    }
-
-    function scheduleHomeStashRefresh() {
-      if (!wantsHomeStashRefresh()) {
-        stopHomeStashRefresh()
-        homeStashPending = false
-        homeStashGen += 1
-        return
-      }
-      if (homeStashTimer || homeStashInflight) return
-      homeStashTimer = window.setTimeout(() => {
-        homeStashTimer = 0
-        void refreshStashedHome()
-      }, HOME_STASH_REFRESH_MS)
-    }
-
-    async function refreshStashedHome() {
-      if (!wantsHomeStashRefresh()) return
-      if (document.visibilityState === 'hidden') {
-        homeStashPending = true
-        return
-      }
-      homeStashPending = false
-      if (homeStashInflight) return homeStashInflight
-      const gen = homeStashGen
-      homeStashInflight = (async () => {
-        try {
-          const res = await api.net.raw('/', { queue: false, timeout: 15000, retry: 0 })
-          if (gen !== homeStashGen) return
-          if (!res.ok || !wantsHomeStashRefresh()) return
-          const parsed = parseOutletFrag(res.text)
-          if (!parsed || gen !== homeStashGen || !wantsHomeStashRefresh()) return
-          rememberView('/', {
-            frag: parsed.frag,
-            title: parsed.title,
-            head: parsed.head,
-            scrollX: 0,
-            scrollY: 0,
-            live: false,
-            attrs: parsed.attrs,
-          })
-        } catch {
-          /* 后台刷新失败则还回仍用旧存档 */
-        } finally {
-          homeStashInflight = null
-          if (gen === homeStashGen) scheduleHomeStashRefresh()
-        }
-      })()
-      return homeStashInflight
-    }
-
-    function onHomeStashVisible() {
-      if (document.visibilityState !== 'visible' || !homeStashPending) return
-      homeStashPending = false
-      void refreshStashedHome()
-    }
-
-    function seedHomeView() {
-      const here = viewCacheKey(location.href)
-      if (here === '/' || viewCache.has('/')) return
-      void (async () => {
-        try {
-          const res = await api.net.raw('/', { queue: false, timeout: 15000, retry: 0 })
-          if (!res.ok || viewCache.has('/') || spaViewKey === '/') return
-          const parsed = parseOutletFrag(res.text)
-          if (!parsed || viewCache.has('/') || spaViewKey === '/') return
-          rememberView('/', {
-            frag: parsed.frag,
-            title: parsed.title,
-            head: parsed.head,
-            scrollX: 0,
-            scrollY: 0,
-            live: false,
-            attrs: parsed.attrs,
-          })
-          scheduleHomeStashRefresh()
-        } catch {
-          /* 预取失败则点首页仍 GET */
-        }
-      })()
-    }
-
-    function hasUnsavedEditor() {
-      return [...document.querySelectorAll('textarea, [contenteditable="true"]')].some((el) => {
-        if (el.closest('#lsb-shell, .lsb-panel')) return false
-        const value = 'value' in el ? el.value : el.textContent
-        return String(value || '').trim().length > 0
-      })
-    }
-
-    function ensureProgress() {
-      const shell = document.getElementById('lsb-shell')
-      if (!shell) return null
-      let el = document.getElementById('lsb-shell-progress')
-      if (el) return el
-      el = document.createElement('div')
-      el.id = 'lsb-shell-progress'
-      el.setAttribute('aria-hidden', 'true')
-      el.innerHTML = '<span data-lsb-shell-progress-bar></span>'
-      shell.append(el)
-      return el
-    }
-
-    function ensureRouteAnnouncer() {
-      const shell = document.getElementById('lsb-shell')
-      if (!shell) return null
-      let announcer = shell.querySelector('#lsb-route-announcer')
-      if (announcer) return announcer
-      announcer = document.createElement('span')
-      announcer.id = 'lsb-route-announcer'
-      announcer.setAttribute('role', 'status')
-      announcer.setAttribute('aria-live', 'polite')
-      shell.append(announcer)
-      return announcer
-    }
-
-    function focusAndAnnounceRoute(source) {
-      if (source === 'history') return
-      const outlet = findRouteOutlet()
-      if (!outlet) return
-      outlet.setAttribute('tabindex', '-1')
-      try {
-        outlet.focus({ preventScroll: true })
-      } catch {
-        outlet.focus?.()
-      }
-      const announcer = ensureRouteAnnouncer()
-      if (announcer) announcer.textContent = `已打开：${document.title}`
-    }
-
-    function startProgress(serial) {
-      const el = ensureProgress()
-      if (!el) return
-      el.dataset.phase = 'idle'
-      el.style.setProperty('--lsb-shell-progress', '.08')
-      window.clearTimeout(spaProgressTimer)
-      spaProgressTimer = window.setTimeout(() => {
-        if (serial !== spaSerial) return
-        el.dataset.phase = 'loading'
-        el.style.setProperty('--lsb-shell-progress', '.72')
-      }, 90)
-    }
-
-    function finishProgress(serial) {
-      const el = document.getElementById('lsb-shell-progress')
-      window.clearTimeout(spaProgressTimer)
-      spaProgressTimer = 0
-      if (!el) return
-      if (serial !== spaSerial) return
-      el.dataset.phase = 'done'
-      el.style.setProperty('--lsb-shell-progress', '1')
-      spaProgressTimer = window.setTimeout(() => {
-        el.dataset.phase = 'idle'
-        el.style.setProperty('--lsb-shell-progress', '0')
-      }, 220)
-    }
-
-    function hideProgress(serial) {
-      window.clearTimeout(spaProgressTimer)
-      spaProgressTimer = 0
-      if (serial !== spaSerial) return
-      const el = document.getElementById('lsb-shell-progress')
-      if (!el) return
-      el.dataset.phase = 'idle'
-      el.style.setProperty('--lsb-shell-progress', '0')
-    }
-
-    function routeHeadSnapshot(source = document) {
-      const read = (selector, attribute) => source.querySelector(selector)?.getAttribute(attribute) ?? null
-      return {
-        title: source.title || '',
-        canonical: read('link[rel="canonical"]', 'href'),
-        description: read('meta[name="description"]', 'content'),
-        ogTitle: read('meta[property="og:title"]', 'content'),
-      }
-    }
-
-    function applyRouteHeadSnapshot(snapshot) {
-      if (!snapshot) return
-      document.title = String(snapshot.title || '')
-      const fields = [
-        ['link[rel="canonical"]', 'href', 'canonical'],
-        ['meta[name="description"]', 'content', 'description'],
-        ['meta[property="og:title"]', 'content', 'ogTitle'],
-      ]
-      for (const [selector, attribute, key] of fields) {
-        const node = document.querySelector(selector)
-        if (!node) continue
-        const value = snapshot[key]
-        if (value === null || value === undefined) node.removeAttribute(attribute)
-        else node.setAttribute(attribute, String(value))
-      }
-    }
-
-    function captureRouteHead() {
-      return routeHeadSnapshot(document)
-    }
-
-    function syncRouteHead(pageDoc) {
-      const snapshot = routeHeadSnapshot(pageDoc)
-      applyRouteHeadSnapshot(snapshot)
-      return snapshot
-    }
-
-    function markRouteContentEnter(outlet) {
-      if (!outlet) return
-      outlet.removeAttribute('data-lsb-route-content-enter')
-      void outlet.offsetWidth
-      outlet.setAttribute('data-lsb-route-content-enter', '')
-    }
-
-    function topicResponseMatches(pageDoc, finalUrl) {
-      const target = topicSpaUrl(finalUrl)
-      if (!target) return true
-      const targetId = Number((target.pathname.match(/^\/topic\/(\d+)/) || [])[1])
-      if (!Number.isSafeInteger(targetId) || targetId <= 0) return false
-      const canonical = pageDoc.querySelector('link[rel="canonical"]')?.getAttribute('href') || ''
-      if (!canonical) return false
-      let canonicalUrl
-      try {
-        canonicalUrl = new URL(canonical, finalUrl)
-      } catch {
-        return false
-      }
-      const canonicalTopic = topicSpaUrl(canonicalUrl.href)
-      const canonicalId = Number((canonicalTopic?.pathname.match(/^\/topic\/(\d+)/) || [])[1])
-      if (!canonicalTopic || canonicalId !== targetId) return false
-      const remote = findRouteOutlet(pageDoc)
-      const list = remote?.querySelector('ul.topic-post-list')
-      const posts = list?.querySelectorAll('li.post-entry:not(.reply-pin-duplicate)')
-      return !!remote && !!list && !!posts?.length
-    }
-
-    function syncOutletAttrs(outlet, remote) {
-      for (const attr of [...outlet.attributes]) {
-        if (attr.name.startsWith('data-lsb-') || attr.name === 'aria-busy') continue
-        outlet.removeAttribute(attr.name)
-      }
-      for (const attr of [...remote.attributes]) {
-        if (attr.name.startsWith('data-lsb-')) continue
-        outlet.setAttribute(attr.name, attr.value)
-      }
-    }
-
-    function commitRoute(pageDoc, remoteOutlet, targetUrl, historyMode) {
-      const outlet = findRouteOutlet()
-      if (!outlet || !remoteOutlet) throw new Error('no outlet')
-      /* Hide any native chrome before the old outlet is detached.  The shell
-         remains the only visible navigation layer for the whole transaction. */
-      markNative(true)
-      canvasStopSidebarWatch()
-      canvasRestoreSiteSidebar()
-      canvasRestoreProfile()
-      restoreDetachedNativeSidebars()
-      remoteOutlet.querySelectorAll('script').forEach((node) => node.remove())
-      hideNativeSidebars(remoteOutlet)
-      canvasStagePersistentSiteCardOrigins(remoteOutlet)
-      const kids = [...remoteOutlet.childNodes].map((node) => document.importNode(node, true))
-      applyHistory(targetUrl, historyMode)
-      syncRouteHead(pageDoc)
-      syncOutletAttrs(outlet, remoteOutlet)
-      outlet.replaceChildren(...kids)
-      syncOnlineUserBoot(pageDoc)
-      canvasRebindPersistentSiteCardOrigins(outlet)
-      outlet.setAttribute('tabindex', '-1')
-      markRouteContentEnter(outlet)
-      outlet.removeAttribute('aria-busy')
-      markNative(true)
-    }
-
-    function notifyRoute() {
-      spaIgnorePop = true
-      try {
-        const view = document.defaultView
-        const Ev = view.PopStateEvent || view.Event
-        view.dispatchEvent(new Ev('popstate'))
-      } catch {
-        try {
-          window.dispatchEvent(new Event('popstate'))
-        } catch {
-          /* 基座还有 url 轮询兜底 */
-        }
-      } finally {
-        spaIgnorePop = false
-      }
     }
 
     function topicTargetId(urlLike = location.href) {
@@ -13949,8 +15631,8 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
     }
 
     function currentScrollRoot() {
-      if (canvasScrollTarget instanceof Element) return canvasScrollTarget
-      if (contentScroller instanceof Element) return contentScroller
+      if (canvasScrollController.target instanceof Element) return canvasScrollController.target
+      if (contentController.scroller instanceof Element) return contentController.scroller
       return null
     }
 
@@ -13981,81 +15663,6 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         return
       }
       window.scrollTo(x, y)
-    }
-
-    function historyEntryState(url, index, x, y) {
-      const prior = history.state && typeof history.state === 'object' ? history.state : {}
-      return {
-        ...prior,
-        lsbShellSpa: true,
-        lsbShellSpaIndex: index,
-        lsbShellSpaUrl: url,
-        lsbScrollX: Number(x) || 0,
-        lsbScrollY: Number(y) || 0,
-      }
-    }
-
-    function readHistoryIndex(state = history.state) {
-      const value = Number(state?.lsbShellSpaIndex)
-      return Number.isSafeInteger(value) && value >= 0 ? value : null
-    }
-
-    function initializeHistoryEntry() {
-      const existingIndex = readHistoryIndex()
-      spaHistoryIndex = existingIndex ?? 0
-      try {
-        history.replaceState(
-          historyEntryState(location.href, spaHistoryIndex, currentScrollX(), currentScrollY()),
-          '',
-          location.href,
-        )
-      } catch {
-        /* history 不可用时不阻断正文导航 */
-      }
-    }
-
-    function rememberHistoryScroll() {
-      const index = readHistoryIndex() ?? spaHistoryIndex
-      try {
-        history.replaceState(
-          historyEntryState(location.href, index, currentScrollX(), currentScrollY()),
-          '',
-          location.href,
-        )
-        spaHistoryIndex = index
-      } catch {
-        /* history 不可用时不阻断正文导航 */
-      }
-    }
-
-    function historyScrollX() {
-      const value = Number(history.state?.lsbScrollX)
-      return Number.isFinite(value) && value >= 0 ? value : 0
-    }
-
-    function historyScrollY() {
-      const value = Number(history.state?.lsbScrollY)
-      return Number.isFinite(value) && value >= 0 ? value : 0
-    }
-
-    function applyHistory(target, mode) {
-      if (mode === 'none') return
-      const currentIndex = readHistoryIndex() ?? spaHistoryIndex
-      const nextIndex = mode === 'replace' ? currentIndex : currentIndex + 1
-      const state = historyEntryState(target.href, nextIndex, 0, 0)
-      try {
-        if (mode === 'replace') history.replaceState(state, '', target.href)
-        else history.pushState(state, '', target.href)
-        spaHistoryIndex = nextIndex
-      } catch {
-        /* history 不可用时仍换 DOM，地址栏可能落后 */
-      }
-    }
-
-    function fallbackRoute(mode, targetUrl) {
-      if (mode === 'none') location.reload()
-      else if (mode === 'replace') location.replace(targetUrl)
-      else location.assign(targetUrl)
     }
 
     function perfHref() {
@@ -14101,642 +15708,86 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
       }
     }
 
-    let timelineEmitSec = -1
-    let timelineEmitN = 0
-    function perfEmitTimeline(ms) {
-      if (ms < 8) return
-      const sec = Math.floor(Date.now() / 1000)
-      if (sec !== timelineEmitSec) {
-        timelineEmitSec = sec
-        timelineEmitN = 0
-      }
-      if (timelineEmitN >= 2) return
-      timelineEmitN += 1
-      perfEmit('timeline.update', ms)
-    }
-
-    async function navigateSpa(href, options = {}) {
-      const settings = { historyMode: 'push', force: false, source: 'user', ...options }
-      let target
-      try {
-        target = new URL(href, location.href)
-      } catch {
-        return false
-      }
-      if (!isSpaUrl(target.href)) return false
-      if (!settings.force && hasUnsavedEditor() && !window.confirm('当前编辑内容尚未保存，确定离开吗？')) {
-        return false
-      }
-      const same = target.pathname === location.pathname && target.search === location.search
-      if (same && !settings.force) {
-        if (target.hash) {
-          const id = decodeURIComponent(target.hash.slice(1))
-          document.getElementById(id)?.scrollIntoView()
-        }
-        return true
-      }
-
-      if (settings.historyMode !== 'none') rememberHistoryScroll()
-      const fromKey = spaViewKey
-      unbindHomeInfiniteScroll()
-      const destKey = viewCacheKey(target.href)
-      const cached = takeView(destKey)
-      const serial = ++spaSerial
-      spaAbortController?.abort()
-      const requestController = new AbortController()
-      spaAbortController = requestController
-      const tTotal = api.hasHandler('perf-probe:record') ? performance.now() : 0
-      const outlet = findRouteOutlet()
-      holdSpaRouteChrome(serial)
-      markNative(true)
-      outlet?.setAttribute('aria-busy', 'true')
-      setRoutePhase(serial, 'preparing')
-      startProgress(serial)
-      let committed = false
-      try {
-        if (cached) {
-          setRoutePhase(serial, 'committing')
-          stashView(fromKey)
-          perfSpan('spa.commit', () => applyView(cached, findRouteOutlet() || outlet))
-          committed = true
-          applyHistory(target, settings.historyMode)
-          spaViewKey = destKey
-          scheduleHomeStashRefresh()
-          perfSpan('spa.fillShell', () => {
-            applyMarkers()
-            fillShell()
-          })
-          spaFilledSerial = serial
-          window.clearTimeout(refreshTimer)
-          refreshTimer = 0
-          hideProgress(serial)
-          try {
-            scrollCurrentRootTo(
-              settings.historyMode === 'none' ? historyScrollX() : 0,
-              settings.historyMode === 'none' ? historyScrollY() : 0,
-            )
-          } catch {
-            /* jsdom 没有视口 */
-          }
-          if (tTotal) perfEmit('spa.total', performance.now() - tTotal)
-          afterPaint(() => {
-            if (serial !== spaSerial) return
-            setRoutePhase(serial, 'settling')
-            try {
-              perfSpan('spa.notify', () => {
-                notifyRoute()
-                if (!refreshRouteEnhancements(serial)) return
-                syncShellRoute()
-                scrollToTopicTarget(target.href)
-                focusAndAnnounceRoute(settings.source)
-              })
-            } finally {
-              settleSpaRoute(serial)
-            }
-            try {
-              api.emitGlobal('spa:view-restored', { href: destKey, live: !!cached.live })
-            } catch {
-              /* 实时流缺席不得打断壳 */
-            }
-          })
-          return true
-        }
-
-        setRoutePhase(serial, 'fetching')
-        const res = await perfSpanAsync('spa.fetch', () =>
-          api.net.raw(`${target.pathname}${target.search}`, {
-            queue: false,
-            timeout: 15000,
-            retry: 0,
-            signal: requestController.signal,
-          }),
-        )
-        if (serial !== spaSerial) return false
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const finalUrl = new URL(res.url || target.href, target.href)
-        if (!finalUrl.hash && target.hash) finalUrl.hash = target.hash
-        if (!isSpaUrl(finalUrl.href)) {
-          hideProgress(serial)
-          outlet?.removeAttribute('aria-busy')
-          settleSpaRoute(serial)
-          fallbackRoute(settings.historyMode, finalUrl.href)
-          return false
-        }
-        const pageDoc = perfSpan('spa.parse', () => new DOMParser().parseFromString(res.text, 'text/html'))
-        const remoteOutlet = findRouteOutlet(pageDoc)
-        if (!remoteOutlet) throw new Error('no remote outlet')
-        if (!topicResponseMatches(pageDoc, finalUrl)) throw new Error('invalid topic response')
-        setRoutePhase(serial, 'committing')
-        stashView(fromKey)
-        perfSpan('spa.commit', () => {
-          commitRoute(pageDoc, remoteOutlet, finalUrl, settings.historyMode)
-        })
-        committed = true
-        spaViewKey = viewCacheKey(finalUrl.href)
-        scheduleHomeStashRefresh()
-        perfSpan('spa.fillShell', () => {
-          applyMarkers()
-          fillShell()
-        })
-        spaFilledSerial = serial
-        window.clearTimeout(refreshTimer)
-        refreshTimer = 0
-        finishProgress(serial)
-        try {
-          scrollCurrentRootTo(
-            settings.historyMode === 'none' ? historyScrollX() : 0,
-            settings.historyMode === 'none' ? historyScrollY() : 0,
-          )
-        } catch {
-          /* jsdom 没有视口 */
-        }
-        if (tTotal) perfEmit('spa.total', performance.now() - tTotal)
-        afterPaint(() => {
-          if (serial !== spaSerial) return
-          setRoutePhase(serial, 'settling')
-          try {
-            perfSpan('spa.notify', () => {
-              notifyRoute()
-              if (!refreshRouteEnhancements(serial)) return
-              syncShellRoute()
-              scrollToTopicTarget(finalUrl.href)
-              focusAndAnnounceRoute(settings.source)
-            })
-          } finally {
-            settleSpaRoute(serial)
-          }
-        })
-        return true
-      } catch (err) {
-        if (serial !== spaSerial) return false
-        hideProgress(serial)
-        settleSpaRoute(serial)
-        outlet?.removeAttribute('aria-busy')
-        const aborted = requestController.signal.aborted || err?.name === 'AbortError'
-        if (!committed && !aborted) fallbackRoute(settings.historyMode, target.href)
-        return false
-      } finally {
-        if (spaAbortController === requestController) spaAbortController = null
-      }
-    }
-
-    function onSpaClick(event) {
-      if (event.defaultPrevented || event.button !== 0) return
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-      const anchor = event.target?.closest?.('a[href]')
-      if (
-        !anchor
-        || anchor.hasAttribute('download')
-        || (anchor.target && anchor.target !== '_self')
-        || /\bexternal\b/i.test(anchor.rel || '')
-        || anchor.matches('[data-method], [data-confirm], [data-no-spa]')
-      ) return
-      const currentTopic = !!topicSpaUrl(location.href)
-      const targetTopic = !!topicSpaUrl(anchor.href)
-      if (anchor.closest('.pagination-bar, .pagination') && (!currentTopic || !targetTopic)) return
-      if (!isSpaUrl(anchor.href)) return
-      if (anchor.href === location.href) {
-        if (cancelPendingSpaNavigation()) event.preventDefault()
-        return
-      }
-      event.preventDefault()
-      void navigateSpa(anchor.href)
-    }
-
-    function onSpaSubmit(event) {
-      if (event.defaultPrevented || !cfg.shell) return
-      const form = event.target instanceof HTMLFormElement ? event.target : null
-      if (!form || String(form.method || 'get').toLowerCase() !== 'get') return
-      if (form.target && form.target !== '_self') return
-      if (form.matches('[data-no-spa], [data-confirm], [data-method]')) return
-      let target
-      try {
-        target = new URL(form.action || location.href, location.href)
-        const data = event.submitter ? new FormData(form, event.submitter) : new FormData(form)
-        target.search = new URLSearchParams(data).toString()
-      } catch {
-        return
-      }
-      if (!isSpaUrl(target.href)) return
-      event.preventDefault()
-      void navigateSpa(target.href)
-    }
-
-    function onSpaPop() {
-      if (spaIgnorePop || !cfg.shell) return
-      const targetIndex = readHistoryIndex()
-      if (spaHistoryRollbackIndex !== null) {
-        const rollbackIndex = spaHistoryRollbackIndex
-        spaHistoryRollbackIndex = null
-        if (targetIndex === rollbackIndex) {
-          spaHistoryIndex = rollbackIndex
-          return
-        }
-      }
-      const previousIndex = spaHistoryIndex
-      if (hasUnsavedEditor() && !window.confirm('当前编辑内容尚未保存，确定离开吗？')) {
-        spaHistoryRollbackIndex = previousIndex
-        const delta = targetIndex === null ? 1 : previousIndex - targetIndex
-        try {
-          history.go(delta)
-        } catch {
-          spaHistoryRollbackIndex = null
-        }
-        return
-      }
-      if (targetIndex !== null) spaHistoryIndex = targetIndex
-      if (!isSpaUrl(location.href)) {
-        // 软跳文档被后退到交易页/帖子等整页地址时，主栏还是列表，必须重开。
-        // 交易页本身就是整页打开的，不能见 popstate 就 reload，否则会刷死。
-        let paintedSpa = false
-        try {
-          paintedSpa = isSpaUrl(new URL(spaViewKey || '/', location.origin).href)
-        } catch {
-          paintedSpa = false
-        }
-        if (paintedSpa) location.reload()
-        return
-      }
-      let targetHref = location.href
-      try {
-        const recorded = new URL(history.state?.lsbShellSpaUrl || '', location.href)
-        if (recorded.origin === location.origin && recorded.href === location.href) targetHref = recorded.href
-      } catch {
-        /* 地址栏仍是该历史项的权威目标 */
-      }
-      void navigateSpa(targetHref, { historyMode: 'none', force: true, source: 'history' })
-    }
-
-    function clearSpaTransaction() {
-      spaSerial += 1
-      spaHistoryRollbackIndex = null
-      const controller = spaAbortController
-      spaAbortController = null
-      controller?.abort()
-      window.clearTimeout(spaProgressTimer)
-      spaProgressTimer = 0
-      findRouteOutlet()?.removeAttribute('aria-busy')
-      clearSpaRouteChromeHold()
-      const root = document.documentElement
-      delete root.dataset.lsbRoutePhase
-      const progress = document.getElementById('lsb-shell-progress')
-      if (progress) {
-        progress.dataset.phase = 'idle'
-        progress.style.setProperty('--lsb-shell-progress', '0')
-      }
-    }
-
-    function cancelPendingSpaNavigation() {
-      const root = document.documentElement
-      const pending = !!spaAbortController
-        || root.hasAttribute('data-lsb-route-phase')
-        || root.classList.contains(SPA_ROUTE_PENDING_CLASS)
-      if (!pending) return false
-      clearSpaTransaction()
-      try {
-        spaViewKey = viewCacheKey(location.href)
-      } catch {
-        spaViewKey = ''
-      }
-      if (cfg.shell) {
-        applyMarkers()
-        if (document.getElementById('lsb-shell')) fillShell()
-        else syncHomeInfiniteScroll()
-        refreshNativeRouteEnhancements()
-      }
-      return true
-    }
-
-    function onSpaPageShow(event) {
-      if (event.persisted) clearSpaTransaction()
-    }
-
-    function bindSpa() {
-      if (spaBound) return
-      spaBound = true
-      try {
-        history.scrollRestoration = 'manual'
-      } catch {
-        /* ignore */
-      }
-      document.addEventListener('click', onSpaClick, true)
-      document.addEventListener('submit', onSpaSubmit, true)
-      window.addEventListener('popstate', onSpaPop)
-      window.addEventListener('pageshow', onSpaPageShow)
-      document.addEventListener('visibilitychange', onHomeStashVisible)
-      initializeHistoryEntry()
-      spaViewKey = viewCacheKey(location.href)
-      seedHomeView()
-      scheduleHomeStashRefresh()
-    }
-
-    function unbindSpa() {
-      if (!spaBound) return
-      spaBound = false
-      clearSpaTransaction()
-      document.removeEventListener('click', onSpaClick, true)
-      document.removeEventListener('submit', onSpaSubmit, true)
-      window.removeEventListener('popstate', onSpaPop)
-      window.removeEventListener('pageshow', onSpaPageShow)
-      document.removeEventListener('visibilitychange', onHomeStashVisible)
-      stopHomeStashRefresh()
-      homeStashPending = false
-      homeStashGen += 1
-      document.getElementById('lsb-shell-progress')?.remove()
-    }
-
-    function unmountShellLayer({ preserveBootStyle = false } = {}) {
-      clearSpaTransaction()
-      clearNativeThreadObserver()
-      unbindNativeThreadLifecycle()
-      clearNativeCaptchaObserver()
-      if (timelineRaf) {
-        const cancel = window.cancelAnimationFrame || window.clearTimeout
-        cancel(timelineRaf)
-        timelineRaf = 0
-      }
-      clearSpaRouteChromeHold()
-      delete document.documentElement.dataset.lsbRoutePhase
-      unbindWindow()
-      unbindWindowInteractions()
-      unbindAsideResize()
-      stopOnlineWatch()
-      stopExtrasWatch()
-      destroyAsideViews()
-      unmountCanvas()
-      unmountShellWindows()
-      mediaGeneration += 1
-      backgroundSpecKey = ''
-      fontSpecKey = ''
-      releaseBackgroundVideo()
-      releaseBackgroundImage()
-      releaseFontFace()
-      mediaDbPromise = null
-      restoreAsideCards()
-      restoreAsidePersistentCards()
-      restoreUserCard()
-      restoreTopExtras()
-      restoreThemeToggle()
-      restoreSearch()
-      document.getElementById('lsb-shell')?.remove()
-      markNative(false)
-
-      const root = document.documentElement
-      root.removeAttribute('data-lsb-shell-mode')
-      root.classList.remove(
-        'lsb-skin-shell-on', 'lsb-skin-shell-home', 'lsb-skin-shell-topic', 'lsb-skin-shell-user', 'lsb-skin-shell-windowed',
-        'lsb-skin-glass-on', 'lsb-skin-video-on', 'lsb-skin-image-on', 'lsb-canvas-mode',
-        'lsb-canvas-reduced-motion', 'lsb-canvas-reduced-transparency',
-        'lsb-canvas-boot', 'lsb-shell-boot',
-      )
-      for (const name of ['home', 'forum', 'topic', 'user', 'settings', 'page']) root.classList.remove(`lsb-canvas-page-${name}`)
-      for (const prop of shellTokenProps) root.style.removeProperty(prop)
-      shellTokenProps.clear()
-      root.style.removeProperty('--lsb-shell-font-family')
-      if (!preserveBootStyle) document.getElementById('lsb-shell-boot-style')?.remove()
-      document.getElementById('lsb-shell-boot-frame')?.remove()
-      mountedUiMode = null
-    }
-
-    function teardownShell() {
-      window.clearTimeout(refreshTimer)
-      refreshTimer = 0
-      unbindUiModeResize()
-      unbindCloudflareChallengeWatch()
-      unbindSpa()
-      unbindHomeInfiniteScroll()
-      stopOnlineUserDots()
-      stopOnlineUserRefresh()
-      unmountShellLayer()
-      viewCache.clear()
-      spaViewKey = ''
-    }
-
-    function refreshShell() {
-      refreshTimer = 0
-      if (!cfg.shell) {
-        const scrollPosition = pendingUiModeScroll
-        pendingUiModeScroll = null
-        teardownShell()
-        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
-        return
-      }
-
-      bindCloudflareChallengeWatch()
-      if (isCloudflareChallengeDocument(document)) {
-        const scrollPosition = pendingUiModeScroll
-        pendingUiModeScroll = null
-        unbindUiModeResize()
-        unbindSpa()
-        unbindHomeInfiniteScroll()
-        stopOnlineUserRefresh()
-        unmountShellLayer({ preserveBootStyle: true })
-        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
-        return
-      }
-
-      bindUiModeResize()
-      const mode = effectiveUiMode()
-      const targetMode = mode === 'ios27' || asideWide() ? mode : null
-      const modeChanged = mountedUiMode !== targetMode
-      const scrollPosition = pendingUiModeScroll || (modeChanged
-        ? { x: currentScrollX(), y: currentScrollY() }
-        : null)
-      pendingUiModeScroll = null
-      const hadLayer = mountedUiMode !== null || !!document.getElementById('lsb-shell')
-      if (modeChanged && hadLayer) unmountShellLayer()
-
-      if (!targetMode) {
-        unbindHomeInfiniteScroll()
-        restyle()
-        refreshNativeRouteEnhancements()
-        bindSpa()
-        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
-        return
-      }
-
-      restyle()
-      markNative(true)
-      bindAsideResize()
-      try {
-        const mounted = targetMode === 'ios27' ? mountCanvas() : fillShell()
-        if (!(mounted instanceof Element)) throw new Error(`${targetMode} shell did not mount`)
-        mountedUiMode = targetMode
-        refreshNativeRouteEnhancements()
-        bindSpa()
-        syncShellMedia()
-        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
-      } catch (error) {
-        unbindHomeInfiniteScroll()
-        unmountShellLayer()
-        bindSpa()
-        if (scrollPosition) scrollCurrentRootTo(scrollPosition.x, scrollPosition.y)
-        if (typeof console !== 'undefined' && typeof console.warn === 'function') {
-          console.warn('[LSB skin] shell mount failed; restored native page', error)
-        }
-      }
-    }
-
-    function afterPaint(fn) {
-      // One rAF runs before paint; the second lets the committed outlet paint first.
-      // Hidden and prerendered documents may pause rAF, so notify without waiting for an invisible frame.
-      const requestFrame = window.requestAnimationFrame
-      if (typeof requestFrame !== 'function' || document.visibilityState !== 'visible') {
-        queueMicrotask(fn)
-        return
-      }
-      requestFrame.call(window, () => requestFrame.call(window, fn))
-    }
-
-    function scheduleRefresh(fromRoute) {
-      if (fromRoute && spaFilledSerial && spaFilledSerial === spaSerial) return
-      window.clearTimeout(refreshTimer)
-      refreshTimer = window.setTimeout(refreshShell, 50)
-    }
-
-    function applyAll() {
-      restyle()
-      refreshShell()
-    }
-
-    function renderSkinSettings(host) {
-      const section = document.createElement('section')
-      section.className = 'lsb-skin-media-settings'
-      const heading = document.createElement('h3')
-      heading.textContent = '本地资源与窗口布局'
-      section.append(heading)
-      const hint = document.createElement('p')
-      hint.className = 'lsb-row-desc'
-      hint.textContent = '视频单文件不超过 50MB，字体单文件不超过 10MB；二进制只保存在本机 IndexedDB。'
-      section.append(hint)
-
-      const appendFile = (kind, labelText, accept, configKey, enabledKey = '') => {
-        const label = document.createElement('label')
-        label.className = 'lsb-field'
-        const title = document.createElement('span')
-        title.textContent = labelText
-        const input = document.createElement('input')
-        input.type = 'file'
-        input.accept = accept
-        input.addEventListener('change', async () => {
-          const file = input.files?.[0]
-          if (!file || !api.ui.shellMedia) return
-          const check = api.ui.shellMedia.validateMediaFile(file, { kind })
-          if (!check.ok) {
-            api.ui.toast?.(kind === 'video' ? '视频文件超过 50MB 或类型不受支持' : kind === 'image' ? '图片文件超过 20MB 或类型不受支持' : '字体文件超过 10MB 或类型不受支持', { type: 'error' })
-            input.value = ''
-            return
-          }
-          try {
-            const db = await ensureMediaDb()
-            await api.ui.shellMedia.writeMedia({ db, kind, key: mediaOriginKey(kind), value: file })
-            api.saveConfig({
-              [configKey]: mediaOriginKey(kind),
-              ...(enabledKey ? { [enabledKey]: true } : {}),
-              ...(kind === 'video' ? { backgroundVideoUrl: '', backgroundImageUrl: '', backgroundImageLocalKey: '' } : {}),
-              ...(kind === 'image' ? { backgroundVideoEnabled: false, backgroundVideoUrl: '', backgroundVideoLocalKey: '' } : {}),
-            })
-            cfg = api.config()
-            applyAll()
-            api.ui.toast?.('本地资源已保存', { type: 'success' })
-          } catch {
-            api.ui.toast?.('本地资源保存失败', { type: 'error' })
-          } finally {
-            input.value = ''
-          }
-        })
-        label.append(title, input)
-        section.append(label)
-      }
-
-      appendFile('video', '选择本地视频', 'video/*', 'backgroundVideoLocalKey', 'backgroundVideoEnabled')
-      appendFile('image', '选择静态图片', 'image/*', 'backgroundImageLocalKey')
-      appendFile('font', '选择本地字体', '.woff2,.woff,.ttf,.otf,font/*', 'fontLocalKey')
-
-      const actions = document.createElement('div')
-      actions.className = 'lsb-actions'
-      const arrange = document.createElement('button')
-      arrange.type = 'button'
-      arrange.className = 'lsb-btn'
-      arrange.textContent = '一键整理窗口'
-      arrange.addEventListener('click', () => api.ui.shellWindowArrange?.())
-      const reset = document.createElement('button')
-      reset.type = 'button'
-      reset.className = 'lsb-btn'
-      reset.textContent = '恢复默认布局'
-      reset.addEventListener('click', () => api.ui.shellWindowReset?.())
-      actions.append(arrange, reset)
-      section.append(actions)
-      host.append(section)
-    }
-
-    api.ui.configTab({ name: '界面精修', order: 80, render: renderSkinSettings })
-
-    let unregMenu = () => {}
-    function syncGmMenu() {
-      unregMenu()
-      const on = !!api.config().shell
-      unregMenu = api.ui.menuCommand(on ? '氢壳：关闭，回到原版界面' : '氢壳：开启', () => {
-        api.saveConfig({ shell: !api.config().shell })
-      })
-    }
-    syncGmMenu()
-
-    api.on('config:changed:skin', () => {
-      const previousMode = effectiveUiMode()
-      const previousShell = cfg.shell
-      const scrollPosition = { x: currentScrollX(), y: currentScrollY() }
-      cfg = api.config()
-      if (effectiveUiMode() !== previousMode || cfg.shell !== previousShell) pendingUiModeScroll = scrollPosition
-      readCanvasState()
-      invalidateTools()
-      applyAll()
-      syncGmMenu()
+    const runtimeController = createSkinRuntimeController({
+      window, document, configController, timelineController, mediaController,
+      onlineController, viewCacheController, spaController, canvasHostController, shellTokenProps,
+      getSettingsController: () => settingsController,
+      challengeAttr: CLOUDFLARE_CHALLENGE_ATTR, isChallengeDocument: isCloudflareChallengeDocument,
+      hooks: {
+        asideWide,
+        restyle,
+        markNative,
+        currentScrollX,
+        currentScrollY,
+        scrollCurrentRootTo,
+        clearNativeRouteEnhancements,
+        unbindWindow,
+        unbindWindowInteractions,
+        unbindAsideResize,
+        stopOnlineWatch,
+        stopExtrasWatch,
+        destroyAsideViews,
+        unmountCanvas,
+        unmountShellWindows,
+        restoreAsideCards,
+        restoreAsidePersistentCards,
+        restoreUserCard,
+        restoreTopExtras,
+        restoreThemeToggle,
+        restoreSearch,
+        unbindHomeInfiniteScroll,
+        refreshNativeRouteEnhancements,
+        bindAsideResize,
+        mountCanvas,
+        fillShell,
+        syncHomeInfiniteScroll,
+        syncShellMedia,
+        adoptSearch,
+        shellSearchHost,
+        adoptThemeToggle,
+        adoptUserCard,
+        findRouteOutlet,
+        canvasMountProfile,
+        canvasSurface,
+        canvasSyncSiteSidebar,
+      },
     })
+    const { applyAll, scheduleRefresh } = runtimeController
+
+    const settingsController = createSkinSettingsController({
+      document, ui: api.ui, getConfig: () => api.config(), saveConfig: (patch) => api.saveConfig(patch),
+      configController, mediaController, applyAll,
+    })
+    api.ui.configTab({ name: '界面精修', order: 80, render: settingsController.render })
+
+    settingsController.syncMenu()
+
+    api.on('config:changed:skin', runtimeController.onConfigChanged)
     api.on('route:changed', () => {
       scheduleRefresh(true)
     })
     api.on('plugin:activated', () => {
-      invalidateTools()
       scheduleRefresh(false)
     })
     api.on('plugin:disabled', () => {
-      invalidateTools()
       scheduleRefresh(false)
     })
     api.on('topic:posts-added', scheduleTimeline)
     api.dom.each(
       '.dark-mode-control, [data-themes-mode-toggle], a.color-scheme-top-link, a.search-page-link, form.search-form, form.meilisearch-search-top-form, form[role="search"][aria-label="站内搜索"], .sidebar-card.user-card',
-      () => {
-        if (!cfg.shell) return
-        adoptSearch(shellSearchHost())
-        adoptThemeToggle(document.querySelector('[data-lsb-shell-theme]'))
-        adoptUserCard(document.querySelector('[data-lsb-shell-me]'))
-        if (mountedUiMode === 'ios27') {
-          const outlet = findRouteOutlet()
-          canvasMountProfile(outlet)
-          const site = canvasSurface('site-card')
-          if (canvasActiveSheet === 'site-card' || site?.dataset.surfaceMode === 'rail') canvasSyncSiteSidebar(site)
-        }
-      },
+      runtimeController.onNativeNode,
     )
 
-    api.onDispose(() => {
-      unregMenu()
-      teardownShell()
-      const root = document.documentElement
-      for (const c of [...root.classList].filter((x) => x.startsWith('lsb-skin-'))) root.classList.remove(c)
-      document.getElementById('lsb-skin-style')?.remove()
-    })
+    api.onDispose(runtimeController.dispose)
 
     api.handle('skin:debug', () => ({
-      active: { ...cfg },
+      active: { ...configController.config },
       markers: [...document.documentElement.classList].filter((c) => c.startsWith('lsb-skin-')),
       styleBytes: (document.getElementById('lsb-skin-style')?.textContent || '').length,
       themesPluginDetected: themesPresent,
       canvas: canvasDebugSnapshot(),
       shell: {
-        on: !!cfg.shell,
+        on: !!configController.config.shell,
         mounted: !!document.getElementById('lsb-shell'),
         boards: collectBoards().length,
         location: locationText(),
@@ -14744,8 +15795,8 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
         me: !!document.querySelector('#lsb-shell .sidebar-card.user-card'),
         extras: document.querySelectorAll('.lsb-shell-extras a').length,
         aside: document.querySelectorAll('#lsb-shell-aside .sidebar-card').length,
-        spa: spaBound,
-        windows: shellWindowRegistry.map((item) => {
+        spa: spaController.bound,
+        windows: windowController.registry.map((item) => {
           const host = shellHost(item.id)
           const rect = host?.getBoundingClientRect?.()
           const body = host?.querySelector?.('[data-lsb-shell-window-body]')
@@ -14756,8 +15807,8 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
             scrollTop: Number(body?.scrollTop || 0),
           }
         }),
-        layoutKey: shellWindowLayout ? shellLayoutApi.layoutStorageKey(location.origin, shellLayoutApi.widthBucket(shellViewport(shellWorkspace()).width)) : '',
-        scrollBridge: !!scrollBridge,
+        layoutKey: windowController.layout ? shellLayoutApi.layoutStorageKey(location.origin, shellLayoutApi.widthBucket(shellViewport(shellWorkspace()).width)) : '',
+        scrollBridge: !!contentController.bridge,
       },
     }))
 
@@ -15696,7 +16747,7 @@ html.lsb-canvas-boot{background-image:url(${JSON.stringify(url)});background-siz
   const manifest = {
     id: 'suite',
     name: '重装套件',
-    version: '2.0.36',
+    version: '2.0.64',
     description: '全家桶总览：各模块状态卡片、快捷开关、跨模块关键指标',
     author: 'you',
     requires: { base: '^2.4.1' },
